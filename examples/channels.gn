@@ -1,0 +1,7 @@
+-- Channel communication example
+
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch 42) in
+    let result = Channel.recv ch in
+    print result

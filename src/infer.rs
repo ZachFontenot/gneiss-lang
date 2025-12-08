@@ -1,0 +1,779 @@
+//! Hindley-Milner type inference
+
+use crate::ast::*;
+use crate::types::*;
+use std::collections::HashMap;
+use std::rc::Rc;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum TypeError {
+    #[error("unbound variable: {0}")]
+    UnboundVariable(String),
+    #[error("type mismatch: expected {expected}, found {found}")]
+    TypeMismatch { expected: Type, found: Type },
+    #[error("occurs check failed: {0} occurs in {1}")]
+    OccursCheck(TypeVarId, Type),
+    #[error("unknown constructor: {0}")]
+    UnknownConstructor(String),
+    #[error("pattern type mismatch")]
+    PatternMismatch,
+    #[error("non-exhaustive patterns")]
+    NonExhaustivePatterns,
+}
+
+pub struct Inferencer {
+    /// Counter for generating fresh type variables
+    next_var: TypeVarId,
+    /// Current let-nesting level (for polymorphism)
+    level: u32,
+    /// Type context for constructors
+    type_ctx: TypeContext,
+}
+
+impl Inferencer {
+    pub fn new() -> Self {
+        Self {
+            next_var: 0,
+            level: 0,
+            type_ctx: TypeContext::new(),
+        }
+    }
+
+    /// Generate a fresh type variable
+    fn fresh_var(&mut self) -> Type {
+        let id = self.next_var;
+        self.next_var += 1;
+        Type::new_var(id, self.level)
+    }
+
+    /// Unify two types
+    fn unify(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError> {
+        let t1 = t1.resolve();
+        let t2 = t2.resolve();
+
+        match (&t1, &t2) {
+            // Same primitive types
+            (Type::Int, Type::Int) => Ok(()),
+            (Type::Float, Type::Float) => Ok(()),
+            (Type::Bool, Type::Bool) => Ok(()),
+            (Type::String, Type::String) => Ok(()),
+            (Type::Char, Type::Char) => Ok(()),
+            (Type::Unit, Type::Unit) => Ok(()),
+            (Type::Pid, Type::Pid) => Ok(()),
+
+            // Type variables
+            (Type::Var(v1), Type::Var(v2)) if Rc::ptr_eq(v1, v2) => Ok(()),
+            (Type::Var(var), other) | (other, Type::Var(var)) => {
+                let var_inner = var.borrow().clone();
+                match var_inner {
+                    TypeVar::Link(_) => unreachable!("resolve should have followed links"),
+                    TypeVar::Unbound { id, level } => {
+                        // Occurs check
+                        if other.occurs(id) {
+                            return Err(TypeError::OccursCheck(id, other.clone()));
+                        }
+                        // Update levels for let-polymorphism
+                        self.update_levels(&other, level);
+                        // Link the variable
+                        *var.borrow_mut() = TypeVar::Link(other.clone());
+                        Ok(())
+                    }
+                    TypeVar::Generic(_) => Err(TypeError::TypeMismatch {
+                        expected: t1.clone(),
+                        found: t2.clone(),
+                    }),
+                }
+            }
+
+            // Function types
+            (Type::Arrow(a1, b1), Type::Arrow(a2, b2)) => {
+                self.unify(a1, a2)?;
+                self.unify(b1, b2)?;
+                Ok(())
+            }
+
+            // Tuples
+            (Type::Tuple(ts1), Type::Tuple(ts2)) if ts1.len() == ts2.len() => {
+                for (t1, t2) in ts1.iter().zip(ts2.iter()) {
+                    self.unify(t1, t2)?;
+                }
+                Ok(())
+            }
+
+            // Lists
+            (Type::List(t1), Type::List(t2)) => self.unify(t1, t2),
+
+            // Channels
+            (Type::Channel(t1), Type::Channel(t2)) => self.unify(t1, t2),
+
+            // Named constructors
+            (
+                Type::Constructor {
+                    name: n1,
+                    args: a1,
+                },
+                Type::Constructor {
+                    name: n2,
+                    args: a2,
+                },
+            ) if n1 == n2 && a1.len() == a2.len() => {
+                for (t1, t2) in a1.iter().zip(a2.iter()) {
+                    self.unify(t1, t2)?;
+                }
+                Ok(())
+            }
+
+            _ => Err(TypeError::TypeMismatch {
+                expected: t1,
+                found: t2,
+            }),
+        }
+    }
+
+    /// Update type variable levels for let-polymorphism
+    fn update_levels(&self, ty: &Type, level: u32) {
+        match ty.resolve() {
+            Type::Var(var) => {
+                let mut var = var.borrow_mut();
+                if let TypeVar::Unbound {
+                    level: var_level, ..
+                } = &mut *var
+                {
+                    *var_level = (*var_level).min(level);
+                }
+            }
+            Type::Arrow(a, b) => {
+                self.update_levels(&a, level);
+                self.update_levels(&b, level);
+            }
+            Type::Tuple(ts) => {
+                for t in ts {
+                    self.update_levels(&t, level);
+                }
+            }
+            Type::List(t) => self.update_levels(&t, level),
+            Type::Channel(t) => self.update_levels(&t, level),
+            Type::Constructor { args, .. } => {
+                for t in args {
+                    self.update_levels(&t, level);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Instantiate a polymorphic type scheme
+    fn instantiate(&mut self, scheme: &Scheme) -> Type {
+        if scheme.num_generics == 0 {
+            return scheme.ty.clone();
+        }
+
+        let mut substitution: HashMap<TypeVarId, Type> = HashMap::new();
+        for i in 0..scheme.num_generics {
+            substitution.insert(i, self.fresh_var());
+        }
+
+        self.substitute(&scheme.ty, &substitution)
+    }
+
+    /// Substitute generic type variables
+    fn substitute(&self, ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
+        match ty.resolve() {
+            Type::Var(var) => match &*var.borrow() {
+                TypeVar::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
+                _ => ty.clone(),
+            },
+            Type::Arrow(a, b) => Type::Arrow(
+                Rc::new(self.substitute(&a, subst)),
+                Rc::new(self.substitute(&b, subst)),
+            ),
+            Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
+            Type::List(t) => Type::List(Rc::new(self.substitute(&t, subst))),
+            Type::Channel(t) => Type::Channel(Rc::new(self.substitute(&t, subst))),
+            Type::Constructor { name, args } => Type::Constructor {
+                name,
+                args: args.iter().map(|t| self.substitute(t, subst)).collect(),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    /// Generalize a type to a polymorphic scheme
+    fn generalize(&self, ty: &Type) -> Scheme {
+        let mut generics: HashMap<TypeVarId, TypeVarId> = HashMap::new();
+        let generalized = self.generalize_inner(ty, &mut generics);
+        Scheme {
+            num_generics: generics.len() as u32,
+            ty: generalized,
+        }
+    }
+
+    fn generalize_inner(
+        &self,
+        ty: &Type,
+        generics: &mut HashMap<TypeVarId, TypeVarId>,
+    ) -> Type {
+        match ty.resolve() {
+            Type::Var(var) => match &*var.borrow() {
+                TypeVar::Unbound { id, level } if *level > self.level => {
+                    let gen_id = if let Some(&gen_id) = generics.get(id) {
+                        gen_id
+                    } else {
+                        let gen_id = generics.len() as TypeVarId;
+                        generics.insert(*id, gen_id);
+                        gen_id
+                    };
+                    Type::new_generic(gen_id)
+                }
+                _ => ty.clone(),
+            },
+            Type::Arrow(a, b) => Type::Arrow(
+                Rc::new(self.generalize_inner(&a, generics)),
+                Rc::new(self.generalize_inner(&b, generics)),
+            ),
+            Type::Tuple(ts) => Type::Tuple(
+                ts.iter()
+                    .map(|t| self.generalize_inner(t, generics))
+                    .collect(),
+            ),
+            Type::List(t) => Type::List(Rc::new(self.generalize_inner(&t, generics))),
+            Type::Channel(t) => Type::Channel(Rc::new(self.generalize_inner(&t, generics))),
+            Type::Constructor { name, args } => Type::Constructor {
+                name,
+                args: args
+                    .iter()
+                    .map(|t| self.generalize_inner(t, generics))
+                    .collect(),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    /// Infer the type of an expression
+    pub fn infer_expr(&mut self, env: &TypeEnv, expr: &Expr) -> Result<Type, TypeError> {
+        match &expr.node {
+            ExprKind::Lit(lit) => Ok(self.infer_literal(lit)),
+
+            ExprKind::Var(name) => {
+                if let Some(scheme) = env.get(name) {
+                    Ok(self.instantiate(scheme))
+                } else {
+                    Err(TypeError::UnboundVariable(name.clone()))
+                }
+            }
+
+            ExprKind::Lambda { params, body } => {
+                let mut current_env = env.clone();
+                let mut param_types = Vec::new();
+
+                for param in params {
+                    let param_ty = self.fresh_var();
+                    self.bind_pattern(&mut current_env, param, &param_ty)?;
+                    param_types.push(param_ty);
+                }
+
+                let body_ty = self.infer_expr(&current_env, body)?;
+                Ok(Type::arrows(param_types, body_ty))
+            }
+
+            ExprKind::App { func, arg } => {
+                let func_ty = self.infer_expr(env, func)?;
+                let arg_ty = self.infer_expr(env, arg)?;
+                let ret_ty = self.fresh_var();
+
+                self.unify(&func_ty, &Type::arrow(arg_ty, ret_ty.clone()))?;
+                Ok(ret_ty)
+            }
+
+            ExprKind::Let {
+                pattern,
+                value,
+                body,
+            } => {
+                // Enter a new level for let-polymorphism
+                self.level += 1;
+                let value_ty = self.infer_expr(env, value)?;
+                self.level -= 1;
+
+                // Generalize the value type
+                let scheme = self.generalize(&value_ty);
+
+                // Bind the pattern
+                let mut new_env = env.clone();
+                self.bind_pattern_scheme(&mut new_env, pattern, scheme)?;
+
+                if let Some(body) = body {
+                    self.infer_expr(&new_env, body)
+                } else {
+                    Ok(Type::Unit)
+                }
+            }
+
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let cond_ty = self.infer_expr(env, cond)?;
+                self.unify(&cond_ty, &Type::Bool)?;
+
+                let then_ty = self.infer_expr(env, then_branch)?;
+                let else_ty = self.infer_expr(env, else_branch)?;
+                self.unify(&then_ty, &else_ty)?;
+
+                Ok(then_ty)
+            }
+
+            ExprKind::Match { scrutinee, arms } => {
+                let scrutinee_ty = self.infer_expr(env, scrutinee)?;
+                let result_ty = self.fresh_var();
+
+                for arm in arms {
+                    let mut arm_env = env.clone();
+                    self.bind_pattern(&mut arm_env, &arm.pattern, &scrutinee_ty)?;
+
+                    if let Some(guard) = &arm.guard {
+                        let guard_ty = self.infer_expr(&arm_env, guard)?;
+                        self.unify(&guard_ty, &Type::Bool)?;
+                    }
+
+                    let body_ty = self.infer_expr(&arm_env, &arm.body)?;
+                    self.unify(&result_ty, &body_ty)?;
+                }
+
+                Ok(result_ty)
+            }
+
+            ExprKind::Tuple(exprs) => {
+                let types: Result<Vec<_>, _> = exprs
+                    .iter()
+                    .map(|e| self.infer_expr(env, e))
+                    .collect();
+                Ok(Type::Tuple(types?))
+            }
+
+            ExprKind::List(exprs) => {
+                let elem_ty = self.fresh_var();
+                for expr in exprs {
+                    let ty = self.infer_expr(env, expr)?;
+                    self.unify(&elem_ty, &ty)?;
+                }
+                Ok(Type::List(Rc::new(elem_ty)))
+            }
+
+            ExprKind::Constructor { name, args } => {
+                if let Some(info) = self.type_ctx.get_constructor(name).cloned() {
+                    // Create fresh type variables for the type parameters
+                    let mut type_args = Vec::new();
+                    for _ in 0..info.type_params {
+                        type_args.push(self.fresh_var());
+                    }
+
+                    // Substitute type parameters in field types
+                    let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
+                    for (i, ty) in type_args.iter().enumerate() {
+                        subst.insert(i as TypeVarId, ty.clone());
+                    }
+
+                    // Check field types against arguments
+                    if args.len() != info.field_types.len() {
+                        return Err(TypeError::TypeMismatch {
+                            expected: Type::Constructor {
+                                name: info.type_name.clone(),
+                                args: type_args.clone(),
+                            },
+                            found: Type::Unit,
+                        });
+                    }
+
+                    for (arg, field_ty) in args.iter().zip(&info.field_types) {
+                        let arg_ty = self.infer_expr(env, arg)?;
+                        let expected_ty = self.substitute(field_ty, &subst);
+                        self.unify(&arg_ty, &expected_ty)?;
+                    }
+
+                    Ok(Type::Constructor {
+                        name: info.type_name,
+                        args: type_args,
+                    })
+                } else {
+                    // Unknown constructor - for now just create a generic type
+                    Err(TypeError::UnknownConstructor(name.clone()))
+                }
+            }
+
+            ExprKind::BinOp { op, left, right } => {
+                let left_ty = self.infer_expr(env, left)?;
+                let right_ty = self.infer_expr(env, right)?;
+
+                match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                        self.unify(&left_ty, &Type::Int)?;
+                        self.unify(&right_ty, &Type::Int)?;
+                        Ok(Type::Int)
+                    }
+                    BinOp::Eq | BinOp::Neq => {
+                        self.unify(&left_ty, &right_ty)?;
+                        Ok(Type::Bool)
+                    }
+                    BinOp::Lt | BinOp::Gt | BinOp::Lte | BinOp::Gte => {
+                        self.unify(&left_ty, &Type::Int)?;
+                        self.unify(&right_ty, &Type::Int)?;
+                        Ok(Type::Bool)
+                    }
+                    BinOp::And | BinOp::Or => {
+                        self.unify(&left_ty, &Type::Bool)?;
+                        self.unify(&right_ty, &Type::Bool)?;
+                        Ok(Type::Bool)
+                    }
+                    BinOp::Cons => {
+                        let elem_ty = left_ty;
+                        self.unify(&right_ty, &Type::List(Rc::new(elem_ty.clone())))?;
+                        Ok(Type::List(Rc::new(elem_ty)))
+                    }
+                    BinOp::Concat => {
+                        self.unify(&left_ty, &right_ty)?;
+                        // Works for lists and strings
+                        Ok(left_ty)
+                    }
+                    BinOp::Pipe | BinOp::PipeBack => {
+                        // These are desugared in the parser
+                        unreachable!("pipe operators should be desugared")
+                    }
+                    BinOp::Compose | BinOp::ComposeBack => {
+                        // f >> g : (a -> b) -> (b -> c) -> (a -> c)
+                        let a = self.fresh_var();
+                        let b = self.fresh_var();
+                        let c = self.fresh_var();
+
+                        match op {
+                            BinOp::Compose => {
+                                self.unify(&left_ty, &Type::arrow(a.clone(), b.clone()))?;
+                                self.unify(&right_ty, &Type::arrow(b, c.clone()))?;
+                            }
+                            BinOp::ComposeBack => {
+                                self.unify(&left_ty, &Type::arrow(b.clone(), c.clone()))?;
+                                self.unify(&right_ty, &Type::arrow(a.clone(), b))?;
+                            }
+                            _ => unreachable!(),
+                        }
+                        Ok(Type::arrow(a, c))
+                    }
+                }
+            }
+
+            ExprKind::UnaryOp { op, operand } => {
+                let operand_ty = self.infer_expr(env, operand)?;
+                match op {
+                    UnaryOp::Neg => {
+                        self.unify(&operand_ty, &Type::Int)?;
+                        Ok(Type::Int)
+                    }
+                    UnaryOp::Not => {
+                        self.unify(&operand_ty, &Type::Bool)?;
+                        Ok(Type::Bool)
+                    }
+                }
+            }
+
+            ExprKind::Seq { first, second } => {
+                self.infer_expr(env, first)?;
+                self.infer_expr(env, second)
+            }
+
+            // Concurrency primitives
+            ExprKind::Spawn(body) => {
+                let body_ty = self.infer_expr(env, body)?;
+                // Body should be a thunk: () -> a
+                let ret_ty = self.fresh_var();
+                self.unify(&body_ty, &Type::arrow(Type::Unit, ret_ty))?;
+                Ok(Type::Pid)
+            }
+
+            ExprKind::NewChannel => {
+                let elem_ty = self.fresh_var();
+                Ok(Type::Channel(Rc::new(elem_ty)))
+            }
+
+            ExprKind::ChanSend { channel, value } => {
+                let chan_ty = self.infer_expr(env, channel)?;
+                let val_ty = self.infer_expr(env, value)?;
+                self.unify(&chan_ty, &Type::Channel(Rc::new(val_ty)))?;
+                Ok(Type::Unit)
+            }
+
+            ExprKind::ChanRecv(channel) => {
+                let chan_ty = self.infer_expr(env, channel)?;
+                let elem_ty = self.fresh_var();
+                self.unify(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())))?;
+                Ok(elem_ty)
+            }
+
+            ExprKind::Select { arms: _ } => {
+                // For now, just return a fresh type variable
+                // Proper select typing is more complex
+                Ok(self.fresh_var())
+            }
+        }
+    }
+
+    fn infer_literal(&self, lit: &Literal) -> Type {
+        match lit {
+            Literal::Int(_) => Type::Int,
+            Literal::Float(_) => Type::Float,
+            Literal::String(_) => Type::String,
+            Literal::Char(_) => Type::Char,
+            Literal::Bool(_) => Type::Bool,
+            Literal::Unit => Type::Unit,
+        }
+    }
+
+    /// Bind pattern variables to types in the environment
+    fn bind_pattern(
+        &mut self,
+        env: &mut TypeEnv,
+        pattern: &Pattern,
+        ty: &Type,
+    ) -> Result<(), TypeError> {
+        match &pattern.node {
+            PatternKind::Wildcard => Ok(()),
+
+            PatternKind::Var(name) => {
+                env.insert(name.clone(), Scheme::mono(ty.clone()));
+                Ok(())
+            }
+
+            PatternKind::Lit(lit) => {
+                let lit_ty = self.infer_literal(lit);
+                self.unify(ty, &lit_ty)?;
+                Ok(())
+            }
+
+            PatternKind::Tuple(pats) => {
+                let pat_types: Vec<_> = pats.iter().map(|_| self.fresh_var()).collect();
+                self.unify(ty, &Type::Tuple(pat_types.clone()))?;
+                for (pat, pat_ty) in pats.iter().zip(&pat_types) {
+                    self.bind_pattern(env, pat, pat_ty)?;
+                }
+                Ok(())
+            }
+
+            PatternKind::List(pats) => {
+                let elem_ty = self.fresh_var();
+                self.unify(ty, &Type::List(Rc::new(elem_ty.clone())))?;
+                for pat in pats {
+                    self.bind_pattern(env, pat, &elem_ty)?;
+                }
+                Ok(())
+            }
+
+            PatternKind::Cons { head, tail } => {
+                let elem_ty = self.fresh_var();
+                let list_ty = Type::List(Rc::new(elem_ty.clone()));
+                self.unify(ty, &list_ty)?;
+                self.bind_pattern(env, head, &elem_ty)?;
+                self.bind_pattern(env, tail, &list_ty)?;
+                Ok(())
+            }
+
+            PatternKind::Constructor { name, args } => {
+                if let Some(info) = self.type_ctx.get_constructor(name).cloned() {
+                    let mut type_args = Vec::new();
+                    for _ in 0..info.type_params {
+                        type_args.push(self.fresh_var());
+                    }
+
+                    let constructor_ty = Type::Constructor {
+                        name: info.type_name.clone(),
+                        args: type_args.clone(),
+                    };
+                    self.unify(ty, &constructor_ty)?;
+
+                    let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
+                    for (i, ty) in type_args.iter().enumerate() {
+                        subst.insert(i as TypeVarId, ty.clone());
+                    }
+
+                    for (pat, field_ty) in args.iter().zip(&info.field_types) {
+                        let expected_ty = self.substitute(field_ty, &subst);
+                        self.bind_pattern(env, pat, &expected_ty)?;
+                    }
+                    Ok(())
+                } else {
+                    Err(TypeError::UnknownConstructor(name.clone()))
+                }
+            }
+        }
+    }
+
+    /// Bind pattern variables with a pre-computed scheme (for let-polymorphism)
+    fn bind_pattern_scheme(
+        &mut self,
+        env: &mut TypeEnv,
+        pattern: &Pattern,
+        scheme: Scheme,
+    ) -> Result<(), TypeError> {
+        match &pattern.node {
+            PatternKind::Var(name) => {
+                env.insert(name.clone(), scheme);
+                Ok(())
+            }
+            // For complex patterns in let bindings, we just use monomorphic types
+            _ => {
+                let ty = self.instantiate(&scheme);
+                self.bind_pattern(env, pattern, &ty)
+            }
+        }
+    }
+
+    /// Register a type declaration
+    pub fn register_type_decl(&mut self, decl: &Decl) {
+        if let Decl::Type {
+            name,
+            params,
+            constructors,
+        } = decl
+        {
+            for ctor in constructors {
+                // Create generic types for the type parameters
+                let field_types: Vec<Type> = ctor
+                    .fields
+                    .iter()
+                    .map(|_| self.fresh_var())
+                    .collect();
+
+                let info = ConstructorInfo {
+                    type_name: name.clone(),
+                    type_params: params.len() as u32,
+                    field_types,
+                };
+
+                self.type_ctx.add_constructor(ctor.name.clone(), info);
+            }
+        }
+    }
+
+    /// Infer types for an entire program
+    pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, TypeError> {
+        let mut env = TypeEnv::new();
+        
+        // Add built-in functions
+        // print : a -> ()
+        let print_ty = {
+            let a = self.fresh_var();
+            Type::arrow(a, Type::Unit)
+        };
+        env.insert("print".into(), self.generalize(&print_ty));
+        
+        // int_to_string : Int -> String
+        env.insert("int_to_string".into(), Scheme::mono(Type::arrow(Type::Int, Type::String)));
+        
+        // string_length : String -> Int
+        env.insert("string_length".into(), Scheme::mono(Type::arrow(Type::String, Type::Int)));
+
+        // First pass: register all type declarations
+        for decl in &program.declarations {
+            self.register_type_decl(decl);
+        }
+
+        // Second pass: infer types for let declarations
+        for decl in &program.declarations {
+            if let Decl::Let {
+                name,
+                params,
+                body,
+                ..
+            } = decl
+            {
+                self.level += 1;
+
+                let mut local_env = env.clone();
+                let mut param_types = Vec::new();
+
+                for param in params {
+                    let param_ty = self.fresh_var();
+                    self.bind_pattern(&mut local_env, param, &param_ty)?;
+                    param_types.push(param_ty);
+                }
+
+                // For recursive functions, add the function to its own scope with a fresh type
+                let ret_ty = self.fresh_var();
+                let preliminary_func_ty = if param_types.is_empty() {
+                    ret_ty.clone()
+                } else {
+                    Type::arrows(param_types.clone(), ret_ty.clone())
+                };
+                local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
+
+                let body_ty = self.infer_expr(&local_env, body)?;
+                
+                // Unify the body type with what we predicted
+                if param_types.is_empty() {
+                    self.unify(&ret_ty, &body_ty)?;
+                } else {
+                    self.unify(&ret_ty, &body_ty)?;
+                }
+
+                let func_ty = if param_types.is_empty() {
+                    body_ty
+                } else {
+                    Type::arrows(param_types, body_ty)
+                };
+
+                self.level -= 1;
+
+                let scheme = self.generalize(&func_ty);
+                env.insert(name.clone(), scheme);
+            }
+        }
+
+        Ok(env)
+    }
+}
+
+impl Default for Inferencer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn infer(input: &str) -> Result<Type, TypeError> {
+        let tokens = Lexer::new(input).tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let expr = parser.parse_expr().unwrap();
+        let mut inferencer = Inferencer::new();
+        let env = TypeEnv::new();
+        inferencer.infer_expr(&env, &expr)
+    }
+
+    #[test]
+    fn test_literal() {
+        let ty = infer("42").unwrap();
+        assert!(matches!(ty, Type::Int));
+    }
+
+    #[test]
+    fn test_lambda() {
+        let ty = infer("fun x -> x").unwrap();
+        assert!(matches!(ty, Type::Arrow(_, _)));
+    }
+
+    #[test]
+    fn test_application() {
+        let ty = infer("(fun x -> x + 1) 42").unwrap();
+        assert!(matches!(ty.resolve(), Type::Int));
+    }
+
+    #[test]
+    fn test_if() {
+        let ty = infer("if true then 1 else 2").unwrap();
+        assert!(matches!(ty, Type::Int));
+    }
+}

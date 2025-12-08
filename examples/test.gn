@@ -1,0 +1,19 @@
+-- Basic arithmetic and functions
+let double x = x + x
+
+let add x y = x + y
+
+let factorial n = 
+  if n == 0 then 1
+  else n * factorial (n - 1)
+
+-- List operations
+let sum xs = 
+  match xs with
+  | [] -> 0
+  | x :: rest -> x + sum rest
+
+-- Main entry point
+let main _ = 
+  let result = factorial 5 in
+  print result

@@ -1,0 +1,27 @@
+-- A simple Gneiss program demonstrating basic features
+
+-- Factorial function
+let factorial n = 
+    if n <= 1 
+    then 1 
+    else n * factorial (n - 1)
+
+-- Double a number
+let double x = x + x
+
+-- Identity function (polymorphic)
+let id x = x
+
+-- Compose two functions
+let compose f g x = f (g x)
+
+-- Map over a list (manually, since we don't have built-in map yet)
+let rec_sum xs = 
+    match xs with
+    | [] -> 0
+    | x :: rest -> x + rec_sum rest
+
+-- Main entry point
+let main () = 
+    let result = factorial 5 in
+    print result

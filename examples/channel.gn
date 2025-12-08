@@ -1,0 +1,9 @@
+-- Simple ping-pong with channels
+
+let main _ =
+  let ch = Channel.new in
+  let _ = spawn (fun () -> 
+    let msg = Channel.recv ch in
+    print msg
+  ) in
+  Channel.send ch 42
