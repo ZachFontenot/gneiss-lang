@@ -251,6 +251,7 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::Pid(pid) => print!("<pid:{}>", pid),
         gneiss::Value::Channel(id) => print!("<channel:{}>", id),
         gneiss::Value::Builtin(name) => print!("<builtin:{}>", name),
+        gneiss::Value::Continuation { .. } => print!("<continuation>"),
     }
 }
 

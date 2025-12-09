@@ -565,6 +565,27 @@ impl Inferencer {
 
                 Ok(result_ty)
             }
+
+            // Delimited continuations
+            ExprKind::Reset(body) => {
+                // reset e : a  where e : a
+                self.infer_expr(env, body)
+            }
+
+            ExprKind::Shift { param, body } => {
+                // Simplified typing: k : a -> a, body : a, result : a
+                // (Full answer-type polymorphism is complex, defer to future)
+                let captured_ty = self.fresh_var();
+                let cont_ty = Type::arrow(captured_ty.clone(), captured_ty.clone());
+
+                let mut body_env = env.clone();
+                self.bind_pattern(&mut body_env, param, &cont_ty)?;
+
+                let body_ty = self.infer_expr(&body_env, body)?;
+                self.unify(&body_ty, &captured_ty)?;
+
+                Ok(captured_ty)
+            }
         }
     }
 
@@ -867,5 +888,26 @@ let f ch1 ch2 =
     end
 "#;
         assert!(typecheck_program(bad).is_err());
+    }
+
+    // Delimited continuation type tests
+    #[test]
+    fn test_reset_type() {
+        let ty = infer("reset 42").unwrap();
+        assert!(matches!(ty, Type::Int));
+    }
+
+    #[test]
+    fn test_shift_type() {
+        let ty = infer("reset (1 + shift (fun k -> k 10))").unwrap();
+        assert!(matches!(ty.resolve(), Type::Int));
+    }
+
+    #[test]
+    fn test_shift_type_mismatch() {
+        // Body returns String, but context expects Int
+        let result = infer("reset (1 + shift (fun k -> \"hello\"))");
+        // With simplified typing, this should be a type error
+        assert!(result.is_err());
     }
 }

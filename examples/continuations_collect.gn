@@ -1,0 +1,21 @@
+-- Collecting multiple values from a computation
+-- The continuation is called multiple times, results accumulated
+
+-- Example: summing multiple continuation invocations
+-- This demonstrates calling the continuation multiple times
+-- and combining the results
+let example_sum () =
+    reset (
+        let x = shift (fun k -> k 1 + k 2 + k 3) in
+        x * x
+    )
+    -- k 1 = 1, k 2 = 4, k 3 = 9
+    -- sum = 14
+
+-- Note: The fully general "collect into list" pattern requires
+-- answer-type polymorphism (where k : a -> b for different b)
+-- which our simplified type system doesn't support yet.
+-- That would allow: reset (x*x) to return Int while shift body returns [Int]
+
+let main () =
+    print (example_sum ())

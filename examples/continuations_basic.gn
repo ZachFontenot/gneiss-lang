@@ -1,0 +1,36 @@
+-- Basic delimited continuation examples
+
+-- Example 1: Simple capture and resume
+let example1 () =
+    reset (1 + shift (fun k -> k 10))
+    -- Result: 11
+
+-- Example 2: Multiple resumptions
+let example2 () =
+    reset (1 + shift (fun k -> k (k 10)))
+    -- k 10 = 11, k 11 = 12
+    -- Result: 12
+
+-- Example 3: Discarding the continuation (early exit)
+let example3 () =
+    reset (
+        let x = shift (fun k -> 42) in
+        -- This code never runs because k is never called
+        x * 100
+    )
+    -- Result: 42
+
+-- Example 4: Capturing in a let binding
+let example4 () =
+    reset (
+        let x = shift (fun k -> k 5 + k 6) in
+        x * x
+    )
+    -- k 5 = 25, k 6 = 36, sum = 61
+    -- Result: 61
+
+let main () =
+    print (example1 ());
+    print (example2 ());
+    print (example3 ());
+    print (example4 ())

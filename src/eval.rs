@@ -85,6 +85,10 @@ pub enum Frame {
     /// After evaluating channel expr in recv, perform the recv
     Recv,
 
+    // === Delimited continuation frames ===
+    /// Delimiter marker for reset
+    Prompt,
+
     // === Select frames ===
     /// Evaluating channel expressions for select, collecting them
     SelectChans {
@@ -214,6 +218,11 @@ pub enum Value {
 
     /// Built-in function
     Builtin(String),
+
+    /// A captured delimited continuation
+    Continuation {
+        frames: Vec<Frame>,
+    },
 }
 
 impl Value {
@@ -232,6 +241,7 @@ impl Value {
             Value::Pid(_) => "Pid",
             Value::Channel(_) => "Channel",
             Value::Builtin(_) => "Builtin",
+            Value::Continuation { .. } => "Continuation",
         }
     }
 }
@@ -522,6 +532,55 @@ impl Interpreter {
                 StepResult::Continue(State::Eval { expr: channel.clone(), env, cont })
             }
 
+            // === Delimited continuations ===
+            ExprKind::Reset(body) => {
+                cont.push(Frame::Prompt);
+                StepResult::Continue(State::Eval {
+                    expr: body.clone(),
+                    env,
+                    cont,
+                })
+            }
+
+            ExprKind::Shift { param, body } => {
+                // Capture frames up to Prompt
+                let mut captured = Vec::new();
+
+                loop {
+                    match cont.pop() {
+                        None => {
+                            return StepResult::Error(EvalError::RuntimeError(
+                                "shift without enclosing reset".into()
+                            ));
+                        }
+                        Some(Frame::Prompt) => {
+                            break; // Found delimiter, stop capturing
+                        }
+                        Some(frame) => {
+                            captured.push(frame);
+                        }
+                    }
+                }
+
+                // Frames were popped in reverse order, fix it
+                captured.reverse();
+
+                // Create continuation value
+                let continuation = Value::Continuation { frames: captured };
+
+                // Bind parameter to continuation and evaluate body
+                let new_env = EnvInner::with_parent(&env);
+                if !self.try_bind_pattern(&new_env, param, &continuation) {
+                    return StepResult::Error(EvalError::MatchFailed);
+                }
+
+                StepResult::Continue(State::Eval {
+                    expr: body.clone(),
+                    env: new_env,
+                    cont,
+                })
+            }
+
             ExprKind::Select { arms } => {
                 if arms.is_empty() {
                     // Empty select blocks forever (or error)
@@ -681,6 +740,12 @@ impl Interpreter {
                     }
                     _ => StepResult::Error(EvalError::TypeError("guard must be bool".into())),
                 }
+            }
+
+            // === Delimited continuation frames ===
+            Some(Frame::Prompt) => {
+                // reset body completed, value passes through
+                StepResult::Continue(State::Apply { value, cont })
             }
 
             // === Concurrency frames ===
@@ -898,7 +963,7 @@ impl Interpreter {
     }
 
     /// Apply a function value to an argument value
-    fn do_apply(&mut self, func: Value, arg: Value, cont: Cont) -> StepResult {
+    fn do_apply(&mut self, func: Value, arg: Value, mut cont: Cont) -> StepResult {
         match func {
             Value::Closure { params, body, env } => {
                 if params.is_empty() {
@@ -937,6 +1002,18 @@ impl Interpreter {
                 new_fields.push(arg);
                 let value = Value::Constructor { name, fields: new_fields };
                 StepResult::Continue(State::Apply { value, cont })
+            }
+
+            Value::Continuation { frames } => {
+                // Splice captured frames back onto stack
+                for frame in frames.into_iter().rev() {
+                    cont.push(frame);
+                }
+                // The argument becomes the "return value" to those frames
+                StepResult::Continue(State::Apply {
+                    value: arg,
+                    cont,
+                })
             }
 
             _ => StepResult::Error(EvalError::TypeError(format!(
@@ -1103,6 +1180,7 @@ impl Interpreter {
             Value::Pid(pid) => print!("<pid:{}>", pid),
             Value::Channel(id) => print!("<channel:{}>", id),
             Value::Builtin(name) => print!("<builtin:{}>", name),
+            Value::Continuation { .. } => print!("<continuation>"),
         }
     }
 
@@ -1627,6 +1705,109 @@ let main () =
     ) in
     Channel.send requests 42;
     Channel.recv responses
+"#;
+        run_program(program).unwrap();
+    }
+
+    // ========================================================================
+    // Delimited continuation tests
+    // ========================================================================
+
+    #[test]
+    fn test_reset_no_shift() {
+        let val = eval("reset 42").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_reset_with_expr() {
+        let val = eval("reset (1 + 2 + 3)").unwrap();
+        assert!(matches!(val, Value::Int(6)));
+    }
+
+    #[test]
+    fn test_shift_discard_continuation() {
+        // k not called - early exit
+        let val = eval("reset (1 + shift (fun k -> 42))").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_shift_call_once() {
+        let val = eval("reset (1 + shift (fun k -> k 10))").unwrap();
+        assert!(matches!(val, Value::Int(11)));
+    }
+
+    #[test]
+    fn test_shift_call_twice() {
+        let val = eval("reset (1 + shift (fun k -> k (k 10)))").unwrap();
+        // k 10 = 11, k 11 = 12
+        assert!(matches!(val, Value::Int(12)));
+    }
+
+    #[test]
+    fn test_shift_in_let() {
+        let val = eval("reset (let x = shift (fun k -> k 5) in x * x)").unwrap();
+        assert!(matches!(val, Value::Int(25)));
+    }
+
+    #[test]
+    fn test_nested_reset_inner_shift() {
+        // Inner shift only captures to inner reset
+        let val = eval("reset (1 + reset (2 + shift (fun k -> k 10)))").unwrap();
+        // Inner: 2 + 10 = 12, Outer: 1 + 12 = 13
+        assert!(matches!(val, Value::Int(13)));
+    }
+
+    #[test]
+    fn test_nested_reset_outer_shift() {
+        // Outer shift captures outer context
+        let val = eval("reset (1 + shift (fun k -> k (reset (2 + 3))))").unwrap();
+        // reset (2+3) = 5, k 5 = 1 + 5 = 6
+        assert!(matches!(val, Value::Int(6)));
+    }
+
+    #[test]
+    fn test_shift_without_reset_errors() {
+        let result = eval("shift (fun k -> k 1)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shift_return_continuation() {
+        // Return the continuation itself
+        let val = eval("reset (1 + shift (fun k -> k))").unwrap();
+        assert!(matches!(val, Value::Continuation { .. }));
+    }
+
+    #[test]
+    fn test_continuation_called_later() {
+        let val = eval("
+            let k = reset (1 + shift (fun k -> k)) in
+            k 10
+        ").unwrap();
+        assert!(matches!(val, Value::Int(11)));
+    }
+
+    #[test]
+    fn test_shift_with_multiple_invocations() {
+        let val = eval("
+            reset (
+                let x = shift (fun k -> k 1 + k 2) in
+                x * 10
+            )
+        ").unwrap();
+        // k 1 = 10, k 2 = 20, sum = 30
+        assert!(matches!(val, Value::Int(30)));
+    }
+
+    #[test]
+    fn test_reset_in_function() {
+        let program = r#"
+let with_reset f = reset (f ())
+
+let main () =
+    with_reset (fun () -> 1 + shift (fun k -> k 10))
 "#;
         run_program(program).unwrap();
     }

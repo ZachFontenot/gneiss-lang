@@ -32,6 +32,8 @@ pub enum Token {
     Spawn,
     Select,
     End,
+    Reset,
+    Shift,
 
     // Delimiters
     LParen,   // (
@@ -467,6 +469,8 @@ impl<'a> Lexer<'a> {
             "spawn" => Token::Spawn,
             "select" => Token::Select,
             "end" => Token::End,
+            "reset" => Token::Reset,
+            "shift" => Token::Shift,
             _ => {
                 if s.chars().next().unwrap().is_uppercase() {
                     Token::UpperIdent(s)

@@ -778,6 +778,8 @@ impl Parser {
                 | Token::LParen
                 | Token::LBracket
                 | Token::Spawn
+                | Token::Reset
+                | Token::Shift
         )
     }
 
@@ -903,6 +905,30 @@ impl Parser {
                 let body = self.parse_expr_atom()?;
                 let span = start.merge(&body.span);
                 Ok(Spanned::new(ExprKind::Spawn(Rc::new(body)), span))
+            }
+            Token::Reset => {
+                self.advance();
+                let body = self.parse_expr_atom()?;
+                let span = start.merge(&body.span);
+                Ok(Spanned::new(ExprKind::Reset(Rc::new(body)), span))
+            }
+            Token::Shift => {
+                self.advance();
+                let func = self.parse_expr_atom()?;
+
+                match &func.node {
+                    ExprKind::Lambda { params, body } if params.len() == 1 => {
+                        let span = start.merge(&func.span);
+                        Ok(Spanned::new(ExprKind::Shift {
+                            param: params[0].clone(),
+                            body: body.clone(),
+                        }, span))
+                    }
+                    _ => Err(ParseError::UnexpectedToken {
+                        expected: "function (fun k -> ...)".into(),
+                        found: self.peek().clone(),
+                    })
+                }
             }
             Token::LParen => {
                 self.advance();

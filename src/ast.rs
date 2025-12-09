@@ -137,6 +137,21 @@ pub enum ExprKind {
     Select {
         arms: Vec<SelectArm>,
     },
+
+    // ========================================================================
+    // Delimited continuations
+    // ========================================================================
+
+    /// Delimited continuation boundary: reset expr
+    Reset(Rc<Expr>),
+
+    /// Capture continuation: shift (fun k -> body)
+    Shift {
+        /// Parameter that binds the captured continuation
+        param: Pattern,
+        /// Body to execute with continuation bound
+        body: Rc<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
