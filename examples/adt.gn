@@ -1,0 +1,31 @@
+-- Test algebraic data type definitions
+
+-- Option type - positional fields
+type Option a = Some a | None
+
+-- Either type - positional fields
+type Either a b = Left a | Right b
+
+-- Simple enumeration - no fields
+type Color = Red | Green | Blue
+
+-- Recursive type: linked list - positional fields
+type List a = Nil | Cons a (List a)
+
+-- Binary tree - positional fields
+type Tree a = Leaf a | Node (Tree a) a (Tree a)
+
+type Expr
+  = Num Int
+  | Add Expr Expr
+  | Mul Expr Expr
+
+let eval_expr expr =
+  match expr with
+  | Num i -> i
+  | Add expr_l expr_r -> (eval_expr expr_l) + (eval_expr expr_r)
+  | Mul expr_l expr_r -> (eval_expr expr_l) * (eval_expr expr_r)
+
+let main _ =
+  let expr = (Add (Mul (Num 2) (Add (Num 1) (Num 2))) (Add (Num 1) (Num 2))) in
+  print (eval_expr expr)

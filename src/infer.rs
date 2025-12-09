@@ -435,13 +435,28 @@ impl Inferencer {
                         subst.insert(i as TypeVarId, ty.clone());
                     }
 
-                    // Check field types against arguments
+                    // The result type of the constructor
+                    let result_ty = Type::Constructor {
+                        name: info.type_name.clone(),
+                        args: type_args.clone(),
+                    };
+
+                    // If no args provided but constructor has fields, return a curried function type
+                    // e.g., Some : a -> Option a
+                    if args.is_empty() && !info.field_types.is_empty() {
+                        // Build curried function type: field1 -> field2 -> ... -> ResultType
+                        let mut ty = result_ty;
+                        for field_ty in info.field_types.iter().rev() {
+                            let param_ty = self.substitute(field_ty, &subst);
+                            ty = Type::Arrow(Rc::new(param_ty), Rc::new(ty));
+                        }
+                        return Ok(ty);
+                    }
+
+                    // Check field types against provided arguments
                     if args.len() != info.field_types.len() {
                         return Err(TypeError::TypeMismatch {
-                            expected: Type::Constructor {
-                                name: info.type_name.clone(),
-                                args: type_args.clone(),
-                            },
+                            expected: result_ty,
                             found: Type::Unit,
                         });
                     }
@@ -452,10 +467,7 @@ impl Inferencer {
                         self.unify(&arg_ty, &expected_ty)?;
                     }
 
-                    Ok(Type::Constructor {
-                        name: info.type_name,
-                        args: type_args,
-                    })
+                    Ok(result_ty)
                 } else {
                     // Unknown constructor - for now just create a generic type
                     Err(TypeError::UnknownConstructor(name.clone()))

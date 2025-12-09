@@ -51,7 +51,7 @@ let x = 42
 let add a b = a + b
 
 -- With type annotation
-let add : Int -> Int -> Int
+val add : Int -> Int -> Int
 let add a b = a + b
 
 -- Local binding
