@@ -178,7 +178,7 @@ fn repl() {
                     Ok(ty) => {
                         // Evaluate
                         let env = gneiss::eval::EnvInner::new();
-                        match interpreter.eval(&env, &expr) {
+                        match interpreter.eval_expr(&env, &expr) {
                             Ok(val) => {
                                 print_value(&val);
                                 println!(" : {}", ty);
