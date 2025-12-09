@@ -250,6 +250,28 @@ impl Inferencer {
         }
     }
 
+    /// Check if an expression is a syntactic value (for the value restriction).
+    /// Only syntactic values can be generalized in let-bindings.
+    /// This prevents unsound polymorphism for effectful expressions like Channel.new.
+    fn is_syntactic_value(expr: &Expr) -> bool {
+        match &expr.node {
+            // Literals are values
+            ExprKind::Lit(_) => true,
+            // Variables are values (they refer to already-computed values)
+            ExprKind::Var(_) => true,
+            // Lambdas are values (they don't execute until applied)
+            ExprKind::Lambda { .. } => true,
+            // Constructors with value arguments are values
+            ExprKind::Constructor { args, .. } => args.iter().all(Self::is_syntactic_value),
+            // Tuples of values are values
+            ExprKind::Tuple(exprs) => exprs.iter().all(Self::is_syntactic_value),
+            // Lists of values are values
+            ExprKind::List(exprs) => exprs.iter().all(Self::is_syntactic_value),
+            // Everything else (applications, channel ops, etc.) is not a value
+            _ => false,
+        }
+    }
+
     /// Infer the type of an expression
     pub fn infer_expr(&mut self, env: &TypeEnv, expr: &Expr) -> Result<Type, TypeError> {
         match &expr.node {
@@ -296,8 +318,19 @@ impl Inferencer {
                 let value_ty = self.infer_expr(env, value)?;
                 self.level -= 1;
 
-                // Generalize the value type
-                let scheme = self.generalize(&value_ty);
+                // Value restriction: only generalize syntactic values.
+                // This prevents unsound polymorphism for effectful expressions
+                // like Channel.new, where the type variable must be shared
+                // across all uses rather than instantiated fresh each time.
+                let scheme = if Self::is_syntactic_value(value) {
+                    self.generalize(&value_ty)
+                } else {
+                    // Don't generalize - keep the monomorphic type
+                    Scheme {
+                        num_generics: 0,
+                        ty: value_ty,
+                    }
+                };
 
                 // Bind the pattern
                 let mut new_env = env.clone();
@@ -735,6 +768,14 @@ impl Inferencer {
 impl Default for Inferencer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Public test helpers for property-based testing
+impl Inferencer {
+    /// Public wrapper for unify, for property testing
+    pub fn unify_types(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError> {
+        self.unify(t1, t2)
     }
 }
 
