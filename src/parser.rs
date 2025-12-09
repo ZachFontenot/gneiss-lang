@@ -371,9 +371,50 @@ impl Parser {
             self.parse_match()
         } else if self.check(&Token::Fun) {
             self.parse_lambda()
+        } else if self.check(&Token::Select) {
+            self.parse_select()
         } else {
             self.parse_expr_pipe()
         }
+    }
+
+    fn parse_select(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current_span();
+        self.consume(Token::Select)?;
+
+        let mut arms = Vec::new();
+
+        // Require at least one arm
+        // Each arm: | pattern <- channel -> body
+        loop {
+            if !self.match_token(&Token::Pipe) {
+                break;
+            }
+
+            let pattern = self.parse_pattern()?;
+            self.consume(Token::LArrow)?;
+            let channel = self.parse_expr_app()?; // Parse channel expr (no operators to avoid <- ambiguity)
+            self.consume(Token::Arrow)?;
+            let body = self.parse_expr_pipe()?; // Body can have operators
+
+            arms.push(SelectArm {
+                channel,
+                pattern,
+                body,
+            });
+        }
+
+        self.consume(Token::End)?;
+
+        if arms.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "select arm".into(),
+                found: self.peek().clone(),
+            });
+        }
+
+        let span = start.merge(&self.current_span());
+        Ok(Spanned::new(ExprKind::Select { arms }, span))
     }
 
     fn parse_lambda(&mut self) -> Result<Expr, ParseError> {

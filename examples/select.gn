@@ -1,0 +1,82 @@
+-- Select example
+-- Demonstrates waiting on multiple channels with select
+
+-- Simple select: respond to whichever channel is ready first
+let timeout_or_result () =
+    let results = Channel.new in
+    let timeout = Channel.new in
+
+    -- Worker sends result after "computing"
+    let _ = spawn (fun () ->
+        let answer = 21 * 2 in
+        Channel.send results answer
+    ) in
+
+    -- In a real system, timeout would fire after a delay
+    -- Here we just demonstrate the select syntax
+
+    select
+    | x <- results -> print x        -- prints 42
+    | _ <- timeout -> print 0        -- would print 0 on timeout
+    end
+
+-- Server pattern: handle requests from multiple sources
+let request_handler () =
+    let client_a = Channel.new in
+    let client_b = Channel.new in
+    let responses = Channel.new in
+
+    -- Spawn a simple server that handles one request
+    let _ = spawn (fun () ->
+        select
+        | req <- client_a -> Channel.send responses (req + 100)
+        | req <- client_b -> Channel.send responses (req * 2)
+        end
+    ) in
+
+    -- Client A sends a request
+    Channel.send client_a 42;
+    let result = Channel.recv responses in
+    print result  -- prints 142
+
+-- Pattern matching in select arms
+let pattern_select () =
+    let coords = Channel.new in
+
+    let _ = spawn (fun () ->
+        Channel.send coords (10, 20)
+    ) in
+
+    select
+    | (x, y) <- coords -> print (x + y)  -- prints 30
+    end
+
+-- Multiple workers: select picks whichever is ready
+let multi_worker () =
+    let worker_a = Channel.new in
+    let worker_b = Channel.new in
+
+    -- Two workers doing different computations
+    let _ = spawn (fun () -> Channel.send worker_a (10 + 5)) in
+    let _ = spawn (fun () -> Channel.send worker_b (20 * 3)) in
+
+    -- Select takes whichever happens to be ready first
+    -- (scheduling is non-deterministic, so result varies)
+    let result =
+        select
+        | x <- worker_a -> x
+        | x <- worker_b -> x
+        end
+    in
+    print result  -- prints 15 or 60 depending on scheduler
+
+-- Main: run all examples
+let main () =
+    print 1;  -- separator
+    timeout_or_result ();
+    print 2;  -- separator
+    request_handler ();
+    print 3;  -- separator
+    pattern_select ();
+    print 4;  -- separator
+    multi_worker ()

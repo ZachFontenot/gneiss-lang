@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
-use crate::eval::Value;
+use crate::eval::{Cont, Value};
 
 /// Unique process identifier
 pub type Pid = u64;
@@ -40,6 +40,8 @@ pub enum ProcessState {
     BlockedSend(ChannelId),
     /// Blocked waiting to receive from a channel
     BlockedRecv(ChannelId),
+    /// Blocked waiting on multiple channels (select)
+    BlockedSelect(Vec<ChannelId>),
     /// Terminated
     Done,
 }
@@ -50,18 +52,24 @@ pub struct Process {
     pub state: ProcessState,
     /// The continuation (thunk to call when resumed)
     pub continuation: Option<ProcessContinuation>,
+    /// Saved continuation stack when blocked (for resumption)
+    pub saved_cont: Option<Cont>,
     /// Value received from a channel (set when unblocked)
     pub received_value: Option<Value>,
+    /// Channel that fired when resuming from a select
+    pub select_fired_channel: Option<ChannelId>,
 }
 
 /// What a process should do when it resumes
 pub enum ProcessContinuation {
-    /// Start executing a thunk
+    /// Start executing a thunk (initial spawn)
     Start(Value),
-    /// Continue after receiving a value
-    AfterRecv,
-    /// Continue after sending
-    AfterSend,
+    /// Resume after receiving a value - continue with saved_cont
+    ResumeAfterRecv,
+    /// Resume after sending - continue with saved_cont
+    ResumeAfterSend,
+    /// Resume after select received a value - SelectReady frame handles the value
+    ResumeAfterSelect,
 }
 
 /// The runtime scheduler
@@ -78,6 +86,8 @@ pub struct Runtime {
     next_channel_id: ChannelId,
     /// Currently running process
     current_pid: Option<Pid>,
+    /// The main process PID (first spawned)
+    main_pid: Option<Pid>,
 }
 
 impl Runtime {
@@ -89,6 +99,7 @@ impl Runtime {
             next_pid: 1,
             next_channel_id: 1,
             current_pid: None,
+            main_pid: None,
         }
     }
 
@@ -101,11 +112,18 @@ impl Runtime {
             pid,
             state: ProcessState::Ready,
             continuation: Some(ProcessContinuation::Start(thunk)),
+            saved_cont: None,
             received_value: None,
+            select_fired_channel: None,
         };
 
         self.processes.insert(pid, RefCell::new(process));
         self.ready_queue.push_back(pid);
+
+        // First spawned process is main
+        if self.main_pid.is_none() {
+            self.main_pid = Some(pid);
+        }
 
         pid
     }
@@ -140,10 +158,33 @@ impl Runtime {
             drop(channel);
 
             let mut receiver = self.processes.get(&receiver_pid).unwrap().borrow_mut();
-            receiver.received_value = Some(value);
-            receiver.state = ProcessState::Ready;
-            receiver.continuation = Some(ProcessContinuation::AfterRecv);
-            drop(receiver);
+
+            // If receiver was in a select, unregister from other channels and record which channel fired
+            if let ProcessState::BlockedSelect(ref select_channels) = receiver.state {
+                let other_channels: Vec<_> = select_channels
+                    .iter()
+                    .filter(|&&ch| ch != channel_id)
+                    .copied()
+                    .collect();
+                drop(receiver);
+
+                // Remove from other channels' receiver lists
+                for other_ch in other_channels {
+                    if let Some(ch) = self.channels.get(&other_ch) {
+                        ch.borrow_mut().receivers.retain(|&p| p != receiver_pid);
+                    }
+                }
+
+                let mut receiver = self.processes.get(&receiver_pid).unwrap().borrow_mut();
+                receiver.received_value = Some(value);
+                receiver.select_fired_channel = Some(channel_id); // Record which channel fired
+                receiver.state = ProcessState::Ready;
+                receiver.continuation = Some(ProcessContinuation::ResumeAfterSelect);
+            } else {
+                receiver.received_value = Some(value);
+                receiver.state = ProcessState::Ready;
+                receiver.continuation = Some(ProcessContinuation::ResumeAfterRecv);
+            }
 
             self.ready_queue.push_back(receiver_pid);
             true
@@ -176,7 +217,7 @@ impl Runtime {
 
             let mut sender = self.processes.get(&sender_pid).unwrap().borrow_mut();
             sender.state = ProcessState::Ready;
-            sender.continuation = Some(ProcessContinuation::AfterSend);
+            sender.continuation = Some(ProcessContinuation::ResumeAfterSend);
             drop(sender);
 
             self.ready_queue.push_back(sender_pid);
@@ -190,6 +231,46 @@ impl Runtime {
             process.state = ProcessState::BlockedRecv(channel_id);
             None
         }
+    }
+
+    /// Non-blocking receive: check if sender waiting, don't block if not.
+    /// Does NOT register as a waiter. Used for select.
+    pub fn try_recv(&mut self, channel_id: ChannelId) -> Option<Value> {
+        let mut channel = self
+            .channels
+            .get(&channel_id)?
+            .borrow_mut();
+
+        if let Some((sender_pid, value)) = channel.senders.pop_front() {
+            drop(channel);
+
+            // Wake up the sender
+            let mut sender = self.processes.get(&sender_pid).unwrap().borrow_mut();
+            sender.state = ProcessState::Ready;
+            sender.continuation = Some(ProcessContinuation::ResumeAfterSend);
+            drop(sender);
+
+            self.ready_queue.push_back(sender_pid);
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    /// Block current process waiting on any of the given channels (for select)
+    pub fn block_on_select(&mut self, channels: &[ChannelId]) {
+        let pid = self.current_pid.expect("block_on_select called outside process");
+
+        // Register as receiver on all channels
+        for &channel_id in channels {
+            if let Some(channel) = self.channels.get(&channel_id) {
+                channel.borrow_mut().receivers.push_back(pid);
+            }
+        }
+
+        // Mark process as blocked on select
+        let mut process = self.processes.get(&pid).unwrap().borrow_mut();
+        process.state = ProcessState::BlockedSelect(channels.to_vec());
     }
 
     /// Get the next ready process to run
@@ -234,16 +315,62 @@ impl Runtime {
             .and_then(|p| p.borrow_mut().received_value.take())
     }
 
-    /// Check if all processes are done or blocked
+    /// Save a continuation for a blocked process
+    pub fn save_cont(&mut self, pid: Pid, cont: Cont) {
+        if let Some(process) = self.processes.get(&pid) {
+            process.borrow_mut().saved_cont = Some(cont);
+        }
+    }
+
+    /// Take the saved continuation for a process
+    pub fn take_saved_cont(&mut self, pid: Pid) -> Option<Cont> {
+        self.processes
+            .get(&pid)
+            .and_then(|p| p.borrow_mut().saved_cont.take())
+    }
+
+    /// Take the select_fired_channel for a process (used when resuming from select)
+    pub fn take_select_fired_channel(&mut self, pid: Pid) -> Option<ChannelId> {
+        self.processes
+            .get(&pid)
+            .and_then(|p| p.borrow_mut().select_fired_channel.take())
+    }
+
+    /// Check if we're in a true deadlock situation
+    /// A deadlock is when the main process is blocked (or there are only blocked processes left)
+    /// Spawned processes being blocked after main completes is not deadlock
     pub fn is_deadlocked(&self) -> bool {
-        self.ready_queue.is_empty()
-            && self.processes.values().any(|p| {
-                let state = &p.borrow().state;
-                matches!(
+        if !self.ready_queue.is_empty() {
+            return false; // Still have work to do
+        }
+
+        // Check if main is blocked
+        if let Some(main_pid) = self.main_pid {
+            if let Some(main_process) = self.processes.get(&main_pid) {
+                let state = &main_process.borrow().state;
+                if matches!(
                     state,
-                    ProcessState::BlockedSend(_) | ProcessState::BlockedRecv(_)
-                )
-            })
+                    ProcessState::BlockedSend(_)
+                        | ProcessState::BlockedRecv(_)
+                        | ProcessState::BlockedSelect(_)
+                ) {
+                    return true; // Main is blocked = deadlock
+                }
+                // Main is Done or Ready - not deadlock
+                return false;
+            }
+        }
+
+        // No main process tracked - fall back to original behavior
+        self.processes.values().any(|p| {
+            let state = &p.borrow().state;
+            matches!(
+                state,
+                ProcessState::BlockedSend(_)
+                    | ProcessState::BlockedRecv(_)
+                    | ProcessState::BlockedSelect(_)
+            )
+        })
     }
 
     /// Check if all processes are done
@@ -268,10 +395,23 @@ impl Runtime {
                 let state = &p.borrow().state;
                 matches!(
                     state,
-                    ProcessState::BlockedSend(_) | ProcessState::BlockedRecv(_)
+                    ProcessState::BlockedSend(_)
+                        | ProcessState::BlockedRecv(_)
+                        | ProcessState::BlockedSelect(_)
                 )
             })
             .count()
+    }
+
+    /// Unregister a process from channels' receiver lists (used when select completes)
+    pub fn unregister_from_channels(&mut self, pid: Pid, channels: &[ChannelId], except: ChannelId) {
+        for &channel_id in channels {
+            if channel_id != except {
+                if let Some(ch) = self.channels.get(&channel_id) {
+                    ch.borrow_mut().receivers.retain(|&p| p != pid);
+                }
+            }
+        }
     }
 }
 

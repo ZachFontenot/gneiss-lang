@@ -1,4 +1,7 @@
-//! Tree-walking interpreter for Gneiss
+//! Defunctionalized CPS interpreter for Gneiss
+//!
+//! This interpreter uses an explicit continuation stack (defunctionalized CPS)
+//! which allows processes to be suspended and resumed for concurrency.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -8,7 +11,7 @@ use crate::ast::*;
 use crate::runtime::{ChannelId, Pid, ProcessContinuation, Runtime};
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum EvalError {
     #[error("unbound variable: {0}")]
     UnboundVariable(String),
@@ -23,6 +26,159 @@ pub enum EvalError {
     #[error("deadlock detected")]
     Deadlock,
 }
+
+// ============================================================================
+// Defunctionalized Continuation Stack
+// ============================================================================
+
+/// A single continuation frame - represents "what to do next" with a value
+#[derive(Debug, Clone)]
+pub enum Frame {
+    /// After evaluating func in application, evaluate the argument
+    AppFunc { arg: Rc<Expr>, env: Env },
+    /// After evaluating arg in application, apply func to it
+    AppArg { func: Value },
+
+    /// After evaluating the value in let, bind pattern and maybe eval body
+    Let { pattern: Pattern, body: Option<Rc<Expr>>, env: Env },
+
+    /// After evaluating condition, pick a branch
+    If { then_branch: Rc<Expr>, else_branch: Rc<Expr>, env: Env },
+
+    /// After evaluating left operand, evaluate right
+    BinOpLeft { op: BinOp, right: Rc<Expr>, env: Env },
+    /// After evaluating right operand, compute the result
+    BinOpRight { op: BinOp, left: Value },
+
+    /// After evaluating operand, apply unary operator
+    UnaryOp { op: UnaryOp },
+
+    /// After evaluating first expr in sequence, evaluate second
+    Seq { second: Rc<Expr>, env: Env },
+
+    /// Building a collection (list, tuple, or constructor)
+    Collect {
+        kind: CollectKind,
+        remaining: Vec<Expr>,
+        acc: Vec<Value>,
+        env: Env,
+    },
+
+    /// After evaluating scrutinee, try to match arms
+    Match { arms: Vec<MatchArm>, env: Env },
+    /// After evaluating a guard, decide whether to take this arm or try next
+    MatchGuard {
+        body: Rc<Expr>,
+        remaining_arms: Vec<MatchArm>,
+        scrutinee: Value,
+        bound_env: Env,   // env with pattern bindings for this arm
+        outer_env: Env,   // original env for trying next arm
+    },
+
+    // === Concurrency frames ===
+    /// After evaluating the thunk expression for spawn
+    Spawn,
+    /// After evaluating channel expr in send, evaluate the value
+    SendChan { value_expr: Rc<Expr>, env: Env },
+    /// After evaluating value in send, perform the send
+    SendVal { channel: ChannelId },
+    /// After evaluating channel expr in recv, perform the recv
+    Recv,
+
+    // === Select frames ===
+    /// Evaluating channel expressions for select, collecting them
+    SelectChans {
+        /// Patterns for each arm (parallel to channels being collected)
+        patterns: Vec<Pattern>,
+        /// Body expressions for each arm
+        bodies: Vec<Rc<Expr>>,
+        /// Channel expressions still to evaluate
+        remaining_chans: Vec<Expr>,
+        /// Channel IDs already evaluated
+        collected_chans: Vec<ChannelId>,
+        env: Env,
+    },
+
+    /// All channels evaluated, now perform the select
+    SelectReady {
+        /// Channel IDs to select from
+        channels: Vec<ChannelId>,
+        /// Corresponding patterns
+        patterns: Vec<Pattern>,
+        /// Corresponding bodies
+        bodies: Vec<Rc<Expr>>,
+        env: Env,
+    },
+}
+
+/// What kind of collection we're building
+#[derive(Debug, Clone)]
+pub enum CollectKind {
+    List,
+    Tuple,
+    Constructor { name: String },
+}
+
+/// The continuation stack
+#[derive(Debug, Clone)]
+pub struct Cont {
+    frames: Vec<Frame>,
+}
+
+impl Cont {
+    pub fn new() -> Self {
+        Self { frames: Vec::new() }
+    }
+
+    pub fn push(&mut self, frame: Frame) {
+        self.frames.push(frame);
+    }
+
+    pub fn pop(&mut self) -> Option<Frame> {
+        self.frames.pop()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+}
+
+impl Default for Cont {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Machine state - either evaluating an expression or returning a value
+#[derive(Debug, Clone)]
+pub enum State {
+    /// Evaluate an expression in an environment
+    Eval { expr: Rc<Expr>, env: Env, cont: Cont },
+    /// Return a value to the continuation
+    Apply { value: Value, cont: Cont },
+}
+
+/// Result of a single step
+pub enum StepResult {
+    /// Keep stepping with this new state
+    Continue(State),
+    /// Evaluation completed with a final value
+    Done(Value),
+    /// Process needs to block (for concurrency)
+    Blocked { reason: BlockReason, state: State },
+    /// An error occurred
+    Error(EvalError),
+}
+
+/// Why a process is blocked (for concurrency)
+#[derive(Debug, Clone)]
+pub enum BlockReason {
+    Send { channel: ChannelId, value: Value },
+    Recv { channel: ChannelId },
+    Select { channels: Vec<ChannelId> },
+}
+
+// ============================================================================
 
 /// Runtime values
 #[derive(Debug, Clone)]
@@ -161,15 +317,16 @@ impl Interpreter {
             self.eval_decl(decl)?;
         }
 
-        // Look for a main function and run it
+        // Look for a main function and run it as a process
         let main_fn = self.global_env.borrow().get("main");
         if let Some(main) = main_fn {
-            let result = self.apply(main, Value::Unit)?;
+            // Spawn main as a process so it can use channels
+            self.runtime.spawn(main);
 
-            // Run the scheduler if there are spawned processes
+            // Run the scheduler until all processes complete
             self.run_scheduler()?;
 
-            Ok(result)
+            Ok(Value::Unit)
         } else {
             Ok(Value::Unit)
         }
@@ -185,7 +342,8 @@ impl Interpreter {
                 ..
             } => {
                 if params.is_empty() {
-                    let value = self.eval(&self.global_env.clone(), body)?;
+                    let env = self.global_env.clone();
+                    let value = self.eval_expr(&env, body)?;
                     self.global_env.borrow_mut().define(name.clone(), value);
                 } else {
                     // For functions, create a closure that captures the global env
@@ -207,165 +365,584 @@ impl Interpreter {
         }
     }
 
-    /// Evaluate an expression
-    pub fn eval(&mut self, env: &Env, expr: &Expr) -> Result<Value, EvalError> {
-        match &expr.node {
-            ExprKind::Lit(lit) => Ok(self.eval_literal(lit)),
+    // ========================================================================
+    // Step-based evaluation (defunctionalized CPS)
+    // ========================================================================
 
-            ExprKind::Var(name) => env
-                .borrow()
-                .get(name)
-                .ok_or_else(|| EvalError::UnboundVariable(name.clone())),
+    /// Evaluate an expression to completion (convenience wrapper)
+    pub fn eval_expr(&mut self, env: &Env, expr: &Expr) -> Result<Value, EvalError> {
+        let state = State::Eval {
+            expr: Rc::new(expr.clone()),
+            env: env.clone(),
+            cont: Cont::new(),
+        };
+        self.run_to_completion(state)
+    }
 
-            ExprKind::Lambda { params, body } => Ok(Value::Closure {
-                params: params.clone(),
-                body: body.clone(),
-                env: env.clone(),
-            }),
+    /// Apply a function value to an argument (convenience wrapper)
+    fn apply_value(&mut self, func: Value, arg: Value) -> Result<Value, EvalError> {
+        let mut cont = Cont::new();
+        cont.push(Frame::AppArg { func });
+        let state = State::Apply { value: arg, cont };
+        self.run_to_completion(state)
+    }
 
+    /// Run the machine until completion, error, or block
+    fn run_to_completion(&mut self, mut state: State) -> Result<Value, EvalError> {
+        loop {
+            match self.step(state) {
+                StepResult::Continue(next) => state = next,
+                StepResult::Done(value) => return Ok(value),
+                StepResult::Error(e) => return Err(e),
+                StepResult::Blocked { .. } => {
+                    return Err(EvalError::RuntimeError(
+                        "main thread cannot block".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Execute a single step of the machine
+    pub fn step(&mut self, state: State) -> StepResult {
+        match state {
+            State::Eval { expr, env, cont } => self.step_eval(&expr.node, env, cont),
+            State::Apply { value, cont } => self.step_apply(value, cont),
+        }
+    }
+
+    /// Step when in Eval mode - evaluate an expression
+    fn step_eval(&mut self, expr: &ExprKind, env: Env, mut cont: Cont) -> StepResult {
+        match expr {
+            // === Immediate values - go straight to Apply ===
+            ExprKind::Lit(lit) => {
+                let value = self.eval_literal(lit);
+                StepResult::Continue(State::Apply { value, cont })
+            }
+
+            ExprKind::Var(name) => {
+                match env.borrow().get(name) {
+                    Some(value) => StepResult::Continue(State::Apply { value, cont }),
+                    None => StepResult::Error(EvalError::UnboundVariable(name.clone())),
+                }
+            }
+
+            ExprKind::Lambda { params, body } => {
+                let value = Value::Closure {
+                    params: params.clone(),
+                    body: body.clone(),
+                    env: env.clone(),
+                };
+                StepResult::Continue(State::Apply { value, cont })
+            }
+
+            // === Compound expressions - push frames and evaluate sub-expressions ===
             ExprKind::App { func, arg } => {
-                let func_val = self.eval(env, func)?;
-                let arg_val = self.eval(env, arg)?;
-                self.apply(func_val, arg_val)
+                cont.push(Frame::AppFunc { arg: arg.clone(), env: env.clone() });
+                StepResult::Continue(State::Eval { expr: func.clone(), env, cont })
             }
 
-            ExprKind::Let {
-                pattern,
-                value,
-                body,
-            } => {
-                let val = self.eval(env, value)?;
-                let new_env = EnvInner::with_parent(env);
-                self.bind_pattern(&new_env, pattern, &val)?;
-
-                if let Some(body) = body {
-                    self.eval(&new_env, body)
-                } else {
-                    Ok(Value::Unit)
-                }
+            ExprKind::Let { pattern, value, body } => {
+                cont.push(Frame::Let {
+                    pattern: pattern.clone(),
+                    body: body.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval { expr: value.clone(), env, cont })
             }
 
-            ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                let cond_val = self.eval(env, cond)?;
-                match cond_val {
-                    Value::Bool(true) => self.eval(env, then_branch),
-                    Value::Bool(false) => self.eval(env, else_branch),
-                    _ => Err(EvalError::TypeError("expected bool in condition".into())),
-                }
-            }
-
-            ExprKind::Match { scrutinee, arms } => {
-                let val = self.eval(env, scrutinee)?;
-
-                for arm in arms {
-                    let new_env = EnvInner::with_parent(env);
-                    if self.try_bind_pattern(&new_env, &arm.pattern, &val) {
-                        // Check guard if present
-                        if let Some(guard) = &arm.guard {
-                            let guard_val = self.eval(&new_env, guard)?;
-                            if let Value::Bool(false) = guard_val {
-                                continue;
-                            }
-                        }
-                        return self.eval(&new_env, &arm.body);
-                    }
-                }
-
-                Err(EvalError::MatchFailed)
-            }
-
-            ExprKind::Tuple(exprs) => {
-                let values: Result<Vec<_>, _> =
-                    exprs.iter().map(|e| self.eval(env, e)).collect();
-                Ok(Value::Tuple(values?))
-            }
-
-            ExprKind::List(exprs) => {
-                let values: Result<Vec<_>, _> =
-                    exprs.iter().map(|e| self.eval(env, e)).collect();
-                Ok(Value::List(values?))
-            }
-
-            ExprKind::Constructor { name, args } => {
-                let values: Result<Vec<_>, _> =
-                    args.iter().map(|e| self.eval(env, e)).collect();
-                Ok(Value::Constructor {
-                    name: name.clone(),
-                    fields: values?,
-                })
+            ExprKind::If { cond, then_branch, else_branch } => {
+                cont.push(Frame::If {
+                    then_branch: then_branch.clone(),
+                    else_branch: else_branch.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval { expr: cond.clone(), env, cont })
             }
 
             ExprKind::BinOp { op, left, right } => {
-                let l = self.eval(env, left)?;
-                let r = self.eval(env, right)?;
-                self.eval_binop(*op, l, r)
+                cont.push(Frame::BinOpLeft {
+                    op: *op,
+                    right: right.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval { expr: left.clone(), env, cont })
             }
 
             ExprKind::UnaryOp { op, operand } => {
-                let val = self.eval(env, operand)?;
-                self.eval_unaryop(*op, val)
+                cont.push(Frame::UnaryOp { op: *op });
+                StepResult::Continue(State::Eval { expr: operand.clone(), env, cont })
             }
 
             ExprKind::Seq { first, second } => {
-                self.eval(env, first)?;
-                self.eval(env, second)
+                cont.push(Frame::Seq { second: second.clone(), env: env.clone() });
+                StepResult::Continue(State::Eval { expr: first.clone(), env, cont })
             }
 
-            // Concurrency primitives
+            ExprKind::Match { scrutinee, arms } => {
+                cont.push(Frame::Match { arms: arms.clone(), env: env.clone() });
+                StepResult::Continue(State::Eval { expr: scrutinee.clone(), env, cont })
+            }
+
+            ExprKind::Tuple(exprs) => {
+                self.start_collect(CollectKind::Tuple, exprs.clone(), env, cont)
+            }
+
+            ExprKind::List(exprs) => {
+                self.start_collect(CollectKind::List, exprs.clone(), env, cont)
+            }
+
+            ExprKind::Constructor { name, args } => {
+                self.start_collect(
+                    CollectKind::Constructor { name: name.clone() },
+                    args.clone(),
+                    env,
+                    cont,
+                )
+            }
+
+            // === Concurrency primitives (basic implementation for now) ===
             ExprKind::Spawn(body) => {
-                let thunk = self.eval(env, body)?;
-                let pid = self.runtime.spawn(thunk);
-                Ok(Value::Pid(pid))
+                cont.push(Frame::Spawn);
+                StepResult::Continue(State::Eval { expr: body.clone(), env, cont })
             }
 
             ExprKind::NewChannel => {
                 let id = self.runtime.new_channel();
-                Ok(Value::Channel(id))
+                StepResult::Continue(State::Apply { value: Value::Channel(id), cont })
             }
 
             ExprKind::ChanSend { channel, value } => {
-                let chan_val = self.eval(env, channel)?;
-                let val = self.eval(env, value)?;
-
-                let channel_id = match chan_val {
-                    Value::Channel(id) => id,
-                    _ => return Err(EvalError::TypeError("expected channel".into())),
-                };
-
-                // In a real implementation, this would suspend the process
-                // For now, we'll handle it in the scheduler
-                if self.runtime.current_pid().is_some() {
-                    self.runtime.send(channel_id, val);
-                }
-                Ok(Value::Unit)
+                cont.push(Frame::SendChan { value_expr: value.clone(), env: env.clone() });
+                StepResult::Continue(State::Eval { expr: channel.clone(), env, cont })
             }
 
             ExprKind::ChanRecv(channel) => {
-                let chan_val = self.eval(env, channel)?;
+                cont.push(Frame::Recv);
+                StepResult::Continue(State::Eval { expr: channel.clone(), env, cont })
+            }
 
-                let channel_id = match chan_val {
+            ExprKind::Select { arms } => {
+                if arms.is_empty() {
+                    // Empty select blocks forever (or error)
+                    return StepResult::Error(EvalError::RuntimeError("empty select".into()));
+                }
+
+                // Extract components from arms
+                let patterns: Vec<Pattern> = arms.iter().map(|a| a.pattern.clone()).collect();
+                let bodies: Vec<Rc<Expr>> = arms.iter().map(|a| Rc::new(a.body.clone())).collect();
+                let chan_exprs: Vec<Expr> = arms.iter().map(|a| a.channel.clone()).collect();
+
+                // Start evaluating the first channel expression
+                let mut remaining = chan_exprs;
+                let first = remaining.remove(0);
+
+                cont.push(Frame::SelectChans {
+                    patterns,
+                    bodies,
+                    remaining_chans: remaining,
+                    collected_chans: Vec::new(),
+                    env: env.clone(),
+                });
+
+                StepResult::Continue(State::Eval {
+                    expr: Rc::new(first),
+                    env,
+                    cont,
+                })
+            }
+        }
+    }
+
+    /// Start collecting values for a list/tuple/constructor
+    fn start_collect(
+        &mut self,
+        kind: CollectKind,
+        exprs: Vec<Expr>,
+        env: Env,
+        mut cont: Cont,
+    ) -> StepResult {
+        if exprs.is_empty() {
+            // No elements - immediately produce the value
+            let value = match kind {
+                CollectKind::List => Value::List(vec![]),
+                CollectKind::Tuple => Value::Tuple(vec![]),
+                CollectKind::Constructor { name } => Value::Constructor { name, fields: vec![] },
+            };
+            StepResult::Continue(State::Apply { value, cont })
+        } else {
+            // Evaluate first element, queue the rest
+            let first = Rc::new(exprs[0].clone());
+            let remaining = exprs[1..].to_vec();
+            cont.push(Frame::Collect { kind, remaining, acc: vec![], env: env.clone() });
+            StepResult::Continue(State::Eval { expr: first, env, cont })
+        }
+    }
+
+    /// Step when in Apply mode - return a value to the continuation
+    fn step_apply(&mut self, value: Value, mut cont: Cont) -> StepResult {
+        match cont.pop() {
+            None => {
+                // No more frames - we're done!
+                StepResult::Done(value)
+            }
+
+            Some(Frame::AppFunc { arg, env }) => {
+                // Got the function, now evaluate the argument
+                cont.push(Frame::AppArg { func: value });
+                StepResult::Continue(State::Eval { expr: arg, env, cont })
+            }
+
+            Some(Frame::AppArg { func }) => {
+                // Got the argument, now apply
+                self.do_apply(func, value, cont)
+            }
+
+            Some(Frame::Let { pattern, body, env }) => {
+                // Got the value, bind pattern
+                let new_env = EnvInner::with_parent(&env);
+                if !self.try_bind_pattern(&new_env, &pattern, &value) {
+                    return StepResult::Error(EvalError::MatchFailed);
+                }
+                match body {
+                    Some(body) => StepResult::Continue(State::Eval { expr: body, env: new_env, cont }),
+                    None => StepResult::Continue(State::Apply { value: Value::Unit, cont }),
+                }
+            }
+
+            Some(Frame::If { then_branch, else_branch, env }) => {
+                match value {
+                    Value::Bool(true) => {
+                        StepResult::Continue(State::Eval { expr: then_branch, env, cont })
+                    }
+                    Value::Bool(false) => {
+                        StepResult::Continue(State::Eval { expr: else_branch, env, cont })
+                    }
+                    _ => StepResult::Error(EvalError::TypeError("expected bool in condition".into())),
+                }
+            }
+
+            Some(Frame::BinOpLeft { op, right, env }) => {
+                cont.push(Frame::BinOpRight { op, left: value });
+                StepResult::Continue(State::Eval { expr: right, env, cont })
+            }
+
+            Some(Frame::BinOpRight { op, left }) => {
+                match self.eval_binop(op, left, value) {
+                    Ok(result) => StepResult::Continue(State::Apply { value: result, cont }),
+                    Err(e) => StepResult::Error(e),
+                }
+            }
+
+            Some(Frame::UnaryOp { op }) => {
+                match self.eval_unaryop(op, value) {
+                    Ok(result) => StepResult::Continue(State::Apply { value: result, cont }),
+                    Err(e) => StepResult::Error(e),
+                }
+            }
+
+            Some(Frame::Seq { second, env }) => {
+                // Discard value, evaluate second
+                StepResult::Continue(State::Eval { expr: second, env, cont })
+            }
+
+            Some(Frame::Collect { kind, remaining, mut acc, env }) => {
+                acc.push(value);
+                if remaining.is_empty() {
+                    // All collected, produce the value
+                    let result = match kind {
+                        CollectKind::List => Value::List(acc),
+                        CollectKind::Tuple => Value::Tuple(acc),
+                        CollectKind::Constructor { name } => Value::Constructor { name, fields: acc },
+                    };
+                    StepResult::Continue(State::Apply { value: result, cont })
+                } else {
+                    // More to collect
+                    let next = Rc::new(remaining[0].clone());
+                    let rest = remaining[1..].to_vec();
+                    cont.push(Frame::Collect { kind, remaining: rest, acc, env: env.clone() });
+                    StepResult::Continue(State::Eval { expr: next, env, cont })
+                }
+            }
+
+            Some(Frame::Match { arms, env }) => {
+                self.try_match_arms(value, arms, env, cont)
+            }
+
+            Some(Frame::MatchGuard { body, remaining_arms, scrutinee, bound_env, outer_env }) => {
+                match value {
+                    Value::Bool(true) => {
+                        // Guard passed, evaluate body
+                        StepResult::Continue(State::Eval { expr: body, env: bound_env, cont })
+                    }
+                    Value::Bool(false) => {
+                        // Guard failed, try remaining arms
+                        self.try_match_arms(scrutinee, remaining_arms, outer_env, cont)
+                    }
+                    _ => StepResult::Error(EvalError::TypeError("guard must be bool".into())),
+                }
+            }
+
+            // === Concurrency frames ===
+            Some(Frame::Spawn) => {
+                let pid = self.runtime.spawn(value);
+                StepResult::Continue(State::Apply { value: Value::Pid(pid), cont })
+            }
+
+            Some(Frame::SendChan { value_expr, env }) => {
+                let channel = match value {
                     Value::Channel(id) => id,
-                    _ => return Err(EvalError::TypeError("expected channel".into())),
+                    _ => return StepResult::Error(EvalError::TypeError("expected channel".into())),
                 };
+                cont.push(Frame::SendVal { channel });
+                StepResult::Continue(State::Eval { expr: value_expr, env, cont })
+            }
 
-                // In a real implementation, this would suspend the process
-                if let Some(_pid) = self.runtime.current_pid() {
-                    if let Some(value) = self.runtime.recv(channel_id) {
-                        return Ok(value);
+            Some(Frame::SendVal { channel }) => {
+                // We have the channel and the value to send
+                // Check if there's a waiting receiver (rendezvous)
+                if self.runtime.send(channel, value) {
+                    // Immediate rendezvous - sender continues with Unit
+                    StepResult::Continue(State::Apply { value: Value::Unit, cont })
+                } else {
+                    // No receiver ready - block this process
+                    // The continuation expects Unit when we resume
+                    StepResult::Blocked {
+                        reason: BlockReason::Send { channel, value: Value::Unit },
+                        state: State::Apply { value: Value::Unit, cont },
                     }
                 }
-                // Blocked - return unit for now (scheduler handles this)
-                Ok(Value::Unit)
             }
 
-            ExprKind::Select { arms: _ } => {
-                // Select is complex - for now, unimplemented
-                Err(EvalError::RuntimeError("select not yet implemented".into()))
+            Some(Frame::Recv) => {
+                let channel = match value {
+                    Value::Channel(id) => id,
+                    _ => return StepResult::Error(EvalError::TypeError("expected channel".into())),
+                };
+                // Check if there's a waiting sender (rendezvous)
+                if let Some(received) = self.runtime.recv(channel) {
+                    // Immediate rendezvous - got value from sender
+                    StepResult::Continue(State::Apply { value: received, cont })
+                } else {
+                    // No sender ready - block this process
+                    // When we resume, we'll have a received value
+                    StepResult::Blocked {
+                        reason: BlockReason::Recv { channel },
+                        state: State::Apply { value: Value::Unit, cont }, // placeholder, will be replaced
+                    }
+                }
             }
+
+            // === Select frames ===
+            Some(Frame::SelectChans {
+                patterns,
+                bodies,
+                mut remaining_chans,
+                mut collected_chans,
+                env,
+            }) => {
+                // Value should be a channel
+                let channel_id = match value {
+                    Value::Channel(id) => id,
+                    _ => return StepResult::Error(EvalError::TypeError(
+                        "select arm must be a channel".into()
+                    )),
+                };
+
+                collected_chans.push(channel_id);
+
+                if remaining_chans.is_empty() {
+                    // All channels evaluated, now do the select
+                    cont.push(Frame::SelectReady {
+                        channels: collected_chans,
+                        patterns,
+                        bodies,
+                        env: env.clone(),
+                    });
+
+                    // Return unit to trigger the SelectReady frame
+                    StepResult::Continue(State::Apply {
+                        value: Value::Unit,
+                        cont,
+                    })
+                } else {
+                    // More channels to evaluate
+                    let next = remaining_chans.remove(0);
+
+                    cont.push(Frame::SelectChans {
+                        patterns,
+                        bodies,
+                        remaining_chans,
+                        collected_chans,
+                        env: env.clone(),
+                    });
+
+                    StepResult::Continue(State::Eval {
+                        expr: Rc::new(next),
+                        env,
+                        cont,
+                    })
+                }
+            }
+
+            Some(Frame::SelectReady {
+                channels,
+                patterns,
+                bodies,
+                env,
+            }) => {
+                // Check if we're resuming after being woken (a channel fired)
+                if let Some(pid) = self.runtime.current_pid() {
+                    if let Some(fired_channel) = self.runtime.take_select_fired_channel(pid) {
+                        // Find which arm this channel corresponds to
+                        if let Some(i) = channels.iter().position(|&ch| ch == fired_channel) {
+                            // Get the received value
+                            let recv_value = self.runtime.take_received_value(pid)
+                                .unwrap_or(Value::Unit);
+
+                            // Bind pattern and evaluate body
+                            let new_env = EnvInner::with_parent(&env);
+                            if self.try_bind_pattern(&new_env, &patterns[i], &recv_value) {
+                                return StepResult::Continue(State::Eval {
+                                    expr: bodies[i].clone(),
+                                    env: new_env,
+                                    cont,
+                                });
+                            } else {
+                                return StepResult::Error(EvalError::MatchFailed);
+                            }
+                        }
+                    }
+                }
+
+                // Not resuming from a wakeup - check if any channel has a waiting sender
+                for (i, &channel_id) in channels.iter().enumerate() {
+                    if let Some(recv_value) = self.runtime.try_recv(channel_id) {
+                        // Got a value! Bind pattern and evaluate body
+                        let new_env = EnvInner::with_parent(&env);
+                        if self.try_bind_pattern(&new_env, &patterns[i], &recv_value) {
+                            return StepResult::Continue(State::Eval {
+                                expr: bodies[i].clone(),
+                                env: new_env,
+                                cont,
+                            });
+                        } else {
+                            return StepResult::Error(EvalError::MatchFailed);
+                        }
+                    }
+                }
+
+                // No channel ready - block on all of them
+                self.runtime.block_on_select(&channels);
+
+                StepResult::Blocked {
+                    reason: BlockReason::Select { channels: channels.clone() },
+                    state: State::Apply {
+                        value: Value::Unit,
+                        cont: {
+                            let mut new_cont = cont;
+                            new_cont.push(Frame::SelectReady {
+                                channels,
+                                patterns,
+                                bodies,
+                                env,
+                            });
+                            new_cont
+                        },
+                    },
+                }
+            }
+        }
+    }
+
+    /// Try to match a value against a list of arms
+    fn try_match_arms(
+        &mut self,
+        scrutinee: Value,
+        arms: Vec<MatchArm>,
+        env: Env,
+        cont: Cont,
+    ) -> StepResult {
+        for (i, arm) in arms.iter().enumerate() {
+            let bound_env = EnvInner::with_parent(&env);
+            if self.try_bind_pattern(&bound_env, &arm.pattern, &scrutinee) {
+                // Pattern matched
+                if let Some(guard) = &arm.guard {
+                    // Has a guard - evaluate it
+                    let remaining = arms[i + 1..].to_vec();
+                    let mut cont = cont;
+                    cont.push(Frame::MatchGuard {
+                        body: Rc::new(arm.body.clone()),
+                        remaining_arms: remaining,
+                        scrutinee: scrutinee.clone(),
+                        bound_env: bound_env.clone(),
+                        outer_env: env.clone(),
+                    });
+                    return StepResult::Continue(State::Eval {
+                        expr: Rc::new(guard.clone()),
+                        env: bound_env,
+                        cont,
+                    });
+                } else {
+                    // No guard - evaluate body
+                    return StepResult::Continue(State::Eval {
+                        expr: Rc::new(arm.body.clone()),
+                        env: bound_env,
+                        cont,
+                    });
+                }
+            }
+        }
+        // No arm matched
+        StepResult::Error(EvalError::MatchFailed)
+    }
+
+    /// Apply a function value to an argument value
+    fn do_apply(&mut self, func: Value, arg: Value, cont: Cont) -> StepResult {
+        match func {
+            Value::Closure { params, body, env } => {
+                if params.is_empty() {
+                    return StepResult::Error(EvalError::TypeError("applying non-function".into()));
+                }
+
+                let new_env = EnvInner::with_parent(&env);
+                if !self.try_bind_pattern(&new_env, &params[0], &arg) {
+                    return StepResult::Error(EvalError::MatchFailed);
+                }
+
+                if params.len() == 1 {
+                    // All parameters bound, evaluate body
+                    StepResult::Continue(State::Eval { expr: body, env: new_env, cont })
+                } else {
+                    // Partial application - return closure with remaining params
+                    let remaining = Value::Closure {
+                        params: params[1..].to_vec(),
+                        body,
+                        env: new_env,
+                    };
+                    StepResult::Continue(State::Apply { value: remaining, cont })
+                }
+            }
+
+            Value::Builtin(name) => {
+                match self.apply_builtin(&name, arg) {
+                    Ok(value) => StepResult::Continue(State::Apply { value, cont }),
+                    Err(e) => StepResult::Error(e),
+                }
+            }
+
+            Value::Constructor { name, fields } => {
+                // Constructor application adds to fields
+                let mut new_fields = fields;
+                new_fields.push(arg);
+                let value = Value::Constructor { name, fields: new_fields };
+                StepResult::Continue(State::Apply { value, cont })
+            }
+
+            _ => StepResult::Error(EvalError::TypeError(format!(
+                "cannot apply {}",
+                func.type_name()
+            ))),
         }
     }
 
@@ -461,48 +1038,6 @@ impl Interpreter {
                 "cannot apply {:?} to {}",
                 op,
                 val.type_name()
-            ))),
-        }
-    }
-
-    /// Apply a function to an argument
-    fn apply(&mut self, func: Value, arg: Value) -> Result<Value, EvalError> {
-        match func {
-            Value::Closure { params, body, env } => {
-                if params.is_empty() {
-                    return Err(EvalError::TypeError("applying non-function".into()));
-                }
-
-                let new_env = EnvInner::with_parent(&env);
-
-                // Bind the first parameter
-                self.bind_pattern(&new_env, &params[0], &arg)?;
-
-                if params.len() == 1 {
-                    // All parameters bound, evaluate body
-                    self.eval(&new_env, &body)
-                } else {
-                    // Return a closure with remaining parameters
-                    Ok(Value::Closure {
-                        params: params[1..].to_vec(),
-                        body,
-                        env: new_env,
-                    })
-                }
-            }
-            Value::Builtin(name) => self.apply_builtin(&name, arg),
-            Value::Constructor { name, fields } => {
-                // Constructor application adds to fields
-                let mut new_fields = fields;
-                new_fields.push(arg);
-                Ok(Value::Constructor {
-                    name,
-                    fields: new_fields,
-                })
-            }
-            _ => Err(EvalError::TypeError(format!(
-                "cannot apply {}",
-                func.type_name()
             ))),
         }
     }
@@ -623,46 +1158,50 @@ impl Interpreter {
         }
     }
 
-    /// Bind a pattern or return an error
-    fn bind_pattern(&self, env: &Env, pattern: &Pattern, val: &Value) -> Result<(), EvalError> {
-        if self.try_bind_pattern(env, pattern, val) {
-            Ok(())
-        } else {
-            Err(EvalError::MatchFailed)
-        }
-    }
-
     /// Run the scheduler until all processes complete or deadlock
     fn run_scheduler(&mut self) -> Result<(), EvalError> {
+
         // Simple round-robin scheduler
         while let Some(pid) = self.runtime.next_ready() {
             self.runtime.set_current(Some(pid));
 
-            if let Some(cont) = self.runtime.take_continuation(pid) {
-                match cont {
+            if let Some(pcont) = self.runtime.take_continuation(pid) {
+                match pcont {
                     ProcessContinuation::Start(thunk) => {
-                        // Apply the thunk to unit
-                        match self.apply(thunk, Value::Unit) {
-                            Ok(_) => {
-                                self.runtime.mark_done(pid);
-                            }
-                            Err(e) => {
-                                eprintln!("Process {} error: {}", pid, e);
-                                self.runtime.mark_done(pid);
-                            }
-                        }
+                        // Start a new process: apply thunk to unit
+                        self.run_process(pid, thunk)?;
                     }
-                    ProcessContinuation::AfterRecv => {
-                        // Process was waiting for a value
-                        if let Some(_value) = self.runtime.take_received_value(pid) {
-                            // In a full implementation, we'd resume the process
-                            // with this value as the result of the recv
+                    ProcessContinuation::ResumeAfterRecv => {
+                        // Process was waiting to receive - resume with received value
+                        if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
+                            let value = self.runtime.take_received_value(pid)
+                                .unwrap_or(Value::Unit);
+                            // Resume by applying the received value to the saved continuation
+                            let state = State::Apply { value, cont: saved_cont };
+                            self.run_state(pid, state)?;
+                        } else {
+                            // No saved continuation - shouldn't happen
                             self.runtime.mark_done(pid);
                         }
                     }
-                    ProcessContinuation::AfterSend => {
-                        // Send completed, process can continue
-                        self.runtime.mark_done(pid);
+                    ProcessContinuation::ResumeAfterSelect => {
+                        // Process was blocked on select - SelectReady frame handles the value
+                        if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
+                            // Don't take the received value here - SelectReady frame will get it
+                            let state = State::Apply { value: Value::Unit, cont: saved_cont };
+                            self.run_state(pid, state)?;
+                        } else {
+                            self.runtime.mark_done(pid);
+                        }
+                    }
+                    ProcessContinuation::ResumeAfterSend => {
+                        // Process was waiting to send - resume with Unit
+                        if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
+                            let state = State::Apply { value: Value::Unit, cont: saved_cont };
+                            self.run_state(pid, state)?;
+                        } else {
+                            self.runtime.mark_done(pid);
+                        }
                     }
                 }
             }
@@ -674,6 +1213,44 @@ impl Interpreter {
             Err(EvalError::Deadlock)
         } else {
             Ok(())
+        }
+    }
+
+    /// Run a process starting from a thunk
+    fn run_process(&mut self, pid: Pid, thunk: Value) -> Result<(), EvalError> {
+        // Build initial state: apply thunk to Unit
+        let mut cont = Cont::new();
+        cont.push(Frame::AppArg { func: thunk });
+        let state = State::Apply { value: Value::Unit, cont };
+        self.run_state(pid, state)
+    }
+
+    /// Run the step machine from a given state until done or blocked
+    fn run_state(&mut self, pid: Pid, mut state: State) -> Result<(), EvalError> {
+        loop {
+            match self.step(state) {
+                StepResult::Continue(next) => {
+                    state = next;
+                }
+                StepResult::Done(_value) => {
+                    self.runtime.mark_done(pid);
+                    return Ok(());
+                }
+                StepResult::Blocked { state: blocked_state, .. } => {
+                    // Save the continuation for later resumption
+                    // The blocked_state contains the continuation to resume with
+                    if let State::Apply { cont, .. } = blocked_state {
+                        self.runtime.save_cont(pid, cont);
+                    }
+                    // Process is now blocked - scheduler will pick up another process
+                    return Ok(());
+                }
+                StepResult::Error(e) => {
+                    eprintln!("Process {} error: {}", pid, e);
+                    self.runtime.mark_done(pid);
+                    return Err(e);
+                }
+            }
         }
     }
 }
@@ -696,7 +1273,7 @@ mod tests {
         let expr = parser.parse_expr().unwrap();
         let mut interp = Interpreter::new();
         let env = EnvInner::new();
-        interp.eval(&env, &expr)
+        interp.eval_expr(&env, &expr)
     }
 
     #[test]
@@ -727,5 +1304,330 @@ mod tests {
     fn test_list() {
         let val = eval("[1, 2, 3]").unwrap();
         assert!(matches!(val, Value::List(_)));
+    }
+
+    #[test]
+    fn test_match() {
+        let val = eval("match 1 with | 1 -> 42 | _ -> 0").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_tuple() {
+        let val = eval("(1, 2, 3)").unwrap();
+        match val {
+            Value::Tuple(items) => assert_eq!(items.len(), 3),
+            _ => panic!("expected tuple"),
+        }
+    }
+
+    #[test]
+    fn test_nested_application() {
+        let val = eval("(fun x -> fun y -> x + y) 3 4").unwrap();
+        assert!(matches!(val, Value::Int(7)));
+    }
+
+    #[test]
+    fn test_seq() {
+        let val = eval("let _ = 1 in 2; 3").unwrap();
+        assert!(matches!(val, Value::Int(3)));
+    }
+
+    // ========================================================================
+    // Concurrency tests
+    // ========================================================================
+
+    /// Helper to run a program (with main) and check it completes without error
+    fn run_program(input: &str) -> Result<(), EvalError> {
+        let tokens = Lexer::new(input).tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interp = Interpreter::new();
+        interp.run(&program)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_channel_create() {
+        let val = eval("Channel.new").unwrap();
+        assert!(matches!(val, Value::Channel(_)));
+    }
+
+    #[test]
+    fn test_spawn_returns_pid() {
+        let val = eval("spawn (fun () -> 42)").unwrap();
+        assert!(matches!(val, Value::Pid(_)));
+    }
+
+    #[test]
+    fn test_channel_send_recv_immediate_rendezvous() {
+        // Sender spawned first, blocks waiting for receiver
+        // Then main receives, unblocking sender
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch 42) in
+    Channel.recv ch
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_channel_recv_then_send() {
+        // Main tries to receive first (blocks), then spawned process sends
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch 99) in
+    let x = Channel.recv ch in
+    x
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_ping_pong() {
+        // Two processes exchanging messages
+        let program = r#"
+let main () =
+    let ping_ch = Channel.new in
+    let pong_ch = Channel.new in
+    let _ = spawn (fun () ->
+        let x = Channel.recv ping_ch in
+        Channel.send pong_ch (x + 1)
+    ) in
+    Channel.send ping_ch 10;
+    Channel.recv pong_ch
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_multiple_messages() {
+        // Send multiple values through a channel
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () ->
+        Channel.send ch 1;
+        Channel.send ch 2;
+        Channel.send ch 3
+    ) in
+    let a = Channel.recv ch in
+    let b = Channel.recv ch in
+    let c = Channel.recv ch in
+    a + b + c
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_deadlock_detection() {
+        // Two processes both trying to receive - deadlock
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    Channel.recv ch
+"#;
+        let result = run_program(program);
+        assert!(matches!(result, Err(EvalError::Deadlock)));
+    }
+
+    #[test]
+    fn test_concurrent_interleaving_required() {
+        // This test MUST interleave to succeed.
+        // Process A sends on ch1, then receives on ch2
+        // Process B receives on ch1, then sends on ch2
+        //
+        // Sequential execution would deadlock:
+        //   - If A runs fully first: A blocks on send ch1 (no receiver yet)
+        //   - If B runs fully first: B blocks on recv ch1 (no sender yet)
+        //
+        // Only interleaving works:
+        //   1. A sends on ch1, blocks (or B already waiting)
+        //   2. B receives on ch1, continues
+        //   3. B sends on ch2
+        //   4. A receives on ch2, completes
+        let program = r#"
+let main () =
+    let ch1 = Channel.new in
+    let ch2 = Channel.new in
+    let _ = spawn (fun () ->
+        let x = Channel.recv ch1 in
+        Channel.send ch2 (x + 100)
+    ) in
+    Channel.send ch1 5;
+    Channel.recv ch2
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_producer_consumer_interleaving() {
+        // Producer sends 3 values, consumer receives 3 values
+        // With rendezvous semantics, each send blocks until recv
+        // This requires interleaving: send1, recv1, send2, recv2, send3, recv3
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () ->
+        Channel.send ch 1;
+        Channel.send ch 2;
+        Channel.send ch 3
+    ) in
+    let a = Channel.recv ch in
+    let b = Channel.recv ch in
+    let c = Channel.recv ch in
+    a + b + c
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_async_workers_pattern() {
+        // Spawn workers, do local work, then collect results
+        // This is a common async pattern: fan-out work, compute locally, fan-in results
+        let program = r#"
+let main () =
+    let r1 = Channel.new in
+    let r2 = Channel.new in
+
+    let _ = spawn (fun () -> Channel.send r1 (10 * 10)) in
+    let _ = spawn (fun () -> Channel.send r2 (5 + 5)) in
+
+    let local = 1 + 2 + 3 in
+
+    let v1 = Channel.recv r1 in
+    let v2 = Channel.recv r2 in
+
+    local + v1 + v2
+"#;
+        // local=6, v1=100, v2=10, total=116
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_bidirectional_ping_pong_proves_interleaving() {
+        // Main and worker alternate: main sends, worker receives and sends back, repeat
+        // This CANNOT work without interleaving - each step depends on the previous
+        let program = r#"
+let main () =
+    let to_worker = Channel.new in
+    let from_worker = Channel.new in
+    let _ = spawn (fun () ->
+        let a = Channel.recv to_worker in
+        Channel.send from_worker (a * 2);
+        let b = Channel.recv to_worker in
+        Channel.send from_worker (b * 2);
+        let c = Channel.recv to_worker in
+        Channel.send from_worker (c * 2)
+    ) in
+    Channel.send to_worker 1;
+    let r1 = Channel.recv from_worker in
+    Channel.send to_worker 2;
+    let r2 = Channel.recv from_worker in
+    Channel.send to_worker 3;
+    let r3 = Channel.recv from_worker in
+    r1 + r2 + r3
+"#;
+        // r1=2, r2=4, r3=6, sum=12
+        run_program(program).unwrap();
+    }
+
+    // ========================================================================
+    // Select tests
+    // ========================================================================
+
+    #[test]
+    fn test_select_basic() {
+        let program = r#"
+let main () =
+    let ch1 = Channel.new in
+    let ch2 = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch1 42) in
+    select
+    | x <- ch1 -> x
+    | y <- ch2 -> y
+    end
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_select_second_channel() {
+        let program = r#"
+let main () =
+    let ch1 = Channel.new in
+    let ch2 = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch2 99) in
+    select
+    | x <- ch1 -> x
+    | y <- ch2 -> y
+    end
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_select_with_pattern() {
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch (1, 2)) in
+    select
+    | (a, b) <- ch -> a + b
+    end
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_select_deadlock_no_senders() {
+        let program = r#"
+let main () =
+    let ch1 = Channel.new in
+    let ch2 = Channel.new in
+    select
+    | x <- ch1 -> x
+    | y <- ch2 -> y
+    end
+"#;
+        let result = run_program(program);
+        assert!(matches!(result, Err(EvalError::Deadlock)));
+    }
+
+    #[test]
+    fn test_select_multiple_ready() {
+        // Both channels have senders - should pick one (non-deterministic, but shouldn't deadlock)
+        let program = r#"
+let main () =
+    let ch1 = Channel.new in
+    let ch2 = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch1 1) in
+    let _ = spawn (fun () -> Channel.send ch2 2) in
+    select
+    | x <- ch1 -> x
+    | y <- ch2 -> y
+    end
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_select_server_pattern() {
+        // A server responding to requests via select
+        let program = r#"
+let main () =
+    let requests = Channel.new in
+    let responses = Channel.new in
+    let _ = spawn (fun () ->
+        select
+        | req <- requests -> Channel.send responses (req + 100)
+        end
+    ) in
+    Channel.send requests 42;
+    Channel.recv responses
+"#;
+        run_program(program).unwrap();
     }
 }

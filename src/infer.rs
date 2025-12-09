@@ -543,10 +543,27 @@ impl Inferencer {
                 Ok(elem_ty)
             }
 
-            ExprKind::Select { arms: _ } => {
-                // For now, just return a fresh type variable
-                // Proper select typing is more complex
-                Ok(self.fresh_var())
+            ExprKind::Select { arms } => {
+                // All arms must have compatible channel element types
+                // All arm bodies must have the same result type
+                let result_ty = self.fresh_var();
+
+                for arm in arms {
+                    // Infer channel type
+                    let chan_ty = self.infer_expr(env, &arm.channel)?;
+                    let elem_ty = self.fresh_var();
+                    self.unify(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())))?;
+
+                    // Bind pattern in arm's environment
+                    let mut arm_env = env.clone();
+                    self.bind_pattern(&mut arm_env, &arm.pattern, &elem_ty)?;
+
+                    // Infer body type and unify with result
+                    let body_ty = self.infer_expr(&arm_env, &arm.body)?;
+                    self.unify(&result_ty, &body_ty)?;
+                }
+
+                Ok(result_ty)
             }
         }
     }
@@ -816,5 +833,39 @@ mod tests {
     fn test_if() {
         let ty = infer("if true then 1 else 2").unwrap();
         assert!(matches!(ty, Type::Int));
+    }
+
+    fn typecheck_program(input: &str) -> Result<TypeEnv, TypeError> {
+        let tokens = Lexer::new(input).tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut inferencer = Inferencer::new();
+        inferencer.infer_program(&program)
+    }
+
+    #[test]
+    fn test_select_type_inference_consistent() {
+        // All arms must return same type - this should succeed
+        let good = r#"
+let f ch1 ch2 =
+    select
+    | x <- ch1 -> x + 1
+    | y <- ch2 -> y + 2
+    end
+"#;
+        assert!(typecheck_program(good).is_ok());
+    }
+
+    #[test]
+    fn test_select_type_inference_mismatch() {
+        // Mixed return types should fail
+        let bad = r#"
+let f ch1 ch2 =
+    select
+    | x <- ch1 -> x + 1
+    | y <- ch2 -> true
+    end
+"#;
+        assert!(typecheck_program(bad).is_err());
     }
 }

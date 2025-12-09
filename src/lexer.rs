@@ -30,6 +30,8 @@ pub enum Token {
     Else,
     Type,
     Spawn,
+    Select,
+    End,
 
     // Delimiters
     LParen,   // (
@@ -45,6 +47,7 @@ pub enum Token {
     // Operators
     Arrow,    // ->
     FatArrow, // =>
+    LArrow,   // <-
     Pipe,     // |
     Eq,       // =
     EqEq,     // ==
@@ -269,7 +272,10 @@ impl<'a> Lexer<'a> {
                 }
             }
             '<' => {
-                if self.peek() == Some('=') {
+                if self.peek() == Some('-') {
+                    self.advance();
+                    Token::LArrow
+                } else if self.peek() == Some('=') {
                     self.advance();
                     Token::Lte
                 } else if self.peek() == Some('|') {
@@ -459,6 +465,8 @@ impl<'a> Lexer<'a> {
             "false" => Token::False,
             "not" => Token::Not,
             "spawn" => Token::Spawn,
+            "select" => Token::Select,
+            "end" => Token::End,
             _ => {
                 if s.chars().next().unwrap().is_uppercase() {
                     Token::UpperIdent(s)
