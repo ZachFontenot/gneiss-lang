@@ -660,6 +660,26 @@ impl Interpreter {
             Some(Frame::Let { pattern, body, env }) => {
                 // Got the value, bind pattern
                 let new_env = EnvInner::with_parent(&env);
+
+                // For recursive functions: if binding a variable to a closure,
+                // patch the closure's environment to include itself
+                let value = match (&pattern.node, value) {
+                    (PatternKind::Var(name), Value::Closure { params, body: closure_body, env: closure_env }) => {
+                        // Create a recursive closure by making a new environment
+                        // that includes the binding to itself
+                        let recursive_env = EnvInner::with_parent(&closure_env);
+                        let recursive_closure = Value::Closure {
+                            params,
+                            body: closure_body,
+                            env: recursive_env.clone(),
+                        };
+                        // Add the binding to the recursive environment
+                        recursive_env.borrow_mut().define(name.clone(), recursive_closure.clone());
+                        recursive_closure
+                    }
+                    (_, value) => value,
+                };
+
                 if !self.try_bind_pattern(&new_env, &pattern, &value) {
                     return StepResult::Error(EvalError::MatchFailed);
                 }
@@ -1810,5 +1830,71 @@ let main () =
     with_reset (fun () -> 1 + shift (fun k -> k 10))
 "#;
         run_program(program).unwrap();
+    }
+
+    // ========================================================================
+    // Local recursive function tests
+    // ========================================================================
+
+    #[test]
+    fn test_local_recursive_function() {
+        // Local let with function syntax and recursion
+        let val = eval("
+            let f x = if x == 0 then 0 else x + f (x - 1) in
+            f 5
+        ").unwrap();
+        // 5 + 4 + 3 + 2 + 1 + 0 = 15
+        assert!(matches!(val, Value::Int(15)));
+    }
+
+    #[test]
+    fn test_local_recursive_function_factorial() {
+        let val = eval("
+            let fact n = if n == 0 then 1 else n * fact (n - 1) in
+            fact 5
+        ").unwrap();
+        // 5! = 120
+        assert!(matches!(val, Value::Int(120)));
+    }
+
+    #[test]
+    fn test_local_recursive_function_lambda_form() {
+        // Using explicit lambda syntax
+        let val = eval("
+            let f = fun x -> if x == 0 then 0 else x + f (x - 1) in
+            f 5
+        ").unwrap();
+        assert!(matches!(val, Value::Int(15)));
+    }
+
+    #[test]
+    fn test_local_function_non_recursive() {
+        // Non-recursive local function should still work
+        let val = eval("
+            let double x = x * 2 in
+            double 21
+        ").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_local_function_multiple_params() {
+        let val = eval("
+            let add x y = x + y in
+            add 10 32
+        ").unwrap();
+        assert!(matches!(val, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_nested_local_functions() {
+        let val = eval("
+            let outer x =
+                let inner y = x + y in
+                inner 10
+            in
+            outer 5
+        ").unwrap();
+        assert!(matches!(val, Value::Int(15)));
     }
 }

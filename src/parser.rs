@@ -327,13 +327,40 @@ impl Parser {
             let start = self.current_span();
             self.advance();
 
-            let pattern = self.parse_pattern()?;
+            // First, try to parse a simple pattern
+            let first_pattern = self.parse_simple_pattern()?;
+
+            // Check if this is function syntax: let f x y = ... in ...
+            // by looking for more patterns before the '='
+            let mut params = Vec::new();
+            while self.is_pattern_start() && !self.check(&Token::Eq) {
+                params.push(self.parse_simple_pattern()?);
+            }
+
             self.consume(Token::Eq)?;
-            let value = self.parse_expr()?;
+            let value_expr = self.parse_expr()?;
             self.consume(Token::In)?;
             let body = self.parse_expr()?;
 
             let span = start.merge(&body.span);
+
+            // If we have params, desugar: let f x y = e in body
+            // becomes: let f = fun x y -> e in body
+            let (pattern, value) = if params.is_empty() {
+                (first_pattern, value_expr)
+            } else {
+                // Create a lambda wrapping the value
+                let lambda_span = value_expr.span.clone();
+                let lambda = Spanned::new(
+                    ExprKind::Lambda {
+                        params,
+                        body: Rc::new(value_expr),
+                    },
+                    lambda_span,
+                );
+                (first_pattern, lambda)
+            };
+
             Ok(Spanned::new(
                 ExprKind::Let {
                     pattern,

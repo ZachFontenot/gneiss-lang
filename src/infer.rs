@@ -313,9 +313,35 @@ impl Inferencer {
                 value,
                 body,
             } => {
+                // Check if this is a recursive function binding:
+                // let name = fun ... -> ... in body
+                // If so, we need to put 'name' in scope before inferring the lambda
+                let is_recursive_fn = matches!(
+                    (&pattern.node, &value.node),
+                    (PatternKind::Var(_), ExprKind::Lambda { .. })
+                );
+
                 // Enter a new level for let-polymorphism
                 self.level += 1;
-                let value_ty = self.infer_expr(env, value)?;
+
+                let value_ty = if is_recursive_fn {
+                    // For recursive functions, add the name to env with a fresh type
+                    // before inferring the lambda body
+                    if let PatternKind::Var(name) = &pattern.node {
+                        let mut recursive_env = env.clone();
+                        let preliminary_ty = self.fresh_var();
+                        recursive_env.insert(name.clone(), Scheme::mono(preliminary_ty.clone()));
+
+                        let inferred_ty = self.infer_expr(&recursive_env, value)?;
+                        self.unify(&preliminary_ty, &inferred_ty)?;
+                        inferred_ty
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    self.infer_expr(env, value)?
+                };
+
                 self.level -= 1;
 
                 // Value restriction: only generalize syntactic values.
