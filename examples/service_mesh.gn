@@ -1,0 +1,69 @@
+-- Service mesh example
+-- Simulates microservices that communicate with each other, not just with main.
+--
+-- Architecture:
+--   main
+--     ├── auth_service     ─── validates request, sends token to api_service
+--     ├── api_service      ─── waits for auth token, fetches from db_service, responds to main
+--     └── db_service       ─── waits for query from api_service, returns data
+--
+-- Communication flow:
+--   1. main sends user_id to auth_service
+--   2. auth_service validates and sends token to api_service (sibling!)
+--   3. api_service receives token, sends query to db_service (sibling!)
+--   4. db_service receives query, sends data back to api_service
+--   5. api_service combines token + data, sends response to main
+
+let main () =
+    -- Channels for service communication
+    let auth_request = Channel.new in    -- main -> auth
+    let auth_to_api = Channel.new in     -- auth -> api (sibling communication)
+    let api_to_db = Channel.new in       -- api -> db (sibling communication)
+    let db_to_api = Channel.new in       -- db -> api (sibling communication)
+    let api_response = Channel.new in    -- api -> main
+
+    -- Auth service: validates requests, issues tokens
+    let _ = spawn (fun () ->
+        let user_id = Channel.recv auth_request in
+        -- "validate" the user (just double it as a fake token)
+        let token = user_id * 2 in
+        print token;  -- shows auth processed
+        Channel.send auth_to_api token
+    ) in
+
+    -- Database service: responds to queries
+    let _ = spawn (fun () ->
+        let query = Channel.recv api_to_db in
+        -- "fetch" data (multiply by 100 as fake db lookup)
+        let data = query * 100 in
+        print data;  -- shows db processed
+        Channel.send db_to_api data
+    ) in
+
+    -- API service: coordinates between auth and db, responds to main
+    let _ = spawn (fun () ->
+        -- Wait for auth token from auth_service
+        let token = Channel.recv auth_to_api in
+        -- Use token to query database
+        Channel.send api_to_db token;
+        let data = Channel.recv db_to_api in
+        -- Combine and respond
+        let response = token + data in
+        print response;  -- shows api processed
+        Channel.send api_response response
+    ) in
+
+    -- Main initiates the request
+    print 42;  -- user_id we're sending
+    Channel.send auth_request 42;
+
+    -- Wait for final response
+    let result = Channel.recv api_response in
+    print result
+
+-- Expected output:
+-- 42      (main sends user_id)
+-- 84      (auth: token = 42 * 2)
+-- 8400    (db: data = 84 * 100)
+-- 8484    (api: response = 84 + 8400)
+-- 8484    (main receives result)

@@ -1,0 +1,45 @@
+-- Nested workers example
+-- Demonstrates a coordinator process that spawns its own workers,
+-- collects their results, and sends a combined result back to main.
+
+let main () =
+    let to_main = Channel.new in
+
+    -- Spawn a coordinator process
+    let _ = spawn (fun () ->
+        -- Coordinator spawns its own workers
+        let from_worker1 = Channel.new in
+        let from_worker2 = Channel.new in
+        let from_worker3 = Channel.new in
+
+        let _ = spawn (fun () ->
+            let result = 10 * 10 in
+            Channel.send from_worker1 result
+        ) in
+
+        let _ = spawn (fun () ->
+            let result = 20 * 20 in
+            Channel.send from_worker2 result
+        ) in
+
+        let _ = spawn (fun () ->
+            let result = 30 * 30 in
+            Channel.send from_worker3 result
+        ) in
+
+        -- Coordinator waits for all workers
+        let r1 = Channel.recv from_worker1 in
+        let r2 = Channel.recv from_worker2 in
+        let r3 = Channel.recv from_worker3 in
+
+        -- Combine and send to main
+        let total = r1 + r2 + r3 in
+        Channel.send to_main total
+    ) in
+
+    -- Main does its own work while coordinator runs
+    print 0;  -- just to show main is running
+
+    -- Main waits for final result from coordinator
+    let final_result = Channel.recv to_main in
+    print final_result  -- should be 100 + 400 + 900 = 1400

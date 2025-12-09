@@ -1,0 +1,43 @@
+-- Async workers example
+-- Demonstrates spawning work, doing local computation, then collecting results
+
+let main () =
+    -- Create result channels for each worker
+    let result1 = Channel.new in
+    let result2 = Channel.new in
+    let result3 = Channel.new in
+
+    -- Spawn three workers that will compute values
+    let _ = spawn (fun () ->
+        -- Worker 1: compute something "expensive"
+        let x = 10 * 10 in
+        let y = x + 5 in
+        Channel.send result1 y
+    ) in
+
+    let _ = spawn (fun () ->
+        -- Worker 2: different computation
+        let a = 7 * 8 in
+        let b = a - 6 in
+        Channel.send result2 b
+    ) in
+
+    let _ = spawn (fun () ->
+        -- Worker 3: yet another computation
+        let p = 100 / 4 in
+        let q = p * 3 in
+        Channel.send result3 q
+    ) in
+
+    -- Meanwhile, main does its own synchronous work
+    let local_result = 1 + 2 + 3 + 4 + 5 in
+    print local_result;  -- prints 15
+
+    -- Now collect results from workers (blocks until each is ready)
+    let r1 = Channel.recv result1 in
+    let r2 = Channel.recv result2 in
+    let r3 = Channel.recv result3 in
+
+    -- Combine everything
+    let total = local_result + r1 + r2 + r3 in
+    print total  -- 15 + 105 + 50 + 75 = 245

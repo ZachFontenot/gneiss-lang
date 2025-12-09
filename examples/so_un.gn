@@ -1,0 +1,5 @@
+let main _ =
+  let ch = Channel.new in
+  spawn (fun () -> Channel.send ch 42);
+  let result = Channel.recv ch + 1 in
+  print result
