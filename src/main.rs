@@ -51,8 +51,8 @@ fn run_file(path: &str) {
         Ok(env) => {
             // Print inferred types
             println!("=== Types ===");
-            for decl in &program.declarations {
-                if let gneiss::ast::Decl::Let { name, .. } = decl {
+            for item in &program.items {
+                if let gneiss::ast::Item::Decl(gneiss::ast::Decl::Let { name, .. }) = item {
                     if let Some(scheme) = env.get(name) {
                         println!("  {} : {}", name, scheme);
                     }
@@ -145,7 +145,7 @@ fn repl() {
         // Try as declaration
         let mut parser = Parser::new(tokens.clone());
         if let Ok(program) = parser.parse_program() {
-            if !program.declarations.is_empty() {
+            if !program.items.is_empty() {
                 // Type check and add to environment
                 match inferencer.infer_program(&program) {
                     Ok(new_env) => {

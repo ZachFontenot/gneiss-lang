@@ -1,0 +1,7 @@
+type Option a = Some a | None
+
+let x = Some 42
+
+match x with
+| Some n -> n + 1
+| None -> 0

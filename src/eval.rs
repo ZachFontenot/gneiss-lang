@@ -322,9 +322,19 @@ impl Interpreter {
 
     /// Run a program
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
-        // First, evaluate all declarations in the global environment
-        for decl in &program.declarations {
-            self.eval_decl(decl)?;
+        let mut last_expr_value = Value::Unit;
+
+        // Process all items in order: declarations bind values, expressions execute
+        for item in &program.items {
+            match item {
+                Item::Decl(decl) => {
+                    self.eval_decl(decl)?;
+                }
+                Item::Expr(expr) => {
+                    let env = self.global_env.clone();
+                    last_expr_value = self.eval_expr(&env, expr)?;
+                }
+            }
         }
 
         // Look for a main function and run it as a process
@@ -338,7 +348,8 @@ impl Interpreter {
 
             Ok(Value::Unit)
         } else {
-            Ok(Value::Unit)
+            // If no main, return the last top-level expression's value
+            Ok(last_expr_value)
         }
     }
 

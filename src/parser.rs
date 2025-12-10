@@ -26,11 +26,18 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
-        let mut declarations = Vec::new();
+        let mut items = Vec::new();
         while !self.is_at_end() {
-            declarations.push(self.parse_decl()?);
+            items.push(self.parse_item()?);
         }
-        Ok(Program { declarations })
+        Ok(Program { items })
+    }
+
+    fn parse_item(&mut self) -> Result<Item, ParseError> {
+        match self.peek() {
+            Token::Let | Token::Type => Ok(Item::Decl(self.parse_decl()?)),
+            _ => Ok(Item::Expr(self.parse_expr()?)),
+        }
     }
 
     // ========================================================================
@@ -1312,18 +1319,18 @@ mod tests {
     #[test]
     fn test_let_simple() {
         let prog = parse("let x = 42");
-        assert_eq!(prog.declarations.len(), 1);
+        assert_eq!(prog.items.len(), 1);
     }
 
     #[test]
     fn test_let_function() {
         let prog = parse("let add x y = x + y");
-        assert_eq!(prog.declarations.len(), 1);
+        assert_eq!(prog.items.len(), 1);
     }
 
     #[test]
     fn test_type_decl() {
         let prog = parse("type Option a = | Some a | None");
-        assert_eq!(prog.declarations.len(), 1);
+        assert_eq!(prog.items.len(), 1);
     }
 }

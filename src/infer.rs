@@ -736,6 +736,64 @@ impl Inferencer {
         }
     }
 
+    /// Convert surface TypeExpr to internal Type, mapping type params to generic vars
+    fn type_expr_to_type(
+        &mut self,
+        expr: &TypeExpr,
+        param_map: &HashMap<String, TypeVarId>,
+    ) -> Result<Type, TypeError> {
+        match &expr.node {
+            TypeExprKind::Var(name) => {
+                if let Some(&id) = param_map.get(name) {
+                    Ok(Type::new_generic(id))
+                } else {
+                    Err(TypeError::UnboundVariable(name.clone()))
+                }
+            }
+            TypeExprKind::Named(name) => match name.as_str() {
+                "Int" => Ok(Type::Int),
+                "Float" => Ok(Type::Float),
+                "Bool" => Ok(Type::Bool),
+                "String" => Ok(Type::String),
+                "Char" => Ok(Type::Char),
+                "Pid" => Ok(Type::Pid),
+                _ => Ok(Type::Constructor {
+                    name: name.clone(),
+                    args: vec![],
+                }),
+            },
+            TypeExprKind::App { constructor, args } => {
+                let arg_types: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|a| self.type_expr_to_type(a, param_map))
+                    .collect();
+                match &constructor.node {
+                    TypeExprKind::Named(name) => Ok(Type::Constructor {
+                        name: name.clone(),
+                        args: arg_types?,
+                    }),
+                    _ => Err(TypeError::PatternMismatch),
+                }
+            }
+            TypeExprKind::Arrow { from, to } => {
+                let from_ty = self.type_expr_to_type(from, param_map)?;
+                let to_ty = self.type_expr_to_type(to, param_map)?;
+                Ok(Type::arrow(from_ty, to_ty))
+            }
+            TypeExprKind::Tuple(types) => {
+                let tys: Result<Vec<_>, _> = types
+                    .iter()
+                    .map(|t| self.type_expr_to_type(t, param_map))
+                    .collect();
+                Ok(Type::Tuple(tys?))
+            }
+            TypeExprKind::Channel(inner) => {
+                let inner_ty = self.type_expr_to_type(inner, param_map)?;
+                Ok(Type::Channel(Rc::new(inner_ty)))
+            }
+        }
+    }
+
     /// Register a type declaration
     pub fn register_type_decl(&mut self, decl: &Decl) {
         if let Decl::Type {
@@ -744,12 +802,19 @@ impl Inferencer {
             constructors,
         } = decl
         {
+            // Map type parameter names to generic variable IDs
+            let param_map: HashMap<String, TypeVarId> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), i as TypeVarId))
+                .collect();
+
             for ctor in constructors {
-                // Create generic types for the type parameters
+                // Convert actual TypeExprs to Types with proper generic variables
                 let field_types: Vec<Type> = ctor
                     .fields
                     .iter()
-                    .map(|_| self.fresh_var())
+                    .filter_map(|type_expr| self.type_expr_to_type(type_expr, &param_map).ok())
                     .collect();
 
                 let info = ConstructorInfo {
@@ -766,7 +831,7 @@ impl Inferencer {
     /// Infer types for an entire program
     pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, TypeError> {
         let mut env = TypeEnv::new();
-        
+
         // Add built-in functions
         // print : a -> ()
         let print_ty = {
@@ -774,66 +839,76 @@ impl Inferencer {
             Type::arrow(a, Type::Unit)
         };
         env.insert("print".into(), self.generalize(&print_ty));
-        
+
         // int_to_string : Int -> String
         env.insert("int_to_string".into(), Scheme::mono(Type::arrow(Type::Int, Type::String)));
-        
+
         // string_length : String -> Int
         env.insert("string_length".into(), Scheme::mono(Type::arrow(Type::String, Type::Int)));
 
         // First pass: register all type declarations
-        for decl in &program.declarations {
-            self.register_type_decl(decl);
+        for item in &program.items {
+            if let Item::Decl(decl) = item {
+                self.register_type_decl(decl);
+            }
         }
 
-        // Second pass: infer types for let declarations
-        for decl in &program.declarations {
-            if let Decl::Let {
-                name,
-                params,
-                body,
-                ..
-            } = decl
-            {
-                self.level += 1;
+        // Second pass: infer types for let declarations and top-level expressions
+        for item in &program.items {
+            match item {
+                Item::Decl(Decl::Let {
+                    name,
+                    params,
+                    body,
+                    ..
+                }) => {
+                    self.level += 1;
 
-                let mut local_env = env.clone();
-                let mut param_types = Vec::new();
+                    let mut local_env = env.clone();
+                    let mut param_types = Vec::new();
 
-                for param in params {
-                    let param_ty = self.fresh_var();
-                    self.bind_pattern(&mut local_env, param, &param_ty)?;
-                    param_types.push(param_ty);
+                    for param in params {
+                        let param_ty = self.fresh_var();
+                        self.bind_pattern(&mut local_env, param, &param_ty)?;
+                        param_types.push(param_ty);
+                    }
+
+                    // For recursive functions, add the function to its own scope with a fresh type
+                    let ret_ty = self.fresh_var();
+                    let preliminary_func_ty = if param_types.is_empty() {
+                        ret_ty.clone()
+                    } else {
+                        Type::arrows(param_types.clone(), ret_ty.clone())
+                    };
+                    local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
+
+                    let body_ty = self.infer_expr(&local_env, body)?;
+
+                    // Unify the body type with what we predicted
+                    if param_types.is_empty() {
+                        self.unify(&ret_ty, &body_ty)?;
+                    } else {
+                        self.unify(&ret_ty, &body_ty)?;
+                    }
+
+                    let func_ty = if param_types.is_empty() {
+                        body_ty
+                    } else {
+                        Type::arrows(param_types, body_ty)
+                    };
+
+                    self.level -= 1;
+
+                    let scheme = self.generalize(&func_ty);
+                    env.insert(name.clone(), scheme);
                 }
-
-                // For recursive functions, add the function to its own scope with a fresh type
-                let ret_ty = self.fresh_var();
-                let preliminary_func_ty = if param_types.is_empty() {
-                    ret_ty.clone()
-                } else {
-                    Type::arrows(param_types.clone(), ret_ty.clone())
-                };
-                local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
-
-                let body_ty = self.infer_expr(&local_env, body)?;
-                
-                // Unify the body type with what we predicted
-                if param_types.is_empty() {
-                    self.unify(&ret_ty, &body_ty)?;
-                } else {
-                    self.unify(&ret_ty, &body_ty)?;
+                Item::Decl(Decl::Type { .. } | Decl::TypeAlias { .. }) => {
+                    // Already handled in first pass
                 }
-
-                let func_ty = if param_types.is_empty() {
-                    body_ty
-                } else {
-                    Type::arrows(param_types, body_ty)
-                };
-
-                self.level -= 1;
-
-                let scheme = self.generalize(&func_ty);
-                env.insert(name.clone(), scheme);
+                Item::Expr(expr) => {
+                    // Type-check top-level expressions
+                    self.infer_expr(&env, expr)?;
+                }
             }
         }
 

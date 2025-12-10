@@ -320,7 +320,14 @@ pub struct Constructor {
 // Program
 // ============================================================================
 
+/// A top-level item: either a declaration or an expression
+#[derive(Debug, Clone)]
+pub enum Item {
+    Decl(Decl),
+    Expr(Expr),
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub declarations: Vec<Decl>,
+    pub items: Vec<Item>,
 }
