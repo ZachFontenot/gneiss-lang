@@ -179,23 +179,24 @@ impl Inferencer {
 
     /// Substitute generic type variables
     fn substitute(&self, ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
-        match ty.resolve() {
+        let resolved = ty.resolve();
+        match &resolved {
             Type::Var(var) => match &*var.borrow() {
-                TypeVar::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
-                _ => ty.clone(),
+                TypeVar::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| resolved.clone()),
+                _ => resolved.clone(),
             },
             Type::Arrow(a, b) => Type::Arrow(
-                Rc::new(self.substitute(&a, subst)),
-                Rc::new(self.substitute(&b, subst)),
+                Rc::new(self.substitute(a, subst)),
+                Rc::new(self.substitute(b, subst)),
             ),
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
-            Type::List(t) => Type::List(Rc::new(self.substitute(&t, subst))),
-            Type::Channel(t) => Type::Channel(Rc::new(self.substitute(&t, subst))),
+            Type::List(t) => Type::List(Rc::new(self.substitute(t, subst))),
+            Type::Channel(t) => Type::Channel(Rc::new(self.substitute(t, subst))),
             Type::Constructor { name, args } => Type::Constructor {
-                name,
+                name: name.clone(),
                 args: args.iter().map(|t| self.substitute(t, subst)).collect(),
             },
-            _ => ty.clone(),
+            _ => resolved.clone(),
         }
     }
 
@@ -214,7 +215,8 @@ impl Inferencer {
         ty: &Type,
         generics: &mut HashMap<TypeVarId, TypeVarId>,
     ) -> Type {
-        match ty.resolve() {
+        let resolved = ty.resolve();
+        match &resolved {
             Type::Var(var) => match &*var.borrow() {
                 TypeVar::Unbound { id, level } if *level > self.level => {
                     let gen_id = if let Some(&gen_id) = generics.get(id) {
@@ -226,27 +228,27 @@ impl Inferencer {
                     };
                     Type::new_generic(gen_id)
                 }
-                _ => ty.clone(),
+                _ => resolved.clone(),
             },
             Type::Arrow(a, b) => Type::Arrow(
-                Rc::new(self.generalize_inner(&a, generics)),
-                Rc::new(self.generalize_inner(&b, generics)),
+                Rc::new(self.generalize_inner(a, generics)),
+                Rc::new(self.generalize_inner(b, generics)),
             ),
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
                     .map(|t| self.generalize_inner(t, generics))
                     .collect(),
             ),
-            Type::List(t) => Type::List(Rc::new(self.generalize_inner(&t, generics))),
-            Type::Channel(t) => Type::Channel(Rc::new(self.generalize_inner(&t, generics))),
+            Type::List(t) => Type::List(Rc::new(self.generalize_inner(t, generics))),
+            Type::Channel(t) => Type::Channel(Rc::new(self.generalize_inner(t, generics))),
             Type::Constructor { name, args } => Type::Constructor {
-                name,
+                name: name.clone(),
                 args: args
                     .iter()
                     .map(|t| self.generalize_inner(t, generics))
                     .collect(),
             },
-            _ => ty.clone(),
+            _ => resolved.clone(),
         }
     }
 
@@ -1022,5 +1024,42 @@ let f ch1 ch2 =
         let result = infer("reset (1 + shift (fun k -> \"hello\"))");
         // With simplified typing, this should be a type error
         assert!(result.is_err());
+    }
+
+    // Tests for generalize_inner and substitute returning resolved types (bug4.md)
+    #[test]
+    fn test_generalize_follows_links() {
+        // This test ensures that generalization properly resolves linked type variables
+        let source = r#"
+let f = fun x ->
+    let y = x in
+    y
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_ok());
+
+        if let Ok(env) = result {
+            if let Some(scheme) = env.get("f") {
+                // The type string should be clean, not contain internal var references (t0, t1, etc.)
+                let ty_str = format!("{}", scheme);
+                assert!(
+                    !ty_str.contains("t"),
+                    "Type should be generalized without linked vars: {}",
+                    ty_str
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_unification_then_generalize() {
+        // Create a scenario where unification creates links, then generalize
+        let source = r#"
+let apply f x = f x
+let id = fun x -> x
+let result = apply id 42
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_ok());
     }
 }
