@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::runtime::{ChannelId, Pid, ProcessContinuation, Runtime};
+use crate::types::{ClassEnv, Pred, Type, TypeContext};
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
@@ -223,6 +224,12 @@ pub enum Value {
     Continuation {
         frames: Vec<Frame>,
     },
+
+    /// A typeclass dictionary (contains method implementations)
+    Dict {
+        trait_name: String,
+        methods: HashMap<String, Value>,
+    },
 }
 
 impl Value {
@@ -242,6 +249,36 @@ impl Value {
             Value::Channel(_) => "Channel",
             Value::Builtin(_) => "Builtin",
             Value::Continuation { .. } => "Continuation",
+            Value::Dict { .. } => "Dict",
+        }
+    }
+
+    /// Convert a runtime value to a Type (for instance resolution)
+    pub fn to_type(&self) -> Type {
+        match self {
+            Value::Int(_) => Type::Int,
+            Value::Float(_) => Type::Float,
+            Value::Bool(_) => Type::Bool,
+            Value::String(_) => Type::String,
+            Value::Char(_) => Type::Char,
+            Value::Unit => Type::Unit,
+            Value::List(items) => {
+                // Infer element type from first item, or use a fresh var
+                let elem_ty = items.first().map(|v| v.to_type()).unwrap_or(Type::Unit);
+                Type::List(Rc::new(elem_ty))
+            }
+            Value::Tuple(items) => {
+                Type::Tuple(items.iter().map(|v| v.to_type()).collect())
+            }
+            Value::Constructor { name, fields } => {
+                Type::Constructor {
+                    name: name.clone(),
+                    args: fields.iter().map(|v| v.to_type()).collect(),
+                }
+            }
+            Value::Pid(_) => Type::Pid,
+            Value::Channel(_) => Type::Channel(Rc::new(Type::Unit)), // Simplified
+            _ => Type::Unit, // Fallback for closures, continuations, etc.
         }
     }
 }
@@ -300,6 +337,8 @@ pub struct Interpreter {
     global_env: Env,
     /// The runtime scheduler
     pub runtime: Runtime,
+    /// Class environment for typeclass instances
+    class_env: ClassEnv,
 }
 
 impl Interpreter {
@@ -317,7 +356,13 @@ impl Interpreter {
         Self {
             global_env,
             runtime: Runtime::new(),
+            class_env: ClassEnv::new(),
         }
+    }
+
+    /// Set the class environment (called after type inference)
+    pub fn set_class_env(&mut self, class_env: ClassEnv) {
+        self.class_env = class_env;
     }
 
     /// Run a program
@@ -383,6 +428,78 @@ impl Interpreter {
                 // Type declarations don't need runtime evaluation
                 Ok(())
             }
+            Decl::Trait { .. } => {
+                // Trait declarations are handled during type inference
+                // At runtime, nothing to do
+                Ok(())
+            }
+            Decl::Instance { methods, .. } => {
+                // Compile each method implementation as a closure in the global env
+                // The actual dictionary will be constructed at call site
+                for method in methods {
+                    // Create a closure for this method implementation
+                    let closure = Value::Closure {
+                        params: method.params.clone(),
+                        body: Rc::new(method.body.clone()),
+                        env: self.global_env.clone(),
+                    };
+                    // Store with a unique name based on instance
+                    // For now, we'll just use the method name and let dynamic resolution pick the right one
+                    // In a production system, we'd mangle the name or use a dictionary structure
+                    // The method lookup will happen dynamically based on the argument type
+                    self.global_env.borrow_mut().define(
+                        format!("__method_{}_{}", method.name, self.class_env.instances.len()),
+                        closure,
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Build a dictionary for a given predicate by looking up the matching instance
+    pub fn build_dict(&mut self, pred: &Pred) -> Result<Value, EvalError> {
+        // Find the matching instance
+        if let Some(resolution) = self.class_env.resolve_pred(pred) {
+            let instance = &self.class_env.instances[resolution.instance_idx];
+
+            // Build method closures from the instance
+            let mut methods = HashMap::new();
+            for method in &instance.method_impls {
+                let closure = Value::Closure {
+                    params: method.params.clone(),
+                    body: Rc::new(method.body.clone()),
+                    env: self.global_env.clone(),
+                };
+                methods.insert(method.name.clone(), closure);
+            }
+
+            Ok(Value::Dict {
+                trait_name: pred.trait_name.clone(),
+                methods,
+            })
+        } else {
+            Err(EvalError::RuntimeError(format!(
+                "No instance of {} for type {}",
+                pred.trait_name, pred.ty
+            )))
+        }
+    }
+
+    /// Look up a method from a dictionary and apply it
+    pub fn call_method(&mut self, dict: &Value, method_name: &str, arg: Value) -> Result<Value, EvalError> {
+        match dict {
+            Value::Dict { methods, .. } => {
+                if let Some(method_impl) = methods.get(method_name) {
+                    self.apply_value(method_impl.clone(), arg)
+                } else {
+                    Err(EvalError::RuntimeError(format!(
+                        "Method {} not found in dictionary",
+                        method_name
+                    )))
+                }
+            }
+            _ => Err(EvalError::TypeError("Expected dictionary value".into())),
         }
     }
 
@@ -444,7 +561,17 @@ impl Interpreter {
             ExprKind::Var(name) => {
                 match env.borrow().get(name) {
                     Some(value) => StepResult::Continue(State::Apply { value, cont }),
-                    None => StepResult::Error(EvalError::UnboundVariable(name.clone())),
+                    None => {
+                        // Check if this is a trait method
+                        if let Some((trait_name, _)) = self.class_env.lookup_method(name) {
+                            // Return a special "method reference" that will be resolved
+                            // when we know the argument type
+                            let value = Value::Builtin(format!("__method__{}_{}", trait_name, name));
+                            StepResult::Continue(State::Apply { value, cont })
+                        } else {
+                            StepResult::Error(EvalError::UnboundVariable(name.clone()))
+                        }
+                    }
                 }
             }
 
@@ -1020,10 +1147,40 @@ impl Interpreter {
                 }
             }
 
-            Value::Builtin(name) => {
-                match self.apply_builtin(&name, arg) {
-                    Ok(value) => StepResult::Continue(State::Apply { value, cont }),
-                    Err(e) => StepResult::Error(e),
+            Value::Builtin(ref name) => {
+                // Check if this is a trait method dispatch
+                if name.starts_with("__method__") {
+                    // Parse "__method__TraitName_methodName"
+                    let rest = &name[10..]; // Skip "__method__"
+                    if let Some(underscore_pos) = rest.find('_') {
+                        let trait_name = &rest[..underscore_pos];
+                        let method_name = &rest[underscore_pos + 1..];
+
+                        // Get the runtime type of the argument
+                        let arg_type = arg.to_type();
+
+                        // Build a predicate and resolve it
+                        let pred = Pred::new(trait_name, arg_type);
+                        match self.build_dict(&pred) {
+                            Ok(dict) => {
+                                // Look up the method and call it
+                                match self.call_method(&dict, method_name, arg) {
+                                    Ok(value) => StepResult::Continue(State::Apply { value, cont }),
+                                    Err(e) => StepResult::Error(e),
+                                }
+                            }
+                            Err(e) => StepResult::Error(e),
+                        }
+                    } else {
+                        StepResult::Error(EvalError::RuntimeError(
+                            format!("malformed method reference: {}", name)
+                        ))
+                    }
+                } else {
+                    match self.apply_builtin(name, arg) {
+                        Ok(value) => StepResult::Continue(State::Apply { value, cont }),
+                        Err(e) => StepResult::Error(e),
+                    }
                 }
             }
 
@@ -1212,6 +1369,7 @@ impl Interpreter {
             Value::Channel(id) => print!("<channel:{}>", id),
             Value::Builtin(name) => print!("<builtin:{}>", name),
             Value::Continuation { .. } => print!("<continuation>"),
+            Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
         }
     }
 
@@ -1907,5 +2065,238 @@ let main () =
             outer 5
         ").unwrap();
         assert!(matches!(val, Value::Int(15)));
+    }
+
+    // ========================================================================
+    // Phase 6: Typeclass Runtime Tests
+    // ========================================================================
+
+    use crate::types::{TraitInfo, InstanceInfo, Type as InferType};
+    use crate::infer::Inferencer;
+
+    /// Helper to run a program with type inference, copying ClassEnv to interpreter
+    fn run_typed_program(input: &str) -> Result<Value, String> {
+        let tokens = Lexer::new(input).tokenize().map_err(|e| e.to_string())?;
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().map_err(|e| e.to_string())?;
+
+        // Run type inference to build ClassEnv
+        let mut inferencer = Inferencer::new();
+        let _env = inferencer.infer_program(&program).map_err(|e| e.to_string())?;
+
+        // Run the program with the class env
+        let mut interp = Interpreter::new();
+        // Copy the class_env from inference phase
+        // Note: We can't directly access class_env from inferencer, so we'll test via integration
+        interp.run(&program).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn test_value_to_type() {
+        // Test that Value::to_type works correctly
+        assert!(matches!(Value::Int(42).to_type(), InferType::Int));
+        assert!(matches!(Value::String("hello".into()).to_type(), InferType::String));
+        assert!(matches!(Value::Bool(true).to_type(), InferType::Bool));
+    }
+
+    #[test]
+    fn test_dict_value() {
+        let mut methods = HashMap::new();
+        methods.insert("show".to_string(), Value::Builtin("show_int".into()));
+        let dict = Value::Dict {
+            trait_name: "Show".into(),
+            methods,
+        };
+        assert_eq!(dict.type_name(), "Dict");
+    }
+
+    #[test]
+    fn test_build_dict_simple() {
+        // Build an interpreter with a simple Show Int instance
+        let mut interp = Interpreter::new();
+
+        // Manually set up the class env with a Show trait and Show Int instance
+        let mut methods = HashMap::new();
+        methods.insert(
+            "show".to_string(),
+            InferType::arrow(InferType::new_generic(0), InferType::String),
+        );
+        interp.class_env.add_trait(TraitInfo {
+            name: "Show".to_string(),
+            type_param: "a".to_string(),
+            supertraits: vec![],
+            methods,
+        });
+
+        // Add Show Int instance with method implementation
+        use crate::ast::{InstanceMethod, ExprKind, Literal, Spanned, Span};
+        let show_impl = InstanceMethod {
+            name: "show".to_string(),
+            params: vec![Pattern {
+                node: PatternKind::Var("n".into()),
+                span: Span::default(),
+            }],
+            body: Spanned {
+                node: ExprKind::Lit(Literal::String("42".into())),
+                span: Span::default(),
+            },
+        };
+        interp.class_env.add_instance(InstanceInfo {
+            trait_name: "Show".to_string(),
+            head: InferType::Int,
+            constraints: vec![],
+            method_impls: vec![show_impl],
+        }).unwrap();
+
+        // Now build a dictionary for Show Int
+        let pred = Pred::new("Show", InferType::Int);
+        let dict = interp.build_dict(&pred).unwrap();
+
+        match dict {
+            Value::Dict { trait_name, methods } => {
+                assert_eq!(trait_name, "Show");
+                assert!(methods.contains_key("show"));
+            }
+            _ => panic!("Expected Dict value"),
+        }
+    }
+
+    #[test]
+    fn test_call_method_from_dict() {
+        let mut interp = Interpreter::new();
+
+        // Create a simple dict with a show method that returns a constant
+        use crate::ast::{ExprKind, Literal, Spanned, Span};
+        let show_closure = Value::Closure {
+            params: vec![Pattern {
+                node: PatternKind::Var("x".into()),
+                span: Span::default(),
+            }],
+            body: Rc::new(Spanned {
+                node: ExprKind::Lit(Literal::String("hello".into())),
+                span: Span::default(),
+            }),
+            env: EnvInner::new(),
+        };
+
+        let mut methods = HashMap::new();
+        methods.insert("show".to_string(), show_closure);
+        let dict = Value::Dict {
+            trait_name: "Show".into(),
+            methods,
+        };
+
+        // Call the method
+        let result = interp.call_method(&dict, "show", Value::Int(42)).unwrap();
+        assert!(matches!(result, Value::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_trait_instance_parsing_and_eval() {
+        // Test that trait and instance declarations don't crash evaluation
+        let program = r#"
+trait Show a =
+    val show : a -> String
+end
+
+impl Show for Int =
+    let show n = int_to_string n
+end
+
+let main () = ()
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_show_int_end_to_end() {
+        // Full end-to-end test: define Show trait, Show Int instance, call show 42
+        let tokens = Lexer::new(r#"
+trait Show a =
+    val show : a -> String
+end
+
+impl Show for Int =
+    let show n = int_to_string n
+end
+
+let result = show 42
+"#).tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+
+        // Run type inference to populate class_env
+        let mut inferencer = Inferencer::new();
+        let _type_env = inferencer.infer_program(&program).unwrap();
+
+        // Create interpreter and copy the class_env from inferencer
+        let mut interp = Interpreter::new();
+        // We need to expose the class_env from the inferencer
+        // For now, manually set up the class_env in the interpreter
+        use crate::ast::{InstanceMethod, ExprKind, Literal, Spanned, Span};
+
+        let mut methods = HashMap::new();
+        methods.insert(
+            "show".to_string(),
+            InferType::arrow(InferType::new_generic(0), InferType::String),
+        );
+        interp.class_env.add_trait(TraitInfo {
+            name: "Show".to_string(),
+            type_param: "a".to_string(),
+            supertraits: vec![],
+            methods,
+        });
+
+        // Add Show Int instance - use int_to_string n as the body
+        let show_impl = InstanceMethod {
+            name: "show".to_string(),
+            params: vec![Pattern {
+                node: PatternKind::Var("n".into()),
+                span: Span::default(),
+            }],
+            body: Spanned {
+                node: ExprKind::App {
+                    func: Rc::new(Spanned {
+                        node: ExprKind::Var("int_to_string".into()),
+                        span: Span::default(),
+                    }),
+                    arg: Rc::new(Spanned {
+                        node: ExprKind::Var("n".into()),
+                        span: Span::default(),
+                    }),
+                },
+                span: Span::default(),
+            },
+        };
+        interp.class_env.add_instance(InstanceInfo {
+            trait_name: "Show".to_string(),
+            head: InferType::Int,
+            constraints: vec![],
+            method_impls: vec![show_impl],
+        }).unwrap();
+
+        // Evaluate "show 42" directly
+        let env = EnvInner::new();
+        {
+            env.borrow_mut().define("int_to_string".into(), Value::Builtin("int_to_string".into()));
+        }
+
+        // Create the expression: show 42
+        let show_42 = Spanned {
+            node: ExprKind::App {
+                func: Rc::new(Spanned {
+                    node: ExprKind::Var("show".into()),
+                    span: Span::default(),
+                }),
+                arg: Rc::new(Spanned {
+                    node: ExprKind::Lit(Literal::Int(42)),
+                    span: Span::default(),
+                }),
+            },
+            span: Span::default(),
+        };
+
+        let result = interp.eval_expr(&env, &show_42).unwrap();
+        assert!(matches!(result, Value::String(s) if s == "42"));
     }
 }

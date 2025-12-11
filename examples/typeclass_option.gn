@@ -1,0 +1,23 @@
+-- Typeclass test: Show trait with constrained instance for Option
+
+type Option a = | None | Some a
+
+trait Show a =
+    val show : a -> String
+end
+
+impl Show for Int =
+    let show n = int_to_string n
+end
+
+impl Show for (Option a) where a : Show =
+    let show opt =
+        match opt with
+        | None -> "None"
+        | Some x -> "Some(" ++ show x ++ ")"
+end
+
+let main () =
+    let x = Some 42 in
+    let result = show x in
+    print result

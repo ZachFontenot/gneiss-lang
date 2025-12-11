@@ -69,6 +69,8 @@ fn run_file(path: &str) {
     // Evaluate
     println!("=== Running ===");
     let mut interpreter = Interpreter::new();
+    // Pass the class environment from type inference to the interpreter
+    interpreter.set_class_env(inferencer.take_class_env());
     match interpreter.run(&program) {
         Ok(result) => {
             println!("\n=== Result ===");
@@ -252,6 +254,7 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::Channel(id) => print!("<channel:{}>", id),
         gneiss::Value::Builtin(name) => print!("<builtin:{}>", name),
         gneiss::Value::Continuation { .. } => print!("<continuation>"),
+        gneiss::Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
     }
 }
 

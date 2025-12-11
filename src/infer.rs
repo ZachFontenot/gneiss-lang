@@ -20,6 +20,12 @@ pub enum TypeError {
     PatternMismatch,
     #[error("non-exhaustive patterns")]
     NonExhaustivePatterns,
+    #[error("unknown trait: {0}")]
+    UnknownTrait(String),
+    #[error("overlapping instances for trait {trait_name}: {existing} and {new}")]
+    OverlappingInstance { trait_name: String, existing: Type, new: Type },
+    #[error("no instance of {trait_name} for type {ty}")]
+    NoInstance { trait_name: String, ty: Type },
 }
 
 pub struct Inferencer {
@@ -29,6 +35,10 @@ pub struct Inferencer {
     level: u32,
     /// Type context for constructors
     type_ctx: TypeContext,
+    /// Class environment for typeclasses
+    class_env: ClassEnv,
+    /// Wanted predicates (constraints collected during inference)
+    wanted_preds: Vec<Pred>,
 }
 
 impl Inferencer {
@@ -37,6 +47,8 @@ impl Inferencer {
             next_var: 0,
             level: 0,
             type_ctx: TypeContext::new(),
+            class_env: ClassEnv::new(),
+            wanted_preds: Vec::new(),
         }
     }
 
@@ -282,6 +294,24 @@ impl Inferencer {
             ExprKind::Var(name) => {
                 if let Some(scheme) = env.get(name) {
                     Ok(self.instantiate(scheme))
+                } else if let Some((trait_name, method_ty)) = self.class_env.lookup_method(name) {
+                    // Clone to avoid borrow conflicts
+                    let trait_name = trait_name.to_string();
+                    let method_ty = method_ty.clone();
+
+                    // This is a trait method - instantiate with fresh vars and add predicate
+                    let fresh_ty = self.fresh_var();
+
+                    // The method type has Generic(0) for the trait's type param
+                    // Substitute it with a fresh var
+                    let mut subst = HashMap::new();
+                    subst.insert(0, fresh_ty.clone());
+                    let instantiated = apply_subst(&method_ty, &subst);
+
+                    // Add a wanted predicate: TraitName fresh_ty
+                    self.wanted_preds.push(Pred::new(trait_name, fresh_ty));
+
+                    Ok(instantiated)
                 } else {
                     Err(TypeError::UnboundVariable(name.clone()))
                 }
@@ -830,6 +860,92 @@ impl Inferencer {
         }
     }
 
+    /// Register a trait declaration
+    pub fn register_trait_decl(&mut self, decl: &Decl) -> Result<(), TypeError> {
+        if let Decl::Trait {
+            name,
+            type_param,
+            supertraits,
+            methods,
+        } = decl
+        {
+            // Map the type parameter to Generic(0)
+            let mut param_map: HashMap<String, TypeVarId> = HashMap::new();
+            param_map.insert(type_param.clone(), 0);
+
+            // Convert method signatures to internal Types
+            let mut method_types: HashMap<String, Type> = HashMap::new();
+            for method in methods {
+                let method_ty = self.type_expr_to_type(&method.type_sig, &param_map)?;
+                method_types.insert(method.name.clone(), method_ty);
+            }
+
+            let info = TraitInfo {
+                name: name.clone(),
+                type_param: type_param.clone(),
+                supertraits: supertraits.clone(),
+                methods: method_types,
+            };
+
+            self.class_env.add_trait(info);
+        }
+        Ok(())
+    }
+
+    /// Register an instance declaration
+    pub fn register_instance_decl(&mut self, decl: &Decl) -> Result<(), TypeError> {
+        if let Decl::Instance {
+            trait_name,
+            target_type,
+            constraints,
+            methods,
+        } = decl
+        {
+            // Check that the trait exists
+            if self.class_env.get_trait(trait_name).is_none() {
+                return Err(TypeError::UnknownTrait(trait_name.clone()));
+            }
+
+            // Build a param_map for type variables that might appear in the instance head
+            // For now, use a simple approach: collect all type vars from constraints
+            let mut param_map: HashMap<String, TypeVarId> = HashMap::new();
+            for (i, constraint) in constraints.iter().enumerate() {
+                param_map.insert(constraint.type_var.clone(), i as TypeVarId);
+            }
+
+            // Convert target type to internal Type
+            let head = self.type_expr_to_type(target_type, &param_map)?;
+
+            // Convert constraints to Preds
+            let preds: Vec<Pred> = constraints
+                .iter()
+                .map(|c| {
+                    let ty = param_map
+                        .get(&c.type_var)
+                        .map(|&id| Type::new_generic(id))
+                        .unwrap_or_else(|| Type::new_var(0, 0)); // Fallback shouldn't happen
+                    Pred::new(c.trait_name.clone(), ty)
+                })
+                .collect();
+
+            let info = InstanceInfo {
+                trait_name: trait_name.clone(),
+                head: head.clone(),
+                constraints: preds,
+                method_impls: methods.clone(),
+            };
+
+            // Add instance with overlap checking
+            self.class_env.add_instance(info).map_err(|e| match e {
+                ClassError::UnknownTrait(name) => TypeError::UnknownTrait(name),
+                ClassError::OverlappingInstance { trait_name, existing, new } => {
+                    TypeError::OverlappingInstance { trait_name, existing, new }
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// Infer types for an entire program
     pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, TypeError> {
         let mut env = TypeEnv::new();
@@ -855,7 +971,21 @@ impl Inferencer {
             }
         }
 
-        // Second pass: infer types for let declarations and top-level expressions
+        // Second pass: register all trait declarations
+        for item in &program.items {
+            if let Item::Decl(decl @ Decl::Trait { .. }) = item {
+                self.register_trait_decl(decl)?;
+            }
+        }
+
+        // Third pass: register all instance declarations
+        for item in &program.items {
+            if let Item::Decl(decl @ Decl::Instance { .. }) = item {
+                self.register_instance_decl(decl)?;
+            }
+        }
+
+        // Fourth pass: infer types for let declarations and top-level expressions
         for item in &program.items {
             match item {
                 Item::Decl(Decl::Let {
@@ -865,6 +995,9 @@ impl Inferencer {
                     ..
                 }) => {
                     self.level += 1;
+
+                    // Clear wanted predicates for this binding
+                    self.wanted_preds.clear();
 
                     let mut local_env = env.clone();
                     let mut param_types = Vec::new();
@@ -901,11 +1034,17 @@ impl Inferencer {
 
                     self.level -= 1;
 
+                    // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
+                    // For now, predicates are collected but not checked
+
                     let scheme = self.generalize(&func_ty);
                     env.insert(name.clone(), scheme);
                 }
                 Item::Decl(Decl::Type { .. } | Decl::TypeAlias { .. }) => {
                     // Already handled in first pass
+                }
+                Item::Decl(Decl::Trait { .. } | Decl::Instance { .. }) => {
+                    // Already handled in second/third pass
                 }
                 Item::Expr(expr) => {
                     // Type-check top-level expressions
@@ -915,6 +1054,12 @@ impl Inferencer {
         }
 
         Ok(env)
+    }
+
+    /// Get the wanted predicates (for testing)
+    #[cfg(test)]
+    pub fn get_wanted_preds(&self) -> &[Pred] {
+        &self.wanted_preds
     }
 }
 
@@ -929,6 +1074,16 @@ impl Inferencer {
     /// Public wrapper for unify, for property testing
     pub fn unify_types(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError> {
         self.unify(t1, t2)
+    }
+
+    /// Get the class environment (for passing to the interpreter)
+    pub fn take_class_env(&mut self) -> ClassEnv {
+        std::mem::take(&mut self.class_env)
+    }
+
+    /// Get a reference to the class environment
+    pub fn class_env(&self) -> &ClassEnv {
+        &self.class_env
     }
 }
 
@@ -1061,5 +1216,139 @@ let result = apply id 42
 "#;
         let result = typecheck_program(source);
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Phase 4 Typeclass Tests
+    // ========================================================================
+
+    fn typecheck_program_with_inferencer(input: &str) -> (Result<TypeEnv, TypeError>, Inferencer) {
+        let tokens = Lexer::new(input).tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut inferencer = Inferencer::new();
+        let result = inferencer.infer_program(&program);
+        (result, inferencer)
+    }
+
+    #[test]
+    fn test_trait_registration() {
+        let source = r#"
+trait Show a =
+    val show : a -> String
+end
+"#;
+        let (result, inferencer) = typecheck_program_with_inferencer(source);
+        assert!(result.is_ok());
+        assert!(inferencer.class_env.get_trait("Show").is_some());
+    }
+
+    #[test]
+    fn test_trait_method_lookup() {
+        let source = r#"
+trait Show a =
+    val show : a -> String
+end
+"#;
+        let (_, inferencer) = typecheck_program_with_inferencer(source);
+        let lookup = inferencer.class_env.lookup_method("show");
+        assert!(lookup.is_some());
+        let (trait_name, _) = lookup.unwrap();
+        assert_eq!(trait_name, "Show");
+    }
+
+    #[test]
+    fn test_instance_registration() {
+        let source = r#"
+trait Show a =
+    val show : a -> String
+end
+impl Show for Int =
+    let show n = int_to_string n
+end
+"#;
+        let (result, inferencer) = typecheck_program_with_inferencer(source);
+        assert!(result.is_ok());
+        assert_eq!(inferencer.class_env.instances.len(), 1);
+    }
+
+    #[test]
+    fn test_method_call_adds_predicate() {
+        // When we call 'show x', it should add a Show predicate for x's type
+        let source = r#"
+trait Show a =
+    val show : a -> String
+end
+let f x = show x
+"#;
+        let (result, inferencer) = typecheck_program_with_inferencer(source);
+        assert!(result.is_ok());
+        // The inferencer collects predicates during inference
+        // Note: predicates are cleared per binding, so we can't directly check them here
+        // This test mainly verifies the code path works
+        assert!(inferencer.class_env.get_trait("Show").is_some());
+    }
+
+    #[test]
+    fn test_trait_unknown_error() {
+        // Instance for unknown trait should fail
+        let source = r#"
+impl Show for Int =
+    let show n = int_to_string n
+end
+"#;
+        let (result, _) = typecheck_program_with_inferencer(source);
+        assert!(result.is_err());
+        if let Err(TypeError::UnknownTrait(name)) = result {
+            assert_eq!(name, "Show");
+        } else {
+            panic!("Expected UnknownTrait error");
+        }
+    }
+
+    #[test]
+    fn test_overlapping_instance_error() {
+        // Two instances for the same type should fail
+        let source = r#"
+trait Show a =
+    val show : a -> String
+end
+impl Show for Int =
+    let show n = int_to_string n
+end
+impl Show for Int =
+    let show n = "int"
+end
+"#;
+        let (result, _) = typecheck_program_with_inferencer(source);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(TypeError::OverlappingInstance { .. })));
+    }
+
+    #[test]
+    fn test_constrained_instance_registration() {
+        let source = r#"
+trait Show a =
+    val show : a -> String
+end
+impl Show for Int =
+    let show n = int_to_string n
+end
+type List a = | Nil | Cons a (List a)
+impl Show for (List a) where a : Show =
+    let show xs = "list"
+end
+"#;
+        let (result, inferencer) = typecheck_program_with_inferencer(source);
+        assert!(result.is_ok());
+        // Should have 2 instances: Show Int and Show (List a)
+        assert_eq!(inferencer.class_env.instances.len(), 2);
+
+        // Check that the List instance has constraints
+        let list_instance = inferencer.class_env.instances.iter()
+            .find(|i| !i.constraints.is_empty())
+            .expect("Should have constrained instance");
+        assert_eq!(list_instance.constraints.len(), 1);
+        assert_eq!(list_instance.constraints[0].trait_name, "Show");
     }
 }

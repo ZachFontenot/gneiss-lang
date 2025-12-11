@@ -1,0 +1,13 @@
+-- Typeclass test: Show trait with Int instance
+
+trait Show a =
+    val show : a -> String
+end
+
+impl Show for Int =
+    let show n = int_to_string n
+end
+
+let main () =
+    let result = show 42 in
+    print result

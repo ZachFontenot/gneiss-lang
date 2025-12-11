@@ -35,6 +35,13 @@ pub enum Token {
     Reset,
     Shift,
 
+    // Typeclass keywords
+    Trait,
+    Impl,
+    For,
+    Where,
+    Val,
+
     // Delimiters
     LParen,   // (
     RParen,   // )
@@ -471,6 +478,12 @@ impl<'a> Lexer<'a> {
             "end" => Token::End,
             "reset" => Token::Reset,
             "shift" => Token::Shift,
+            // Typeclass keywords
+            "trait" => Token::Trait,
+            "impl" => Token::Impl,
+            "for" => Token::For,
+            "where" => Token::Where,
+            "val" => Token::Val,
             _ => {
                 if s.chars().next().unwrap().is_uppercase() {
                     Token::UpperIdent(s)
@@ -538,5 +551,29 @@ mod tests {
                 Token::Eof
             ]
         );
+    }
+
+    #[test]
+    fn test_typeclass_tokens() {
+        assert_eq!(
+            tokens("trait impl for where val end"),
+            vec![
+                Token::Trait,
+                Token::Impl,
+                Token::For,
+                Token::Where,
+                Token::Val,
+                Token::End,
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_trait_not_ident() {
+        // "trait" should be keyword, not identifier
+        let toks = tokens("trait");
+        assert!(!matches!(toks[0], Token::Ident(_)));
+        assert!(matches!(toks[0], Token::Trait));
     }
 }

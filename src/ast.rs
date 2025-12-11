@@ -308,12 +308,50 @@ pub enum Decl {
         params: Vec<Ident>,
         body: TypeExpr,
     },
+
+    // trait Show a = val show : a -> String end
+    Trait {
+        name: Ident,
+        type_param: Ident,
+        supertraits: Vec<Ident>,
+        methods: Vec<TraitMethod>,
+    },
+
+    // impl Show for Int = let show n = ... end
+    Instance {
+        trait_name: Ident,
+        target_type: TypeExpr,
+        constraints: Vec<Constraint>,
+        methods: Vec<InstanceMethod>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct Constructor {
     pub name: Ident,
     pub fields: Vec<TypeExpr>,
+}
+
+/// A method signature in a trait declaration: val show : a -> String
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    pub name: Ident,
+    pub type_sig: TypeExpr,
+}
+
+/// A method implementation in an instance declaration
+#[derive(Debug, Clone)]
+pub struct InstanceMethod {
+    pub name: Ident,
+    pub params: Vec<Pattern>,
+    pub body: Expr,
+}
+
+/// A typeclass constraint: a : Show  (meaning type variable 'a' must implement Show)
+#[derive(Debug, Clone)]
+pub struct Constraint {
+    pub type_var: Ident,
+    pub trait_name: Ident,
 }
 
 // ============================================================================

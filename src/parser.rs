@@ -35,7 +35,9 @@ impl Parser {
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         match self.peek() {
-            Token::Let | Token::Type => Ok(Item::Decl(self.parse_decl()?)),
+            Token::Let | Token::Type | Token::Trait | Token::Impl => {
+                Ok(Item::Decl(self.parse_decl()?))
+            }
             _ => Ok(Item::Expr(self.parse_expr()?)),
         }
     }
@@ -101,6 +103,8 @@ impl Parser {
         match self.peek() {
             Token::Let => self.parse_let_decl(),
             Token::Type => self.parse_type_decl(),
+            Token::Trait => self.parse_trait_decl(),
+            Token::Impl => self.parse_instance_decl(),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "declaration".into(),
                 found: self.peek().clone(),
@@ -186,6 +190,139 @@ impl Parser {
 
     fn peek_is_upper_ident(&self) -> bool {
         matches!(self.peek(), Token::UpperIdent(_))
+    }
+
+    // ========================================================================
+    // Typeclass declarations
+    // ========================================================================
+
+    /// Parse a trait declaration:
+    /// trait Show a = val show : a -> String end
+    /// trait Ord a : Eq = val compare : a -> a -> Int end
+    fn parse_trait_decl(&mut self) -> Result<Decl, ParseError> {
+        self.consume(Token::Trait)?;
+
+        // Trait name (uppercase, like a type constructor)
+        let name = self.parse_upper_ident()?;
+
+        // Type parameter (lowercase)
+        let type_param = self.parse_ident()?;
+
+        // Optional supertraits: : Eq or : Eq, Ord
+        let supertraits = if self.match_token(&Token::Colon) {
+            self.parse_supertrait_list()?
+        } else {
+            vec![]
+        };
+
+        self.consume(Token::Eq)?;
+
+        // Parse method signatures: val show : a -> String
+        let mut methods = Vec::new();
+        while self.match_token(&Token::Val) {
+            let method_name = self.parse_ident()?;
+            self.consume(Token::Colon)?;
+            let type_sig = self.parse_type_expr()?;
+            methods.push(TraitMethod {
+                name: method_name,
+                type_sig,
+            });
+        }
+
+        self.consume(Token::End)?;
+
+        Ok(Decl::Trait {
+            name,
+            type_param,
+            supertraits,
+            methods,
+        })
+    }
+
+    /// Parse a list of supertrait names: Eq or Eq, Ord
+    fn parse_supertrait_list(&mut self) -> Result<Vec<Ident>, ParseError> {
+        let mut traits = vec![self.parse_upper_ident()?];
+        while self.match_token(&Token::Comma) {
+            traits.push(self.parse_upper_ident()?);
+        }
+        Ok(traits)
+    }
+
+    /// Parse an instance declaration:
+    /// impl Show for Int = let show n = int_to_string n end
+    /// impl Show for (List a) where a : Show = let show xs = "[list]" end
+    fn parse_instance_decl(&mut self) -> Result<Decl, ParseError> {
+        self.consume(Token::Impl)?;
+
+        // Trait name
+        let trait_name = self.parse_upper_ident()?;
+
+        self.consume(Token::For)?;
+
+        // Target type (can be complex like (List a))
+        let target_type = self.parse_type_expr()?;
+
+        // Optional constraints: where a : Show, b : Eq
+        let constraints = if self.match_token(&Token::Where) {
+            self.parse_constraints()?
+        } else {
+            vec![]
+        };
+
+        self.consume(Token::Eq)?;
+
+        // Parse method implementations: let show n = ...
+        let mut methods = Vec::new();
+        while self.match_token(&Token::Let) {
+            let method_name = self.parse_ident()?;
+
+            // Collect parameters
+            let mut params = Vec::new();
+            while self.is_pattern_start() && !self.check(&Token::Eq) {
+                params.push(self.parse_simple_pattern()?);
+            }
+
+            self.consume(Token::Eq)?;
+            let body = self.parse_expr()?;
+
+            methods.push(InstanceMethod {
+                name: method_name,
+                params,
+                body,
+            });
+        }
+
+        self.consume(Token::End)?;
+
+        Ok(Decl::Instance {
+            trait_name,
+            target_type,
+            constraints,
+            methods,
+        })
+    }
+
+    /// Parse constraints: a : Show, b : Eq
+    fn parse_constraints(&mut self) -> Result<Vec<Constraint>, ParseError> {
+        let mut constraints = Vec::new();
+
+        loop {
+            // Parse: type_var : TraitName
+            let type_var = self.parse_ident()?;
+            self.consume(Token::Colon)?;
+            let trait_name = self.parse_upper_ident()?;
+
+            constraints.push(Constraint {
+                type_var,
+                trait_name,
+            });
+
+            if !self.match_token(&Token::Comma) {
+                break;
+            }
+        }
+
+        Ok(constraints)
     }
 
     // ========================================================================
@@ -1332,5 +1469,88 @@ mod tests {
     fn test_type_decl() {
         let prog = parse("type Option a = | Some a | None");
         assert_eq!(prog.items.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_trait_decl() {
+        let prog = parse("trait Show a = val show : a -> String end");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Trait {
+                name,
+                type_param,
+                supertraits,
+                methods,
+            }) => {
+                assert_eq!(name, "Show");
+                assert_eq!(type_param, "a");
+                assert!(supertraits.is_empty());
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "show");
+            }
+            _ => panic!("expected trait decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_instance_decl() {
+        let prog = parse("impl Show for Int = let show n = int_to_string n end");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Instance {
+                trait_name,
+                constraints,
+                methods,
+                ..
+            }) => {
+                assert_eq!(trait_name, "Show");
+                assert!(constraints.is_empty());
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "show");
+            }
+            _ => panic!("expected instance decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_constrained_instance() {
+        let prog = parse(r#"impl Show for (List a) where a : Show = let show xs = "list" end"#);
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Instance { constraints, .. }) => {
+                assert_eq!(constraints.len(), 1);
+                assert_eq!(constraints[0].type_var, "a");
+                assert_eq!(constraints[0].trait_name, "Show");
+            }
+            _ => panic!("expected instance decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trait_with_supertrait() {
+        let prog = parse("trait Ord a : Eq = val compare : a -> a -> Int end");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Trait { supertraits, .. }) => {
+                assert_eq!(supertraits.len(), 1);
+                assert_eq!(supertraits[0], "Eq");
+            }
+            _ => panic!("expected trait decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_trait_multiple_methods() {
+        let prog = parse(
+            "trait Eq a = val eq : a -> a -> Bool val neq : a -> a -> Bool end",
+        );
+        match &prog.items[0] {
+            Item::Decl(Decl::Trait { methods, .. }) => {
+                assert_eq!(methods.len(), 2);
+                assert_eq!(methods[0].name, "eq");
+                assert_eq!(methods[1].name, "neq");
+            }
+            _ => panic!("expected trait decl"),
+        }
     }
 }
