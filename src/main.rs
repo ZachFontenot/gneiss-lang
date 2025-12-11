@@ -69,8 +69,9 @@ fn run_file(path: &str) {
     // Evaluate
     println!("=== Running ===");
     let mut interpreter = Interpreter::new();
-    // Pass the class environment from type inference to the interpreter
+    // Pass the class environment and type context from type inference to the interpreter
     interpreter.set_class_env(inferencer.take_class_env());
+    interpreter.set_type_ctx(inferencer.take_type_ctx());
     match interpreter.run(&program) {
         Ok(result) => {
             println!("\n=== Result ===");

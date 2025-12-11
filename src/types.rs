@@ -582,11 +582,13 @@ fn match_type_inner(pattern: &Type, target: &Type, subst: &mut Substitution) -> 
         (Type::Unit, Type::Unit) => true,
         (Type::Pid, Type::Pid) => true,
 
-        // Constructors with same name
+        // Constructors with same name (nominal matching - name is sufficient)
         (
             Type::Constructor { name: n1, args: a1 },
             Type::Constructor { name: n2, args: a2 },
-        ) if n1 == n2 && a1.len() == a2.len() => {
+        ) if n1 == n2 => {
+            // Match available args positionally; missing args in target are OK
+            // (e.g., pattern `Option a` matches target `Option` from nullary constructor)
             a1.iter().zip(a2).all(|(p, t)| match_type_inner(p, t, subst))
         }
 

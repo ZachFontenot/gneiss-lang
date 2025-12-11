@@ -281,6 +281,38 @@ impl Value {
             _ => Type::Unit, // Fallback for closures, continuations, etc.
         }
     }
+
+    /// Convert a runtime value to a Type, using TypeContext to resolve constructor names to type names
+    pub fn to_type_with_ctx(&self, type_ctx: &TypeContext) -> Type {
+        match self {
+            Value::Int(_) => Type::Int,
+            Value::Float(_) => Type::Float,
+            Value::Bool(_) => Type::Bool,
+            Value::String(_) => Type::String,
+            Value::Char(_) => Type::Char,
+            Value::Unit => Type::Unit,
+            Value::List(items) => {
+                let elem_ty = items.first().map(|v| v.to_type_with_ctx(type_ctx)).unwrap_or(Type::Unit);
+                Type::List(Rc::new(elem_ty))
+            }
+            Value::Tuple(items) => {
+                Type::Tuple(items.iter().map(|v| v.to_type_with_ctx(type_ctx)).collect())
+            }
+            Value::Constructor { name, fields } => {
+                // Look up the constructor to find the actual type name
+                let type_name = type_ctx.get_constructor(name)
+                    .map(|info| info.type_name.clone())
+                    .unwrap_or_else(|| name.clone());
+                Type::Constructor {
+                    name: type_name,
+                    args: fields.iter().map(|v| v.to_type_with_ctx(type_ctx)).collect(),
+                }
+            }
+            Value::Pid(_) => Type::Pid,
+            Value::Channel(_) => Type::Channel(Rc::new(Type::Unit)),
+            _ => Type::Unit,
+        }
+    }
 }
 
 /// Environment mapping names to values
@@ -339,6 +371,8 @@ pub struct Interpreter {
     pub runtime: Runtime,
     /// Class environment for typeclass instances
     class_env: ClassEnv,
+    /// Type context for constructor -> type mapping
+    type_ctx: TypeContext,
 }
 
 impl Interpreter {
@@ -357,12 +391,18 @@ impl Interpreter {
             global_env,
             runtime: Runtime::new(),
             class_env: ClassEnv::new(),
+            type_ctx: TypeContext::new(),
         }
     }
 
     /// Set the class environment (called after type inference)
     pub fn set_class_env(&mut self, class_env: ClassEnv) {
         self.class_env = class_env;
+    }
+
+    /// Set the type context (called after type inference)
+    pub fn set_type_ctx(&mut self, type_ctx: TypeContext) {
+        self.type_ctx = type_ctx;
     }
 
     /// Run a program
@@ -1156,8 +1196,8 @@ impl Interpreter {
                         let trait_name = &rest[..underscore_pos];
                         let method_name = &rest[underscore_pos + 1..];
 
-                        // Get the runtime type of the argument
-                        let arg_type = arg.to_type();
+                        // Get the runtime type of the argument, using type_ctx to resolve constructor names
+                        let arg_type = arg.to_type_with_ctx(&self.type_ctx);
 
                         // Build a predicate and resolve it
                         let pred = Pred::new(trait_name, arg_type);

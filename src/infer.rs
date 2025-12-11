@@ -1085,6 +1085,11 @@ impl Inferencer {
     pub fn class_env(&self) -> &ClassEnv {
         &self.class_env
     }
+
+    /// Get the type context (for passing to the interpreter)
+    pub fn take_type_ctx(&mut self) -> TypeContext {
+        std::mem::take(&mut self.type_ctx)
+    }
 }
 
 #[cfg(test)]
