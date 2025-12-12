@@ -1,0 +1,72 @@
+-- =============================================================================
+-- Pattern: Generators with yield
+-- =============================================================================
+--
+-- The generator pattern uses shift to "yield" values that get collected
+-- into a list. The continuation represents "the rest of the generator."
+--
+-- Key insight: yield x suspends the computation, prepends x to what the
+-- rest of the generator produces, then resumes.
+
+-- yield: produce a value and prepend it to the result
+let yield x = shift (fun k -> x :: k ())
+
+-- Example 1: Simple sequence
+let example1 () =
+    reset (
+        yield 1;
+        yield 2;
+        yield 3;
+        []
+    )
+-- Result: [1, 2, 3]
+
+-- Example 2: Conditional yields
+let example2 n =
+    reset (
+        yield n;
+        if n > 0 then yield (n * 2) else ();
+        yield (n + 10);
+        []
+    )
+-- example2 5 = [5, 10, 15]
+-- example2 0 = [0, 10]
+-- example2 (-3) = [-3, 7]
+
+-- Example 3: Yield in a loop (manual recursion)
+let count_down n =
+    let rec go i =
+        if i <= 0 then []
+        else (
+            yield i;
+            go (i - 1)
+        )
+    in
+    reset (go n)
+-- count_down 5 = [5, 4, 3, 2, 1]
+
+-- Example 4: Filter while yielding
+let evens_up_to n =
+    let rec go i =
+        if i > n then []
+        else (
+            if i mod 2 == 0 then yield i else ();
+            go (i + 1)
+        )
+    in
+    reset (go 0)
+-- evens_up_to 10 = [0, 2, 4, 6, 8, 10]
+
+let main () =
+    print "Example 1: Simple yields";
+    print (example1 ());
+    
+    print "Example 2: Conditional yields";
+    print (example2 5);
+    print (example2 0);
+    
+    print "Example 3: Count down";
+    print (count_down 5);
+    
+    print "Example 4: Even numbers";
+    print (evens_up_to 10)

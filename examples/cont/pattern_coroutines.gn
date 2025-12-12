@@ -1,0 +1,234 @@
+-- =============================================================================
+-- Pattern: Coroutines (Cooperative Multitasking)
+-- =============================================================================
+--
+-- Coroutines are functions that can suspend themselves and be resumed later.
+-- Unlike generators (which yield values OUT), coroutines can also receive
+-- values IN when resumed. This enables two-way communication.
+--
+-- Key insight: When a coroutine suspends, it captures its continuation.
+-- The scheduler can then run other coroutines and resume this one later.
+
+-- =============================================================================
+-- Part 1: Simple Coroutines (yield control, no values)
+-- =============================================================================
+
+-- A suspended coroutine: either done or waiting to be resumed
+type Coroutine =
+    | Done
+    | Suspended (() -> Coroutine)
+
+-- suspend: voluntarily give up control
+let suspend () =
+    shift (fun k -> Suspended k)
+
+-- Run a coroutine until it suspends or completes
+let start_coroutine f =
+    reset (
+        f ();
+        Done
+    )
+
+-- Round-robin scheduler: run coroutines until all complete
+let rec run_all coroutines =
+    match coroutines with
+    | [] -> ()
+    | Done :: rest -> run_all rest
+    | Suspended k :: rest -> run_all (rest ++ [k ()])
+
+-- Example: Two coroutines taking turns
+let coroutine_a () =
+    print "A: starting";
+    suspend ();
+    print "A: resumed once";
+    suspend ();
+    print "A: resumed twice";
+    suspend ();
+    print "A: finishing"
+
+let coroutine_b () =
+    print "B: starting";
+    suspend ();
+    print "B: resumed";
+    suspend ();
+    print "B: finishing"
+
+let example_interleaved () =
+    let a = start_coroutine coroutine_a in
+    let b = start_coroutine coroutine_b in
+    run_all [a, b]
+    -- Output:
+    -- A: starting
+    -- B: starting
+    -- A: resumed once
+    -- B: resumed
+    -- A: resumed twice
+    -- B: finishing
+    -- A: finishing
+
+-- =============================================================================
+-- Part 2: Producer-Consumer Coroutines
+-- =============================================================================
+
+-- A producer yields values, a consumer receives them
+type ProducerState a =
+    | ProducerDone
+    | Produced a (() -> ProducerState a)
+
+type ConsumerState a =
+    | ConsumerDone
+    | NeedsValue (a -> ConsumerState a)
+
+-- produce: yield a value to the consumer
+let produce x =
+    shift (fun k -> Produced x k)
+
+-- consume: request a value from the producer
+let consume () =
+    shift (fun k -> NeedsValue k)
+
+-- Connect a producer and consumer
+let rec connect producer consumer =
+    match (producer, consumer) with
+    | (ProducerDone, _) -> ()
+    | (_, ConsumerDone) -> ()
+    | (Produced x pk, NeedsValue ck) ->
+        -- Producer has a value, consumer wants one: transfer!
+        connect (pk ()) (ck x)
+    | _ -> ()  -- Mismatched states
+
+let run_producer f =
+    reset (f (); ProducerDone)
+
+let run_consumer f =
+    reset (f (); ConsumerDone)
+
+-- Example: number producer and squaring consumer
+let number_producer () =
+    produce 1;
+    produce 2;
+    produce 3;
+    produce 4;
+    produce 5
+
+let squaring_consumer () =
+    let rec loop () =
+        let x = consume () in
+        print (x * x);
+        loop ()
+    in
+    loop ()
+
+let producer_consumer_example () =
+    let prod = run_producer number_producer in
+    let cons = run_consumer squaring_consumer in
+    connect prod cons
+    -- Output: 1, 4, 9, 16, 25
+
+-- =============================================================================
+-- Part 3: Bidirectional Coroutines (send AND receive)
+-- =============================================================================
+
+type BiCoroutine a b =
+    | BiDone
+    | Sending a (b -> BiCoroutine a b)
+
+-- send: send a value and wait for a response
+let send x =
+    shift (fun k -> Sending x k)
+
+-- Run two coroutines that communicate bidirectionally
+let rec run_pair c1 c2 =
+    match (c1, c2) with
+    | (BiDone, _) -> ()
+    | (_, BiDone) -> ()
+    | (Sending x k1, Sending y k2) ->
+        -- Exchange values and continue
+        run_pair (k1 y) (k2 x)
+
+let start_bi f =
+    reset (f (); BiDone)
+
+-- Example: Ping-pong with counting
+let ping () =
+    let rec loop count =
+        if count > 5 then print "Ping: done"
+        else (
+            print ("Ping: sending " ^ int_to_string count);
+            let response = send count in
+            print ("Ping: got " ^ int_to_string response);
+            loop (response + 1)
+        )
+    in
+    loop 1
+
+let pong () =
+    let rec loop () =
+        let x = send 0 in  -- Initial send (ignored first time)
+        print ("Pong: received " ^ int_to_string x);
+        let doubled = x * 2 in
+        print ("Pong: sending " ^ int_to_string doubled);
+        loop ()
+    in
+    loop ()
+
+-- =============================================================================
+-- Part 4: Async/Await Style
+-- =============================================================================
+
+-- Simulated async operations
+type AsyncResult a =
+    | Pending (() -> AsyncResult a)
+    | Resolved a
+
+-- await: suspend until a result is ready
+let await async_op =
+    shift (fun k ->
+        -- In real implementation, would register callback
+        -- For now, just wrap the continuation
+        let rec check_result () =
+            match async_op () with
+            | Resolved x -> k x
+            | Pending retry -> Pending (fun () -> check_result ())
+        in
+        check_result ()
+    )
+
+-- Simulate an async operation that takes n "ticks"
+let make_async value ticks =
+    let remaining = ref ticks in
+    fun () ->
+        if !remaining <= 0 then Resolved value
+        else (
+            remaining := !remaining - 1;
+            Pending (make_async value !remaining)
+        )
+
+let async_example () =
+    reset (
+        print "Starting async operations...";
+        let a = await (make_async 10 2) in
+        print ("Got a: " ^ int_to_string a);
+        let b = await (make_async 20 1) in
+        print ("Got b: " ^ int_to_string b);
+        print ("Sum: " ^ int_to_string (a + b));
+        Resolved ()
+    )
+
+-- Helper
+let int_to_string n =
+    if n == 0 then "0"
+    else if n == 1 then "1"
+    else if n == 2 then "2"
+    else if n == 3 then "3"
+    else if n == 4 then "4"
+    else if n == 5 then "5"
+    else "?"
+
+let main () =
+    print "=== Interleaved Coroutines ===";
+    example_interleaved ();
+    
+    print "";
+    print "=== Producer-Consumer ===";
+    producer_consumer_example ()

@@ -1,0 +1,24 @@
+let yield x = shift (fun k -> x :: k ())
+let example1 () =
+  reset (
+    yield 1;
+    yield 2;
+    yield 3;
+    []
+  )
+
+-- Example 2: Conditional yields
+let example2 n =
+    reset (
+        yield n;
+        if n > 0 then yield (n * 2) else (yield 0);
+        yield (n + 10);
+        []
+    )
+    
+let main _ =
+    print "Example 1: Simple yields";
+    print (example1 ());
+    
+    print "Example 2: Conditional yields";
+    print (example2 5)    

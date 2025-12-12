@@ -1,0 +1,277 @@
+-- =============================================================================
+-- Answer-Type Polymorphism: Advanced Patterns
+-- =============================================================================
+--
+-- These examples demonstrate patterns that REQUIRE answer-type modification
+-- to type correctly. In these cases, the continuation doesn't just produce
+-- the same type - it TRANSFORMS the type.
+--
+-- Key insight: shift changes what type the surrounding context produces.
+-- This is the "answer type" - the final result type of the enclosing reset.
+
+-- =============================================================================
+-- Pattern 1: Printf (The Classic Example)
+-- =============================================================================
+--
+-- printf format strings like "Hello %s, you are %d years old"
+-- need to return a FUNCTION that takes the arguments!
+--
+-- printf "Hello %s" : String -> String
+-- printf "Age: %d"  : Int -> String
+-- printf "%s is %d" : String -> Int -> String
+--
+-- This is answer-type modification: the shift for %s changes the answer
+-- from String to (String -> String).
+
+-- Format directive type
+type Format =
+    | FEnd                    -- end of format
+    | FLit String Format      -- literal string
+    | FStr Format             -- %s - string hole
+    | FInt Format             -- %d - int hole
+
+-- printf: interpret a format, returning appropriate function type
+-- The magic is in how each hole MODIFIES the answer type!
+let rec printf fmt =
+    reset (printf_inner fmt)
+
+and printf_inner fmt =
+    match fmt with
+    | FEnd -> ""
+    | FLit s rest ->
+        s ^ printf_inner rest
+    | FStr rest ->
+        -- This shift transforms answer from String to (String -> String)
+        -- k : String -> String (takes the result of rest, produces final string)
+        -- We return a function that takes a string argument
+        shift (fun k ->
+            fun str_arg -> k (str_arg ^ printf_inner rest)
+        )
+    | FInt rest ->
+        -- This shift transforms answer from String to (Int -> String)
+        shift (fun k ->
+            fun int_arg -> k (int_to_string int_arg ^ printf_inner rest)
+        )
+
+-- Examples:
+-- printf (FLit "Hello" FEnd) = "Hello" : String
+-- printf (FStr FEnd) = fun s -> s : String -> String
+-- printf (FLit "Hello " (FStr (FLit "!" FEnd))) = fun s -> "Hello " ^ s ^ "!" : String -> String
+
+let printf_example () =
+    let greet = printf (FLit "Hello " (FStr (FLit "!" FEnd))) in
+    print (greet "World");  -- "Hello World!"
+    
+    let describe = printf (FStr (FLit " is " (FInt (FLit " years old" FEnd)))) in
+    print (describe "Alice" 30)  -- "Alice is 30 years old"
+
+-- =============================================================================
+-- Pattern 2: Prefix (Collect prefixes of a list)
+-- =============================================================================
+--
+-- prefix [1, 2, 3] should return [[1], [1, 2], [1, 2, 3]]
+-- But we want to write it in a natural "yield prefixes" style!
+--
+-- The trick: at each step, we yield the current prefix, but the yield
+-- modifies the answer type from "rest of prefixes" to "this prefix :: rest"
+
+let visit x =
+    shift (fun k ->
+        -- k: current_list -> list of lists
+        -- We want to: yield [x] appended to accumulator, then continue
+        fun acc ->
+            let new_acc = acc ++ [x] in
+            new_acc :: k new_acc
+    )
+
+let prefix xs =
+    let k = reset (
+        let rec go remaining =
+            match remaining with
+            | [] -> fun _acc -> []
+            | x :: rest ->
+                visit x;
+                go rest
+        in
+        go xs
+    ) in
+    k []
+
+-- prefix [1, 2, 3] = [[1], [1, 2], [1, 2, 3]]
+
+-- =============================================================================
+-- Pattern 3: Append (CPS-transformed list append)
+-- =============================================================================
+--
+-- Traditional append is O(n) in first list length due to copying.
+-- With continuations, we can build a "difference list" that appends in O(1).
+--
+-- The continuation represents "what to prepend this element to"
+
+let snoc x =
+    shift (fun k -> 
+        -- k: 'a list -> 'a list (prepend more elements)
+        -- We want to add x at the end, so we call k first then add x
+        k [x]
+    )
+
+let from_list xs =
+    reset (
+        let rec go remaining =
+            match remaining with
+            | [] -> []
+            | x :: rest ->
+                let tail = go rest in
+                shift (fun k -> x :: k tail)
+        in
+        go xs
+    )
+
+-- =============================================================================
+-- Pattern 4: State Transformer with Type Change
+-- =============================================================================
+--
+-- Sometimes state transformations change the TYPE of the state!
+-- This requires answer-type polymorphism.
+
+type InitialState = { count: Int, buffer: List String }
+type FinalState = { total: Int, output: String }
+
+let transform_state () =
+    shift (fun k ->
+        -- k : FinalState -> result
+        -- We receive InitialState and must convert
+        fun (initial: InitialState) ->
+            let final = {
+                total = initial.count * 2,
+                output = join initial.buffer
+            } in
+            k final
+    )
+
+let join xs =
+    match xs with
+    | [] -> ""
+    | [x] -> x
+    | x :: rest -> x ^ ", " ^ join rest
+
+-- =============================================================================
+-- Pattern 5: Tree Labeling with Fresh Names
+-- =============================================================================
+--
+-- Label each node of a tree with a unique number.
+-- The answer type changes from Tree to (Int -> Tree) as we thread state.
+
+type Tree a =
+    | Leaf a
+    | Node (Tree a) (Tree a)
+
+-- Get a fresh label, modifying the answer type
+let fresh () =
+    shift (fun k ->
+        -- k : Int -> final_result
+        -- We want: Int -> final_result (take counter, return result)
+        fun counter ->
+            k counter (counter + 1)
+    )
+
+let rec label_tree tree =
+    match tree with
+    | Leaf x ->
+        let n = fresh () in
+        Leaf (x, n)
+    | Node left right ->
+        let left' = label_tree left in
+        let right' = label_tree right in
+        Node left' right'
+
+let run_labeling tree =
+    let k = reset (
+        let result = label_tree tree in
+        fun counter -> (result, counter)
+    ) in
+    k 0
+
+-- =============================================================================
+-- Pattern 6: Continuation Composition
+-- =============================================================================
+--
+-- We can compose continuations, building up complex transformations.
+-- This works because continuations are just functions!
+
+let double_each () =
+    shift (fun k ->
+        -- k : Int list -> result
+        -- We want to double each element before passing to k
+        fun xs -> k (map (fun x -> x * 2) xs)
+    )
+
+let filter_positive () =
+    shift (fun k ->
+        fun xs -> k (filter (fun x -> x > 0) xs)
+    )
+
+let pipeline () =
+    reset (
+        double_each ();
+        filter_positive ();
+        fun xs -> xs
+    )
+
+-- pipeline () [-1, 2, -3, 4] = [4, 8] (doubled, then filtered)
+
+let map f xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> f x :: map f rest
+
+let filter pred xs =
+    match xs with
+    | [] -> []
+    | x :: rest ->
+        if pred x then x :: filter pred rest
+        else filter pred rest
+
+-- =============================================================================
+-- Pattern 7: Monadic Reflection (Extracting from Monads)
+-- =============================================================================
+--
+-- With shift/reset, we can write monadic code in direct style!
+-- "reflect" extracts a value from a monadic computation.
+-- "reify" captures direct-style code as a monad.
+
+-- For Option monad:
+let reflect_option opt =
+    match opt with
+    | None -> shift (fun _k -> None)
+    | Some x -> x
+
+let reify_option comp =
+    reset (Some (comp ()))
+
+-- Direct-style option code:
+let option_example () =
+    reify_option (fun () ->
+        let x = reflect_option (Some 10) in
+        let y = reflect_option (Some 20) in
+        let z = reflect_option (if x > 5 then Some (x + y) else None) in
+        z * 2
+    )
+-- Result: Some 60
+
+let int_to_string n =
+    if n == 0 then "0"
+    else if n == 30 then "30"
+    else "?"
+
+let main () =
+    print "=== Printf ===";
+    printf_example ();
+    
+    print "";
+    print "=== Prefix ===";
+    print (prefix [1, 2, 3]);
+    
+    print "";
+    print "=== Option Monad ===";
+    print (option_example ())

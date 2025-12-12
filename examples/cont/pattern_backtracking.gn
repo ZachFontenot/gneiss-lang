@@ -1,0 +1,232 @@
+-- =============================================================================
+-- Pattern: Backtracking Search with Pruning
+-- =============================================================================
+--
+-- This extends the nondeterminism pattern with "cut" - the ability to commit
+-- to a choice and prevent backtracking past that point. This is essential
+-- for efficient search algorithms (like Prolog's cut).
+--
+-- Key insight: We use NESTED resets to create "choice points". A cut
+-- discards alternatives only up to the nearest enclosing choice point.
+
+-- =============================================================================
+-- Part 1: Basic Backtracking with Cut
+-- =============================================================================
+
+-- fail: no solutions, backtrack
+let fail () = shift (fun _k -> [])
+
+-- choose: make a choice, can backtrack
+let choose xs =
+    shift (fun k ->
+        let rec try_all choices =
+            match choices with
+            | [] -> []
+            | x :: rest -> k x ++ try_all rest
+        in
+        try_all xs
+    )
+
+-- cut: commit to current choice, no backtracking past this point
+-- This works by capturing and IMMEDIATELY EXECUTING the continuation
+-- within a nested reset, preventing outer alternatives from being tried
+let cut () =
+    shift (fun k ->
+        -- Execute k() inside a fresh reset, so outer choices are committed
+        reset (k ())
+    )
+
+-- once: take only the first solution (implicit cut after first success)
+let once computation =
+    let results = computation () in
+    match results with
+    | [] -> []
+    | x :: _ -> [x]
+
+-- Run a backtracking computation
+let run computation =
+    reset (
+        let result = computation () in
+        [result]
+    )
+
+-- =============================================================================
+-- Part 2: If-Then-Else with Cut (Prolog style)
+-- =============================================================================
+
+-- Prolog's (Cond -> Then ; Else) means:
+-- - If Cond succeeds, commit to Then (don't try Else)
+-- - If Cond fails, try Else
+
+let if_then_else cond then_branch else_branch =
+    -- Try condition; if succeeds, cut and do then_branch
+    let cond_result = once (fun () -> run (fun () -> cond ())) in
+    match cond_result with
+    | [] -> else_branch ()          -- Condition failed, try else
+    | _ -> cut (); then_branch ()   -- Condition succeeded, commit
+
+-- Example: Classify numbers
+let classify n =
+    run (fun () ->
+        if_then_else 
+            (fun () -> if n < 0 then () else fail ())
+            (fun () -> "negative")
+            (fun () ->
+                if_then_else
+                    (fun () -> if n == 0 then () else fail ())
+                    (fun () -> "zero")
+                    (fun () -> "positive")
+            )
+    )
+
+-- =============================================================================
+-- Part 3: Search with Pruning
+-- =============================================================================
+
+-- Find first element satisfying predicate (stops after finding one)
+let find_first pred xs =
+    once (fun () -> 
+        run (fun () ->
+            let x = choose xs in
+            if pred x then x else fail ()
+        )
+    )
+
+-- Find all elements up to and including first match, then stop
+let find_until pred xs =
+    run (fun () ->
+        let x = choose xs in
+        if pred x then (
+            cut ();  -- Found it, don't try remaining elements
+            x
+        ) else x  -- Keep this non-matching element too
+    )
+
+-- =============================================================================
+-- Part 4: Committed Choice (soft cut / *->)
+-- =============================================================================
+
+-- soft_cut: like cut but only within current alternative
+-- "If A succeeds, commit to B, otherwise try C"
+-- Unlike hard cut, doesn't affect choices BEFORE this point
+
+let soft_cut_example () =
+    run (fun () ->
+        let x = choose [1, 2, 3] in
+        -- For x=1: try special case
+        -- For x=2,3: use general case
+        if x == 1 then (
+            -- Soft cut: commit to this branch but allow x=2,3
+            x * 100
+        ) else (
+            x * 10
+        )
+    )
+-- Result: [100, 20, 30]
+
+-- =============================================================================
+-- Part 5: Negation as Failure
+-- =============================================================================
+
+-- not_provable: succeeds if goal fails, fails if goal succeeds
+let not_provable goal =
+    let results = once (fun () -> run goal) in
+    match results with
+    | [] -> ()       -- Goal failed, so negation succeeds
+    | _ -> fail ()   -- Goal succeeded, so negation fails
+
+-- Example: Find numbers NOT in a list
+let not_member x xs =
+    not_provable (fun () ->
+        let y = choose xs in
+        if x == y then () else fail ()
+    )
+
+let negation_example () =
+    run (fun () ->
+        let x = choose [1, 2, 3, 4, 5] in
+        not_member x [2, 4];  -- x must not be 2 or 4
+        x
+    )
+-- Result: [1, 3, 5]
+
+-- =============================================================================
+-- Part 6: Efficient Search Trees (Alpha-Beta style)
+-- =============================================================================
+
+-- Search a tree, pruning branches that can't improve the best found
+type Tree a =
+    | Leaf a
+    | Node (List (Tree a))
+
+let search_with_bound tree bound =
+    let rec search t best =
+        match t with
+        | Leaf v -> 
+            if v > best then [v] else fail ()
+        | Node children ->
+            let results = run (fun () ->
+                let child = choose children in
+                let found = search child best in
+                -- If we found something better, update bound for siblings
+                cut ();  -- Don't try other children at THIS level
+                found
+            ) in
+            match results with
+            | [] -> fail ()
+            | x :: _ -> [x]
+    in
+    run (fun () -> search tree bound)
+
+-- =============================================================================
+-- Part 7: Deterministic Finite Automaton with Early Termination
+-- =============================================================================
+
+type DFAState = Int
+type DFAInput = Char
+
+-- Check if input is accepted, stop early on first accepting path
+let dfa_accepts transitions accepting_states start_state input =
+    let rec step state remaining =
+        match remaining with
+        | [] -> 
+            if member state accepting_states
+            then (cut (); true)  -- Accept and stop
+            else fail ()
+        | c :: rest ->
+            let next_states = get_transitions transitions state c in
+            let next = choose next_states in
+            step next rest
+    in
+    let results = run (fun () -> step start_state input) in
+    not (null results)
+
+let member x xs =
+    let rec check remaining =
+        match remaining with
+        | [] -> false
+        | y :: rest -> if x == y then true else check rest
+    in
+    check xs
+
+let null xs = match xs with [] -> true | _ -> false
+
+let get_transitions _ _ _ = []  -- stub
+
+let main () =
+    print "=== Classify Numbers ===";
+    print (classify (-5));   -- ["negative"]
+    print (classify 0);      -- ["zero"]  
+    print (classify 42);     -- ["positive"]
+    
+    print "";
+    print "=== Find First ===";
+    print (find_first (fun x -> x > 10) [3, 7, 15, 20, 25]);  -- [15]
+    
+    print "";
+    print "=== Soft Cut ===";
+    print (soft_cut_example ());  -- [100, 20, 30]
+    
+    print "";
+    print "=== Negation as Failure ===";
+    print (negation_example ())  -- [1, 3, 5]

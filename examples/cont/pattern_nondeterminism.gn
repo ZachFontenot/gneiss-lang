@@ -1,0 +1,170 @@
+-- =============================================================================
+-- Pattern: Nondeterminism (amb / choose)
+-- =============================================================================
+--
+-- The nondeterminism pattern lets us write code that "chooses" between 
+-- alternatives. Behind the scenes, ALL choices are explored and results
+-- collected. This is the basis for backtracking search and logic programming.
+--
+-- Key insight: `choose [a, b, c]` captures the continuation and runs it
+-- THREE times - once with a, once with b, once with c - collecting all results.
+
+-- fail: no valid choice, produce empty results
+let fail () = shift (fun k -> [])
+
+-- choose: pick one element from a list, exploring all possibilities
+let choose xs =
+    shift (fun k ->
+        -- Run continuation with each choice, flatten results
+        let rec try_all choices =
+            match choices with
+            | [] -> []
+            | x :: rest -> k x ++ try_all rest
+        in
+        try_all xs
+    )
+
+-- Run a nondeterministic computation, collecting all results
+let run_all computation =
+    reset (
+        let result = computation () in
+        [result]  -- wrap single result in list
+    )
+
+-- =============================================================================
+-- Example 1: Pythagorean triples
+-- =============================================================================
+-- Find all (a, b, c) where a² + b² = c² and all values ≤ n
+
+let pythagorean_triples n =
+    run_all (fun () ->
+        let a = choose (range 1 n) in
+        let b = choose (range a n) in  -- b >= a to avoid duplicates
+        let c = choose (range b n) in  -- c >= b
+        if a*a + b*b == c*c 
+        then (a, b, c)
+        else fail ()
+    )
+
+-- Helper: generate [lo, lo+1, ..., hi]
+let range lo hi =
+    let rec go i acc =
+        if i < lo then acc
+        else go (i - 1) (i :: acc)
+    in
+    go hi []
+
+-- =============================================================================
+-- Example 2: N-Queens (find all solutions)
+-- =============================================================================
+-- Place n queens on an n×n board so no two attack each other
+
+let safe queens new_col new_row =
+    -- Check if placing queen at (new_col, new_row) conflicts with existing queens
+    let rec check col_offset remaining =
+        match remaining with
+        | [] -> true
+        | row :: rest ->
+            let col_diff = col_offset in
+            let row_diff = abs (new_row - row) in
+            if row_diff == 0 then false           -- same row
+            else if row_diff == col_diff then false  -- same diagonal
+            else check (col_offset + 1) rest
+    in
+    check 1 queens
+
+let n_queens n =
+    let rec place_queens col queens =
+        if col > n then [queens]  -- all queens placed successfully
+        else
+            run_all (fun () ->
+                let row = choose (range 1 n) in
+                if safe queens col row
+                then 
+                    let solutions = place_queens (col + 1) (row :: queens) in
+                    choose solutions
+                else fail ()
+            )
+    in
+    place_queens 1 []
+
+-- =============================================================================
+-- Example 3: Simple SAT-like search
+-- =============================================================================
+-- Find assignments that satisfy: (a OR b) AND (NOT a OR c) AND (b OR NOT c)
+
+let solve_formula () =
+    run_all (fun () ->
+        let a = choose [true, false] in
+        let b = choose [true, false] in
+        let c = choose [true, false] in
+        -- (a OR b) AND (NOT a OR c) AND (b OR NOT c)
+        if (a || b) && (not a || c) && (b || not c)
+        then (a, b, c)
+        else fail ()
+    )
+
+-- =============================================================================
+-- Example 4: Permutations
+-- =============================================================================
+
+let rec remove x xs =
+    match xs with
+    | [] -> []
+    | y :: ys -> if x == y then ys else y :: remove x ys
+
+let rec permutations xs =
+    match xs with
+    | [] -> [[]]
+    | _ ->
+        run_all (fun () ->
+            let x = choose xs in
+            let rest_perms = permutations (remove x xs) in
+            let perm = choose rest_perms in
+            x :: perm
+        )
+
+-- =============================================================================
+-- Example 5: Coin change (find all ways to make change)
+-- =============================================================================
+
+let coin_change amount coins =
+    let rec make_change remaining available =
+        if remaining == 0 then [[]]
+        else if remaining < 0 then []
+        else match available with
+        | [] -> []
+        | coin :: rest_coins ->
+            run_all (fun () ->
+                -- Either use this coin or skip it
+                let use_coin = choose [true, false] in
+                if use_coin then
+                    let ways = make_change (remaining - coin) available in
+                    let way = choose ways in
+                    coin :: way
+                else
+                    let ways = make_change remaining rest_coins in
+                    choose ways
+            )
+    in
+    make_change amount coins
+
+let main () =
+    print "=== Pythagorean Triples (up to 20) ===";
+    print (pythagorean_triples 20);
+    -- [(3,4,5), (5,12,13), (6,8,10), (8,15,17), (9,12,15), (12,16,20)]
+    
+    print "=== 4-Queens Solutions ===";
+    print (n_queens 4);
+    -- [[3,1,4,2], [2,4,1,3]]
+    
+    print "=== SAT Solutions ===";
+    print (solve_formula ());
+    -- All (a,b,c) satisfying the formula
+    
+    print "=== Permutations of [1,2,3] ===";
+    print (permutations [1, 2, 3]);
+    -- [[1,2,3], [1,3,2], [2,1,3], [2,3,1], [3,1,2], [3,2,1]]
+    
+    print "=== Ways to make 10 with [1,5,10] ===";
+    print (coin_change 10 [1, 5, 10])

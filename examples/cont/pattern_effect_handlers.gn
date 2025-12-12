@@ -1,0 +1,331 @@
+-- =============================================================================
+-- Pattern: Effect Handlers (Algebraic Effects)
+-- =============================================================================
+--
+-- Effect handlers are a principled way to structure programs with effects.
+-- They generalize ALL the patterns we've seen:
+-- - Exceptions = non-resumable effects
+-- - State = resumable effects with threading
+-- - Nondeterminism = effects that resume multiple times
+-- - Generators = effects that yield values
+--
+-- Key insight: An "effect" is just calling shift with some operation.
+-- A "handler" is the reset that interprets those operations.
+
+-- =============================================================================
+-- Part 1: The Effect Handler Pattern
+-- =============================================================================
+
+-- An effect operation is identified by a tag and carries arguments
+-- The handler receives the operation and decides how to handle it
+
+-- General structure:
+--   perform : operation -> result
+--   handle computation { operation -> handler_code }
+
+-- In terms of shift/reset:
+--   perform op = shift (fun k -> Op op k)
+--   handle comp handlers = reset (
+--       let result = comp () in
+--       Return result
+--   ) |> match_handlers
+
+-- =============================================================================
+-- Part 2: Exception Effect
+-- =============================================================================
+
+type ExnEff a =
+    | ExnReturn a
+    | ExnThrow String (() -> ExnEff a)  -- continuation is ignored
+
+let throw_exn msg =
+    shift (fun _k -> ExnThrow msg (fun () -> ExnThrow msg (fun () -> ExnThrow msg (fun () -> ExnReturn ()))))
+
+let handle_exn comp handler =
+    let rec interpret result =
+        match result with
+        | ExnReturn x -> x
+        | ExnThrow msg _ -> handler msg
+    in
+    interpret (reset (ExnReturn (comp ())))
+
+-- Example
+let exn_example () =
+    handle_exn
+        (fun () ->
+            let x = 10 in
+            if x > 5 then throw_exn "too big" else x * 2
+        )
+        (fun msg -> 
+            print ("Caught: " ^ msg);
+            0
+        )
+
+-- =============================================================================
+-- Part 3: State Effect
+-- =============================================================================
+
+type StateOp s =
+    | Get
+    | Put s
+
+type StateEff s a =
+    | StateReturn a
+    | StateOp (StateOp s) (s -> StateEff s a)  -- Put ignores the "returned" value
+
+let state_get () =
+    shift (fun k -> StateOp Get k)
+
+let state_put s =
+    shift (fun k -> StateOp (Put s) (fun _ -> k ()))
+
+let handle_state comp initial =
+    let rec interpret eff state =
+        match eff with
+        | StateReturn x -> (x, state)
+        | StateOp Get k -> interpret (k state) state
+        | StateOp (Put new_state) k -> interpret (k new_state) new_state
+    in
+    interpret (reset (StateReturn (comp ()))) initial
+
+-- Example
+let state_example () =
+    let (result, final_state) = handle_state
+        (fun () ->
+            let x = state_get () in
+            state_put (x + 10);
+            let y = state_get () in
+            state_put (y * 2);
+            state_get ()
+        )
+        5
+    in
+    print ("Result: " ^ int_to_string result);      -- 30
+    print ("Final: " ^ int_to_string final_state)   -- 30
+
+-- =============================================================================
+-- Part 4: Nondeterminism Effect
+-- =============================================================================
+
+type NondetOp =
+    | Choose (List Int)  -- simplified to Int for now
+    | Fail
+
+type NondetEff a =
+    | NondetReturn a
+    | NondetOp NondetOp (Int -> NondetEff a)
+
+let choose_eff xs =
+    shift (fun k -> NondetOp (Choose xs) k)
+
+let fail_eff () =
+    shift (fun _k -> NondetOp Fail (fun _ -> NondetReturn []))
+
+let handle_nondet comp =
+    let rec interpret eff =
+        match eff with
+        | NondetReturn x -> [x]
+        | NondetOp Fail _ -> []
+        | NondetOp (Choose xs) k ->
+            let rec try_all choices =
+                match choices with
+                | [] -> []
+                | x :: rest -> interpret (k x) ++ try_all rest
+            in
+            try_all xs
+    in
+    interpret (reset (NondetReturn (comp ())))
+
+-- Example: Pythagorean triples
+let nondet_example () =
+    handle_nondet (fun () ->
+        let a = choose_eff [1, 2, 3, 4, 5] in
+        let b = choose_eff [1, 2, 3, 4, 5] in
+        let c = choose_eff [1, 2, 3, 4, 5] in
+        if a*a + b*b == c*c && a <= b then (a, b, c)
+        else fail_eff ()
+    )
+
+-- =============================================================================
+-- Part 5: Yield Effect (Generators)
+-- =============================================================================
+
+type YieldEff a b =
+    | YieldReturn b
+    | Yield a (() -> YieldEff a b)
+
+let yield_eff x =
+    shift (fun k -> Yield x k)
+
+-- Collect all yielded values
+let handle_yield_collect comp =
+    let rec interpret eff acc =
+        match eff with
+        | YieldReturn _ -> reverse acc
+        | Yield x k -> interpret (k ()) (x :: acc)
+    in
+    interpret (reset (YieldReturn (comp ()))) []
+
+-- Transform yielded values
+let handle_yield_map f comp =
+    let rec interpret eff =
+        match eff with
+        | YieldReturn x -> YieldReturn x
+        | Yield x k -> Yield (f x) (fun () -> interpret (k ()))
+    in
+    interpret (reset (YieldReturn (comp ())))
+
+-- Example
+let yield_example () =
+    handle_yield_collect (fun () ->
+        yield_eff 1;
+        yield_eff 2;
+        yield_eff 3;
+        ()
+    )
+
+-- =============================================================================
+-- Part 6: Composing Effects (Effect Stacks)
+-- =============================================================================
+
+-- Effects can be layered! State + Exceptions:
+
+type StateExnEff s a =
+    | SEReturn a
+    | SEGet (s -> StateExnEff s a)
+    | SEPut s (() -> StateExnEff s a)
+    | SEThrow String
+
+let se_get () = shift (fun k -> SEGet k)
+let se_put s = shift (fun k -> SEPut s k)
+let se_throw msg = shift (fun _k -> SEThrow msg)
+
+let handle_state_exn comp initial =
+    let rec interpret eff state =
+        match eff with
+        | SEReturn x -> Ok (x, state)
+        | SEGet k -> interpret (k state) state
+        | SEPut new_state k -> interpret (k ()) new_state
+        | SEThrow msg -> Err msg
+    in
+    interpret (reset (SEReturn (comp ()))) initial
+
+-- Example: Stateful computation that might fail
+let state_exn_example () =
+    let result = handle_state_exn
+        (fun () ->
+            let x = se_get () in
+            if x < 0 then se_throw "negative state!"
+            else (
+                se_put (x + 1);
+                se_get ()
+            )
+        )
+        10
+    in
+    match result with
+    | Ok (value, state) -> print ("Success: " ^ int_to_string value)
+    | Err msg -> print ("Error: " ^ msg)
+
+-- =============================================================================
+-- Part 7: Reader Effect (Environment)
+-- =============================================================================
+
+type ReaderEff r a =
+    | ReaderReturn a
+    | Ask (r -> ReaderEff r a)
+    | Local (r -> r) (() -> ReaderEff r a) (ReaderEff r a -> ReaderEff r a)
+
+let ask () = shift (fun k -> Ask k)
+
+let handle_reader comp env =
+    let rec interpret eff =
+        match eff with
+        | ReaderReturn x -> x
+        | Ask k -> interpret (k env)
+    in
+    interpret (reset (ReaderReturn (comp ())))
+
+-- Example: Configuration reader
+let reader_example () =
+    let config = { debug = true, max_depth = 10 } in
+    handle_reader (fun () ->
+        let cfg = ask () in
+        if cfg.debug then print "Debug mode enabled" else ();
+        cfg.max_depth
+    ) config
+
+-- =============================================================================
+-- Part 8: The Power of Handlers - Different Interpretations
+-- =============================================================================
+
+-- The SAME effectful computation can be interpreted differently!
+
+let my_computation () =
+    let x = choose_eff [1, 2] in
+    let y = choose_eff [10, 20] in
+    x + y
+
+-- Interpretation 1: Collect all results
+let all_results () =
+    handle_nondet my_computation
+    -- [11, 21, 12, 22]
+
+-- Interpretation 2: Take only first (with a different handler)
+let handle_nondet_first comp =
+    let rec interpret eff =
+        match eff with
+        | NondetReturn x -> Some x
+        | NondetOp Fail _ -> None
+        | NondetOp (Choose xs) k ->
+            match xs with
+            | [] -> None
+            | x :: _ -> interpret (k x)  -- only try first
+    in
+    interpret (reset (NondetReturn (comp ())))
+
+let first_result () =
+    handle_nondet_first my_computation
+    -- Some 11
+
+-- Helpers
+let reverse xs =
+    let rec go acc remaining =
+        match remaining with
+        | [] -> acc
+        | x :: rest -> go (x :: acc) rest
+    in
+    go [] xs
+
+let int_to_string n =
+    if n == 0 then "0" else if n == 1 then "1" else if n == 5 then "5"
+    else if n == 10 then "10" else if n == 30 then "30" else "?"
+
+type Result a e = Ok a | Err e
+
+let main () =
+    print "=== Exception Effect ===";
+    print (exn_example ());
+    
+    print "";
+    print "=== State Effect ===";
+    state_example ();
+    
+    print "";
+    print "=== Nondeterminism Effect ===";
+    print (nondet_example ());
+    
+    print "";
+    print "=== Yield Effect ===";
+    print (yield_example ());
+    
+    print "";
+    print "=== Composed Effects ===";
+    state_exn_example ();
+    
+    print "";
+    print "=== Same Computation, Different Handlers ===";
+    print "All results:";
+    print (all_results ());
+    print "First result:";
+    print (first_result ())

@@ -1,0 +1,232 @@
+-- =============================================================================
+-- Pattern: Exceptions and Error Handling
+-- =============================================================================
+--
+-- Exceptions let us abort a computation early and jump to a handler.
+-- With shift/reset, we can implement various exception styles:
+-- - Simple early exit (abort with value)
+-- - Try/catch with exception types
+-- - Resumable exceptions (handlers that can fix the problem and continue)
+--
+-- Key insight: `throw` captures the continuation (rest of computation)
+-- and discards it, returning directly to the handler at the reset boundary.
+
+-- =============================================================================
+-- Part 1: Simple Exceptions (throw/catch)
+-- =============================================================================
+
+-- Result type for computations that might fail
+type Result a e =
+    | Ok a
+    | Err e
+
+-- throw: abort computation with an error
+let throw err =
+    shift (fun _k -> Err err)  -- Discard continuation, return error
+
+-- try_catch: run computation, catching any thrown errors
+let try_catch computation handler =
+    match reset (Ok (computation ())) with
+    | Ok x -> x
+    | Err e -> handler e
+
+-- Example: Division with error handling
+let safe_div x y =
+    if y == 0 then throw "division by zero"
+    else x / y
+
+let division_example () =
+    try_catch 
+        (fun () -> 
+            let a = safe_div 10 2 in   -- 5
+            let b = safe_div a 0 in    -- throws!
+            let c = safe_div b 1 in    -- never reached
+            c
+        )
+        (fun err -> 
+            print ("Caught error: " ^ err);
+            0  -- default value
+        )
+
+-- =============================================================================
+-- Part 2: Typed Exceptions (multiple exception types)
+-- =============================================================================
+
+type MathError =
+    | DivByZero
+    | Overflow
+    | NegativeSqrt
+
+type MathResult a = Result a MathError
+
+let throw_math err =
+    shift (fun _k -> Err err)
+
+let safe_div2 x y =
+    if y == 0 then throw_math DivByZero
+    else if x > 1000000 && y < 0 then throw_math Overflow
+    else x / y
+
+let safe_sqrt x =
+    if x < 0 then throw_math NegativeSqrt
+    else sqrt x
+
+let math_example () =
+    let result = reset (
+        let a = safe_div2 100 5 in     -- 20
+        let b = safe_sqrt (float a) in  -- ~4.47
+        Ok b
+    ) in
+    match result with
+    | Ok x -> print ("Result: " ^ float_to_string x)
+    | Err DivByZero -> print "Error: division by zero"
+    | Err Overflow -> print "Error: overflow"
+    | Err NegativeSqrt -> print "Error: negative square root"
+
+-- =============================================================================
+-- Part 3: Multiple Handlers (nested try-catch)
+-- =============================================================================
+
+-- Inner computation might throw different errors at different levels
+let nested_example () =
+    try_catch (fun () ->
+        let x = try_catch (fun () ->
+            let a = safe_div 10 2 in     -- 5
+            let b = safe_div 20 0 in     -- throws in inner
+            a + b
+        ) (fun err ->
+            print ("Inner handler: " ^ err);
+            100  -- recover with default
+        ) in
+        let y = safe_div x 0 in  -- throws in outer
+        y
+    ) (fun err ->
+        print ("Outer handler: " ^ err);
+        -1
+    )
+
+-- =============================================================================
+-- Part 4: Resumable Exceptions (handlers that fix and continue)
+-- =============================================================================
+
+-- This is where shift/reset really shines over traditional exceptions!
+-- The handler receives the continuation and can RESUME after fixing.
+
+-- request_input: ask the handler for a value and continue
+let request_input prompt =
+    shift (fun k -> 
+        -- Return a "needs input" result with the continuation
+        NeedsInput prompt k
+    )
+
+type ComputeResult a =
+    | Completed a
+    | NeedsInput String (Int -> ComputeResult a)
+
+-- Run computation, providing inputs when needed
+let rec run_with_inputs computation inputs =
+    match computation with
+    | Completed x -> x
+    | NeedsInput prompt k ->
+        match inputs with
+        | [] -> 
+            print ("Missing input for: " ^ prompt);
+            run_with_inputs (k 0) []  -- default
+        | input :: rest ->
+            print ("Providing " ^ int_to_string input ^ " for: " ^ prompt);
+            run_with_inputs (k input) rest
+
+let input_example () =
+    let computation = reset (
+        let x = request_input "Enter x" in
+        let y = request_input "Enter y" in
+        let z = request_input "Enter z" in
+        Completed (x + y * z)
+    ) in
+    -- Run with provided inputs
+    run_with_inputs computation [10, 5, 3]
+    -- Result: 10 + 5*3 = 25
+
+-- =============================================================================
+-- Part 5: Finally Blocks (cleanup that always runs)
+-- =============================================================================
+
+-- with_finally: ensure cleanup runs even if computation throws
+let with_finally computation cleanup =
+    let result = reset (Ok (computation ())) in
+    cleanup ();  -- Always runs
+    match result with
+    | Ok x -> x
+    | Err e -> throw e  -- Re-throw after cleanup
+
+let finally_example () =
+    try_catch (fun () ->
+        with_finally
+            (fun () ->
+                print "Opening resource...";
+                let result = safe_div 10 0 in  -- throws!
+                print "This won't print";
+                result
+            )
+            (fun () ->
+                print "Cleanup: closing resource"  -- This DOES run
+            )
+    ) (fun err ->
+        print ("Caught after cleanup: " ^ err);
+        0
+    )
+
+-- =============================================================================
+-- Part 6: Assert with Custom Error Messages
+-- =============================================================================
+
+let assert_that condition message =
+    if not condition then throw ("Assertion failed: " ^ message)
+    else ()
+
+let validation_example user_age =
+    try_catch (fun () ->
+        assert_that (user_age >= 0) "age cannot be negative";
+        assert_that (user_age < 150) "age seems unrealistic";
+        assert_that (user_age >= 18) "must be 18 or older";
+        print "Validation passed!";
+        true
+    ) (fun err ->
+        print err;
+        false
+    )
+
+-- Helpers
+let sqrt x = x  -- stub
+let float x = x  -- stub  
+let float_to_string x = "?"  -- stub
+let int_to_string n =
+    if n == 0 then "0" else if n == 1 then "1" else if n == 2 then "2"
+    else if n == 3 then "3" else if n == 4 then "4" else if n == 5 then "5"
+    else if n == 10 then "10" else if n == 25 then "25" else "?"
+
+let main () =
+    print "=== Simple Exception ===";
+    let r = division_example () in
+    print r;
+    
+    print "";
+    print "=== Nested Handlers ===";
+    let r2 = nested_example () in
+    print r2;
+    
+    print "";
+    print "=== Resumable (Input) ===";
+    let r3 = input_example () in
+    print r3;
+    
+    print "";
+    print "=== Finally Block ===";
+    let r4 = finally_example () in
+    print r4;
+    
+    print "";
+    print "=== Validation ===";
+    print (validation_example 25);
+    print (validation_example 15);
+    print (validation_example (-5))

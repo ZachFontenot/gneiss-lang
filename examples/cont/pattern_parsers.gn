@@ -1,0 +1,336 @@
+-- =============================================================================
+-- Pattern: Parser Combinators with Backtracking
+-- =============================================================================
+--
+-- Parser combinators let us build complex parsers from simple pieces.
+-- With shift/reset, we get:
+-- - Clean direct-style code (no monad clutter)
+-- - Automatic backtracking on failure
+-- - Easy composition of parsers
+--
+-- Key insight: A parser that consumes input can "fail" and backtrack to
+-- try alternative parses. This is nondeterminism over parse trees!
+
+-- =============================================================================
+-- Part 1: Core Parser Infrastructure
+-- =============================================================================
+
+-- Parser state: remaining input
+type ParseState = List Char
+
+-- Parse result: either parsed value + remaining input, or failure
+type ParseResult a =
+    | Parsed a ParseState
+    | ParseFail String
+
+-- Get current input position (for error messages)
+let get_input () =
+    shift (fun k ->
+        fun input -> k input input
+    )
+
+-- Set new input position (after consuming)
+let set_input new_input =
+    shift (fun k ->
+        fun _old -> k () new_input
+    )
+
+-- Fail with message
+let parse_fail msg =
+    shift (fun _k ->
+        fun _input -> ParseFail msg
+    )
+
+-- Run a parser on input
+let run_parser parser input =
+    let k = reset (
+        let result = parser () in
+        fun remaining -> Parsed result remaining
+    ) in
+    k input
+
+-- =============================================================================
+-- Part 2: Basic Parsers
+-- =============================================================================
+
+-- Parse any single character
+let any_char () =
+    let input = get_input () in
+    match input with
+    | [] -> parse_fail "unexpected end of input"
+    | c :: rest ->
+        set_input rest;
+        c
+
+-- Parse a specific character
+let char expected =
+    let c = any_char () in
+    if c == expected then c
+    else parse_fail ("expected '" ^ char_to_string expected ^ "'")
+
+-- Parse a character satisfying a predicate
+let satisfy pred name =
+    let c = any_char () in
+    if pred c then c
+    else parse_fail ("expected " ^ name)
+
+-- Parse end of input
+let eof () =
+    let input = get_input () in
+    match input with
+    | [] -> ()
+    | _ -> parse_fail "expected end of input"
+
+-- =============================================================================
+-- Part 3: Combinators
+-- =============================================================================
+
+-- Alternative: try first, if fails try second
+let (<|>) p1 p2 =
+    shift (fun k ->
+        fun input ->
+            match run_parser p1 input with
+            | Parsed v rest -> k v rest
+            | ParseFail _ -> run_parser p2 input
+    )
+
+-- Sequence: run p1 then p2, return pair
+let (>>) p1 p2 =
+    let a = p1 () in
+    let b = p2 () in
+    (a, b)
+
+-- Sequence, keep left
+let (<<) p1 p2 =
+    let a = p1 () in
+    let _ = p2 () in
+    a
+
+-- Map a function over parse result
+let map f p =
+    let x = p () in
+    f x
+
+-- Optional: parse or return None
+let optional p =
+    (fun () -> Some (p ())) <|> (fun () -> None)
+
+-- Many: zero or more
+let rec many p =
+    (fun () ->
+        let x = p () in
+        let xs = many p () in
+        x :: xs
+    ) <|> (fun () -> [])
+
+-- Many1: one or more
+let many1 p =
+    let x = p () in
+    let xs = many p () in
+    x :: xs
+
+-- Sep_by: separated list
+let sep_by p sep =
+    (fun () ->
+        let x = p () in
+        let xs = many (fun () -> let _ = sep () in p ()) () in
+        x :: xs
+    ) <|> (fun () -> [])
+
+-- =============================================================================
+-- Part 4: Character Class Parsers
+-- =============================================================================
+
+let is_digit c = c >= '0' && c <= '9'
+let is_alpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+let is_space c = c == ' ' || c == '\n' || c == '\t'
+let is_alphanum c = is_digit c || is_alpha c
+
+let digit () = satisfy is_digit "digit"
+let alpha () = satisfy is_alpha "letter"
+let space () = satisfy is_space "whitespace"
+let alphanum () = satisfy is_alphanum "alphanumeric"
+
+-- Skip whitespace
+let spaces () = let _ = many space () in ()
+
+-- Parse an integer
+let integer () =
+    let digits = many1 digit () in
+    chars_to_int digits
+
+-- Parse an identifier
+let identifier () =
+    let first = alpha () in
+    let rest = many alphanum () in
+    chars_to_string (first :: rest)
+
+-- Parse a string literal "..."
+let string_lit () =
+    let _ = char '"' in
+    let rec content () =
+        let c = any_char () in
+        if c == '"' then []
+        else c :: content ()
+    in
+    chars_to_string (content ())
+
+-- =============================================================================
+-- Part 5: Expression Parser Example
+-- =============================================================================
+
+-- Simple arithmetic expression grammar:
+-- expr   = term (('+' | '-') term)*
+-- term   = factor (('*' | '/') factor)*
+-- factor = number | '(' expr ')'
+
+type Expr =
+    | Num Int
+    | Add Expr Expr
+    | Sub Expr Expr
+    | Mul Expr Expr
+    | Div Expr Expr
+
+let rec expr () =
+    let t = term () in
+    expr_rest t
+
+and expr_rest left =
+    (fun () ->
+        spaces ();
+        let op = (fun () -> char '+') <|> (fun () -> char '-') in
+        let op_char = op () in
+        spaces ();
+        let right = term () in
+        let combined = if op_char == '+' then Add left right else Sub left right in
+        expr_rest combined
+    ) <|> (fun () -> left)
+
+and term () =
+    let f = factor () in
+    term_rest f
+
+and term_rest left =
+    (fun () ->
+        spaces ();
+        let op = (fun () -> char '*') <|> (fun () -> char '/') in
+        let op_char = op () in
+        spaces ();
+        let right = factor () in
+        let combined = if op_char == '*' then Mul left right else Div left right in
+        term_rest combined
+    ) <|> (fun () -> left)
+
+and factor () =
+    (fun () -> Num (integer ()))
+    <|> (fun () ->
+        let _ = char '(' in
+        spaces ();
+        let e = expr () in
+        spaces ();
+        let _ = char ')' in
+        e
+    )
+
+-- Evaluate an expression
+let rec eval_expr e =
+    match e with
+    | Num n -> n
+    | Add a b -> eval_expr a + eval_expr b
+    | Sub a b -> eval_expr a - eval_expr b
+    | Mul a b -> eval_expr a * eval_expr b
+    | Div a b -> eval_expr a / eval_expr b
+
+-- =============================================================================
+-- Part 6: JSON Parser Example
+-- =============================================================================
+
+type JSON =
+    | JNull
+    | JBool Bool
+    | JNum Int
+    | JStr String
+    | JArray (List JSON)
+    | JObject (List (String, JSON))
+
+let rec json_value () =
+    spaces ();
+    let v = json_null () 
+        <|> json_bool () 
+        <|> json_number () 
+        <|> json_string ()
+        <|> json_array ()
+        <|> json_object ()
+    in
+    spaces ();
+    v
+
+and json_null () =
+    let _ = char 'n' in
+    let _ = char 'u' in
+    let _ = char 'l' in
+    let _ = char 'l' in
+    JNull
+
+and json_bool () =
+    (fun () ->
+        let _ = char 't' in char 'r'; char 'u'; char 'e';
+        JBool true
+    ) <|> (fun () ->
+        let _ = char 'f' in char 'a'; char 'l'; char 's'; char 'e';
+        JBool false
+    )
+
+and json_number () =
+    JNum (integer ())
+
+and json_string () =
+    JStr (string_lit ())
+
+and json_array () =
+    let _ = char '[' in
+    spaces ();
+    let elements = sep_by json_value (fun () -> spaces (); char ','; spaces ()) () in
+    spaces ();
+    let _ = char ']' in
+    JArray elements
+
+and json_object () =
+    let _ = char '{' in
+    spaces ();
+    let pair () =
+        let key = string_lit () in
+        spaces ();
+        let _ = char ':' in
+        spaces ();
+        let value = json_value () in
+        (key, value)
+    in
+    let pairs = sep_by pair (fun () -> spaces (); char ','; spaces ()) () in
+    spaces ();
+    let _ = char '}' in
+    JObject pairs
+
+-- Helpers
+let char_to_string c = "?"  -- stub
+let chars_to_string cs = "?"  -- stub
+let chars_to_int cs = 0  -- stub
+
+let main () =
+    print "=== Expression Parser ===";
+    let result = run_parser expr (string_to_chars "2 + 3 * 4") in
+    match result with
+    | Parsed e _ ->
+        print (eval_expr e)  -- 14
+    | ParseFail msg ->
+        print ("Parse error: " ^ msg);
+    
+    print "";
+    print "=== JSON Parser ===";
+    let json_input = string_to_chars "{\"name\": \"test\", \"value\": 42}" in
+    let json_result = run_parser json_value json_input in
+    match json_result with
+    | Parsed j _ -> print "JSON parsed successfully"
+    | ParseFail msg -> print ("JSON parse error: " ^ msg)
+
+let string_to_chars s = []  -- stub
