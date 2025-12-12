@@ -6,9 +6,10 @@
 
 use proptest::prelude::*;
 use gneiss::{Lexer, Parser, Inferencer, Interpreter};
+use gneiss::eval::Value;
 
-/// Run a complete program and return Ok(()) if it succeeds, Err with message if it fails
-fn run_program(source: &str) -> Result<(), String> {
+/// Run a complete program and return the final expression's value
+fn run_program(source: &str) -> Result<Value, String> {
     let tokens = Lexer::new(source).tokenize().map_err(|e| e.to_string())?;
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program().map_err(|e| e.to_string())?;
@@ -20,8 +21,7 @@ fn run_program(source: &str) -> Result<(), String> {
     interpreter.set_class_env(inferencer.take_class_env());
     interpreter.set_type_ctx(inferencer.take_type_ctx());
 
-    interpreter.run(&program).map_err(|e| e.to_string())?;
-    Ok(())
+    interpreter.run(&program).map_err(|e| e.to_string())
 }
 
 /// Generate a small integer that won't cause issues with parsing
@@ -54,10 +54,15 @@ impl Show for Int =
     let show n = int_to_string n
 end
 
-let result = show {}
+show {}
 "#, format_int(n));
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for n = {}", n);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        let expected = n.to_string();
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == &expected),
+            "Expected String(\"{}\"), got {:?}", expected, result
+        );
     }
 
     /// Test that Show instance for Option works with Some containing any int
@@ -80,10 +85,14 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show (Some {})
+show (Some {})
 "#, format_int(n));
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for Some {}", n);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}", result
+        );
     }
 
     /// Test that Show instance for Option None works
@@ -106,10 +115,14 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show None
+show None
 "#;
 
-        prop_assert!(run_program(source).is_ok());
+        let result = run_program(source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "None"),
+            "Expected String(\"None\"), got {:?}", result
+        );
     }
 
     /// Test nested Options: Option (Option Int)
@@ -132,10 +145,15 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show (Some (Some {}))
+show (Some (Some {}))
 "#, format_int(n));
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for Some (Some {})", n);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        // Outer Some matches first, returns "Some"
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}", result
+        );
     }
 
     /// Test List type with Show constraint
@@ -158,10 +176,15 @@ impl Show for (List a) where a : Show =
         | Cons h t -> "list"
 end
 
-let result = show (Cons {} (Cons {} (Cons {} Nil)))
+show (Cons {} (Cons {} (Cons {} Nil)))
 "#, format_int(a), format_int(b), format_int(c));
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for list [{}, {}, {}]", a, b, c);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        // Non-empty list matches Cons, returns "list"
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "list"),
+            "Expected String(\"list\"), got {:?}", result
+        );
     }
 
     /// Test Either type with two type parameters
@@ -172,6 +195,7 @@ let result = show (Cons {} (Cons {} (Cons {} Nil)))
         } else {
             format!("Right {}", format_int(n))
         };
+        let expected = if use_left { "Left" } else { "Right" };
 
         let source = format!(r#"
 trait Show a =
@@ -190,10 +214,14 @@ impl Show for (Either a b) where a : Show, b : Show =
         | Right y -> "Right"
 end
 
-let result = show ({})
+show ({})
 "#, value);
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for {}", value);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == expected),
+            "Expected String(\"{}\"), got {:?}", expected, result
+        );
     }
 
     /// Test that multiple traits can coexist
@@ -216,12 +244,15 @@ impl Double for Int =
     let double n = n + n
 end
 
-let x = {}
-let s = show x
-let d = double x
+let x = {} in double x
 "#, format_int(n));
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for n = {}", n);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        let expected = n * 2;
+        prop_assert!(
+            matches!(&result, Value::Int(v) if *v == expected),
+            "Expected Int({}), got {:?}", expected, result
+        );
     }
 
     /// Test custom type names work correctly
@@ -249,16 +280,20 @@ impl Show for ({} a) where a : Show =
     let show x = "custom"
 end
 
-let result = show ({} {})
+show ({} {})
 "#, type_name, ctor_name, type_name, ctor_name, format_int(n));
 
-        prop_assert!(run_program(&source).is_ok(),
-            "Failed for type {} constructor {} value {}", type_name, ctor_name, n);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "custom"),
+            "Expected String(\"custom\"), got {:?}", result
+        );
     }
 
     /// Test that trait methods work inside match arms
     #[test]
     fn show_in_match_arm(n in small_int(), use_some in any::<bool>()) {
+        let expected = if use_some { n.to_string() } else { "None".to_string() };
         let source = format!(r#"
 trait Show a =
     val show : a -> String
@@ -276,11 +311,14 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let input = {}
-let result = show input
+let input = {} in show input
 "#, if use_some { format!("Some {}", format_int(n)) } else { "None".to_string() });
 
-        prop_assert!(run_program(&source).is_ok());
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == &expected),
+            "Expected String(\"{}\"), got {:?}", expected, result
+        );
     }
 
     /// Test that passing constructor values through functions works
@@ -303,11 +341,14 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let display x = show x
-let result = display (Some {})
+let display x = show x in display (Some {})
 "#, format_int(n));
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for Some {}", n);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}", result
+        );
     }
 
     /// Test deeply nested constructors
@@ -335,10 +376,15 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show ({})
+show ({})
 "#, value);
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for depth {} value {}", depth, value);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        // Outermost Some matches first
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}", result
+        );
     }
 
     /// Test that Bool also works (not just Int)
@@ -361,10 +407,14 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show (Some {})
+show (Some {})
 "#, b);
 
-        prop_assert!(run_program(&source).is_ok(), "Failed for Some {}", b);
+        let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
+        prop_assert!(
+            matches!(&result, Value::String(s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}", result
+        );
     }
 }
 
@@ -394,14 +444,17 @@ impl Show for (Option a) where a : Show =
     let show opt = "option"
 end
 
-let result = show (Some 42)
+show (Some 42)
 "#;
-        assert!(run_program(source).is_ok(), "Constructor name vs type name bug");
+        let result = run_program(source).expect("Constructor name vs type name bug");
+        assert!(matches!(result, Value::String(ref s) if s == "option"),
+            "Expected String(\"option\"), got {:?}", result);
     }
 
     #[test]
     fn test_multiple_constructors_same_type() {
         // Both Some and None should map to Option
+        // Test with None (last expression)
         let source = r#"
 trait Show a =
     val show : a -> String
@@ -419,10 +472,11 @@ impl Show for (Option a) where a : Show =
         | None -> "none"
 end
 
-let r1 = show (Some 1)
-let r2 = show None
+show None
 "#;
-        assert!(run_program(source).is_ok(), "Multiple constructors same type");
+        let result = run_program(source).expect("Multiple constructors same type");
+        assert!(matches!(result, Value::String(ref s) if s == "none"),
+            "Expected String(\"none\"), got {:?}", result);
     }
 
     #[test]
@@ -445,14 +499,17 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show (Some 42)
+show (Some 42)
 "#;
-        assert!(run_program(source).is_ok(), "Recursive show call");
+        let result = run_program(source).expect("Recursive show call");
+        assert!(matches!(result, Value::String(ref s) if s == "Some(42)"),
+            "Expected String(\"Some(42)\"), got {:?}", result);
     }
 
     #[test]
     fn test_three_constructors() {
         // Result type with Ok, Err, and a third constructor
+        // Test with Pending (last expression)
         let source = r#"
 trait Show a =
     val show : a -> String
@@ -479,11 +536,11 @@ impl Show for (Result a b c) where a : Show, b : Show, c : Show =
         | Pending p -> "Pending"
 end
 
-let r1 = show (Ok 42)
-let r2 = show (Err "oops")
-let r3 = show (Pending true)
+show (Pending true)
 "#;
-        assert!(run_program(source).is_ok(), "Three constructors same type");
+        let result = run_program(source).expect("Three constructors same type");
+        assert!(matches!(result, Value::String(ref s) if s == "Pending"),
+            "Expected String(\"Pending\"), got {:?}", result);
     }
 
     #[test]
@@ -506,9 +563,11 @@ impl Show for (Option a) where a : Show =
         | None -> "none"
 end
 
-let result = show None
+show None
 "#;
-        assert!(run_program(source).is_ok(), "Nullary constructor");
+        let result = run_program(source).expect("Nullary constructor");
+        assert!(matches!(result, Value::String(ref s) if s == "none"),
+            "Expected String(\"none\"), got {:?}", result);
     }
 
     #[test]
@@ -536,9 +595,11 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show (Some (Cons 1 (Cons 2 Nil)))
+show (Some (Cons 1 (Cons 2 Nil)))
 "#;
-        assert!(run_program(source).is_ok(), "Nested different parameterized types");
+        let result = run_program(source).expect("Nested different parameterized types");
+        assert!(matches!(result, Value::String(ref s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}", result);
     }
 
     #[test]
@@ -561,9 +622,11 @@ impl Show for (Option a) where a : Show =
         | None -> "None"
 end
 
-let result = show (Some (Some (Some 42)))
+show (Some (Some (Some 42)))
 "#;
-        assert!(run_program(source).is_ok(), "Constraint chain");
+        let result = run_program(source).expect("Constraint chain");
+        assert!(matches!(result, Value::String(ref s) if s == "Some(Some(Some(42)))"),
+            "Expected String(\"Some(Some(Some(42)))\"), got {:?}", result);
     }
 
     #[test]
@@ -589,8 +652,10 @@ impl Show for (Pair a b) where a : Show, b : Show =
         | MkPair x y -> "pair"
 end
 
-let result = show (MkPair 42 true)
+show (MkPair 42 true)
 "#;
-        assert!(run_program(source).is_ok(), "Multiple type params");
+        let result = run_program(source).expect("Multiple type params");
+        assert!(matches!(result, Value::String(ref s) if s == "pair"),
+            "Expected String(\"pair\"), got {:?}", result);
     }
 }

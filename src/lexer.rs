@@ -51,6 +51,7 @@ pub enum Token {
     RBrace,   // }
     Comma,    // ,
     Semicolon,// ;
+    DoubleSemi, // ;;
     Colon,    // :
 
     // Operators
@@ -248,7 +249,14 @@ impl<'a> Lexer<'a> {
             ']' => Token::RBracket,
             '}' => Token::RBrace,
             ',' => Token::Comma,
-            ';' => Token::Semicolon,
+            ';' => {
+                if self.peek() == Some(';') {
+                    self.advance();
+                    Token::DoubleSemi
+                } else {
+                    Token::Semicolon
+                }
+            }
             '_' if !self.peek().map_or(false, is_ident_continue) => Token::Underscore,
             '.' => Token::Dot,
 

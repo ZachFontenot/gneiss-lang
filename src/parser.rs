@@ -34,11 +34,101 @@ impl Parser {
     }
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
+        // First, optionally consume any leading ;;
+        while self.match_token(&Token::DoubleSemi) {}
+
         match self.peek() {
-            Token::Let | Token::Type | Token::Trait | Token::Impl => {
-                Ok(Item::Decl(self.parse_decl()?))
+            Token::Let => {
+                // Could be a declaration (let x = e) or expression (let x = e in body)
+                // Parse the common prefix, then check for `in`
+                self.parse_let_item()
             }
-            _ => Ok(Item::Expr(self.parse_expr()?)),
+            Token::Type | Token::Trait | Token::Impl => {
+                let decl = self.parse_decl()?;
+                // Optionally consume ;; after declaration
+                self.match_token(&Token::DoubleSemi);
+                Ok(Item::Decl(decl))
+            }
+            _ => {
+                let expr = self.parse_expr()?;
+                // Optionally consume ;; after expression
+                self.match_token(&Token::DoubleSemi);
+                Ok(Item::Expr(expr))
+            }
+        }
+    }
+
+    /// Parse a let that could be either a declaration or a let-expression.
+    /// Returns Item::Decl if no `in`, Item::Expr if `in` is present.
+    fn parse_let_item(&mut self) -> Result<Item, ParseError> {
+        let start = self.current_span();
+        self.consume(Token::Let)?;
+
+        let name = self.parse_ident()?;
+
+        // Collect parameters (function syntax: let f x y = ...)
+        let mut params = Vec::new();
+        while self.is_pattern_start() && !self.check(&Token::Eq) {
+            params.push(self.parse_simple_pattern()?);
+        }
+
+        self.consume(Token::Eq)?;
+        let value_expr = self.parse_expr()?;
+
+        // KEY DECISION: check for `in`
+        if self.check(&Token::In) {
+            // It's a let-expression: let x = e in body
+            self.advance(); // consume 'in'
+            let body = self.parse_expr()?;
+            let span = start.merge(&body.span);
+
+            // Desugar function syntax if needed
+            let (pattern, value) = if params.is_empty() {
+                // Simple pattern: just the name as a variable pattern
+                let name_pattern = Spanned::new(
+                    PatternKind::Var(name),
+                    start.clone(),
+                );
+                (name_pattern, value_expr)
+            } else {
+                // Function syntax: let f x y = e in body
+                // becomes: let f = fun x y -> e in body
+                let lambda_span = value_expr.span.clone();
+                let lambda = Spanned::new(
+                    ExprKind::Lambda {
+                        params,
+                        body: Rc::new(value_expr),
+                    },
+                    lambda_span,
+                );
+                let name_pattern = Spanned::new(
+                    PatternKind::Var(name),
+                    start.clone(),
+                );
+                (name_pattern, lambda)
+            };
+
+            let expr = Spanned::new(
+                ExprKind::Let {
+                    pattern,
+                    value: Rc::new(value),
+                    body: Some(Rc::new(body)),
+                },
+                span,
+            );
+            // Optionally consume ;; after expression
+            self.match_token(&Token::DoubleSemi);
+            Ok(Item::Expr(expr))
+        } else {
+            // It's a declaration: let x = e
+            // Optionally consume ;; after declaration
+            self.match_token(&Token::DoubleSemi);
+            Ok(Item::Decl(Decl::Let {
+                name,
+                type_ann: None,
+                params,
+                body: value_expr,
+            }))
         }
     }
 
@@ -1552,5 +1642,48 @@ mod tests {
             }
             _ => panic!("expected trait decl"),
         }
+    }
+
+    #[test]
+    fn test_let_expression_at_top_level() {
+        // let x = e in body should parse as an expression, not a declaration
+        let prog = parse("let x = 5 in x + 1");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => {
+                match &expr.node {
+                    ExprKind::Let { body, .. } => {
+                        assert!(body.is_some(), "let-expression should have a body");
+                    }
+                    _ => panic!("expected let expression"),
+                }
+            }
+            _ => panic!("expected Item::Expr, got Item::Decl"),
+        }
+    }
+
+    #[test]
+    fn test_let_decl_with_double_semi() {
+        // let x = e;; followed by another expression
+        let prog = parse("let x = 5;; x");
+        assert_eq!(prog.items.len(), 2);
+        assert!(matches!(&prog.items[0], Item::Decl(Decl::Let { .. })));
+        assert!(matches!(&prog.items[1], Item::Expr(_)));
+    }
+
+    #[test]
+    fn test_let_function_expression() {
+        // let f x = e in f 1 should be an expression
+        let prog = parse("let f x = x + 1 in f 5");
+        assert_eq!(prog.items.len(), 1);
+        assert!(matches!(&prog.items[0], Item::Expr(_)));
+    }
+
+    #[test]
+    fn test_double_semi_lexer() {
+        // Verify ;; is lexed as DoubleSemi, not two Semicolons
+        let tokens = Lexer::new(";;").tokenize().unwrap();
+        assert_eq!(tokens.len(), 2); // DoubleSemi + Eof
+        assert!(matches!(tokens[0].token, Token::DoubleSemi));
     }
 }

@@ -4,4 +4,4 @@ let map f lst =
   | hd :: rest -> f hd :: map f rest
 
 let main _ =
-  print (map (fun x -> x + 1) [1,2,3])
+  print (map (fun x -> x + 1) [-1,-2,-3])

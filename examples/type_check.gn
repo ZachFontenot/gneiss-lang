@@ -1,0 +1,18 @@
+let compose f g x = f (g x)
+let id = fun x -> x
+let test = compose id id
+let math = compose (fun x -> x + 1) (fun x -> x * 2)
+let four = math 1
+
+type Option a = Some a | None
+
+-- This works correctly:
+let x = Some 42        -- x : Option Int
+let y = match x with
+  | Some n -> n + 1    -- n is correctly typed as Int
+  | None -> 0
+
+-- This correctly fails with a type error:
+let bad = match Some 42 with
+  | Some n -> n ++ " is not an int"  -- Type error: n is Int, not String
+  | None -> "none"

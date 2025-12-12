@@ -1,0 +1,17 @@
+trait Show a =
+    val show : a -> String
+end
+
+type Option a = | Some a | None
+
+impl Show for Int =
+    let show n = int_to_string n
+end
+
+impl Show for (Option a) where a : Show =
+    let show opt = match opt with
+        | Some x -> "Some(" ++ show x ++ ")"
+        | None -> "None"
+end
+
+show (Some (Some 42))
