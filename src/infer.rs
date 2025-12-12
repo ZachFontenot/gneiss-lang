@@ -783,11 +783,19 @@ impl Inferencer {
                 Ok(InferResult::pure(result_ty, ans))
             }
 
-            // Seq: pure (result is type of second expression)
+            // Seq: thread answer types through sequential composition
             ExprKind::Seq { first, second } => {
-                self.infer_expr(env, first)?;
-                let second_ty = self.infer_expr(env, second)?;
-                Ok(InferResult::pure(second_ty, ans))
+                let first_result = self.infer_expr_full(env, first)?;
+                let second_result = self.infer_expr_full(env, second)?;
+
+                // Thread: first's answer_out becomes second's answer_in
+                self.unify(&first_result.answer_after, &second_result.answer_before)?;
+
+                Ok(InferResult {
+                    ty: second_result.ty,
+                    answer_before: first_result.answer_before,
+                    answer_after: second_result.answer_after,
+                })
             }
 
             // Concurrency primitives: pure (effects are at runtime, not type-level)
@@ -1265,19 +1273,36 @@ impl Inferencer {
                     };
                     local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
 
-                    let body_ty = self.infer_expr(&local_env, body)?;
+                    // Use infer_expr_full to get answer type information
+                    let body_result = self.infer_expr_full(&local_env, body)?;
 
                     // Unify the body type with what we predicted
-                    if param_types.is_empty() {
-                        self.unify(&ret_ty, &body_ty)?;
-                    } else {
-                        self.unify(&ret_ty, &body_ty)?;
-                    }
+                    self.unify(&ret_ty, &body_result.ty)?;
 
+                    // Build the function type with proper answer types
                     let func_ty = if param_types.is_empty() {
-                        body_ty
+                        body_result.ty
                     } else {
-                        Type::arrows(param_types, body_ty)
+                        // Build function type that captures body's answer types
+                        // For multi-param functions: a -> b -> c becomes a/α₁ -> (b/α₂ -> c/α/β)
+                        // The innermost arrow captures the body's actual answer types
+                        let mut result = Type::Arrow {
+                            arg: Rc::new(param_types.pop().unwrap()),
+                            ret: Rc::new(body_result.ty),
+                            ans_in: Rc::new(body_result.answer_before),
+                            ans_out: Rc::new(body_result.answer_after),
+                        };
+                        // Wrap remaining params as pure arrows (returning a closure is pure)
+                        for param_ty in param_types.into_iter().rev() {
+                            let ans = self.fresh_var();
+                            result = Type::Arrow {
+                                arg: Rc::new(param_ty),
+                                ret: Rc::new(result),
+                                ans_in: Rc::new(ans.clone()),
+                                ans_out: Rc::new(ans),
+                            };
+                        }
+                        result
                     };
 
                     self.level -= 1;
