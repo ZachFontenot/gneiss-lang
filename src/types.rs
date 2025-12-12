@@ -22,8 +22,15 @@ pub enum Type {
     Char,
     Unit,
 
-    /// Function type: a -> b
-    Arrow(Rc<Type>, Rc<Type>),
+    /// Function type with answer-type modification: σ/α → τ/β
+    /// "Function from σ to τ that changes answer type from α to β"
+    /// For pure functions, ans_in == ans_out (same type variable)
+    Arrow {
+        arg: Rc<Type>,      // σ: argument type
+        ret: Rc<Type>,      // τ: return type
+        ans_in: Rc<Type>,   // α: answer type before application
+        ans_out: Rc<Type>,  // β: answer type after application
+    },
 
     /// Tuple type: (a, b, c)
     Tuple(Vec<Type>),
@@ -85,7 +92,9 @@ impl Type {
                 TypeVar::Generic(vid) => *vid == id,
                 TypeVar::Link(_) => unreachable!("resolve should have followed links"),
             },
-            Type::Arrow(a, b) => a.occurs(id) || b.occurs(id),
+            Type::Arrow { arg, ret, ans_in, ans_out } => {
+                arg.occurs(id) || ret.occurs(id) || ans_in.occurs(id) || ans_out.occurs(id)
+            }
             Type::Tuple(types) => types.iter().any(|t| t.occurs(id)),
             Type::List(t) => t.occurs(id),
             Type::Constructor { args, .. } => args.iter().any(|t| t.occurs(id)),
@@ -94,12 +103,43 @@ impl Type {
         }
     }
 
-    /// Create a function type
+    /// Create a pure function type (ans_in == ans_out)
+    /// Uses a shared type variable for both answer types
     pub fn arrow(from: Type, to: Type) -> Type {
-        Type::Arrow(Rc::new(from), Rc::new(to))
+        // For a pure function, we use the same Rc for both answer types
+        // This ensures they're always unified together
+        let ans = Rc::new(Type::new_var(0, 0)); // Placeholder - will be replaced during inference
+        Type::Arrow {
+            arg: Rc::new(from),
+            ret: Rc::new(to),
+            ans_in: ans.clone(),
+            ans_out: ans,
+        }
+    }
+
+    /// Create a pure function type with explicit answer type variable
+    pub fn arrow_with_ans(from: Type, to: Type, ans: Type) -> Type {
+        let ans = Rc::new(ans);
+        Type::Arrow {
+            arg: Rc::new(from),
+            ret: Rc::new(to),
+            ans_in: ans.clone(),
+            ans_out: ans,
+        }
+    }
+
+    /// Create an effectful function type with explicit answer types
+    pub fn effectful_arrow(from: Type, to: Type, ans_in: Type, ans_out: Type) -> Type {
+        Type::Arrow {
+            arg: Rc::new(from),
+            ret: Rc::new(to),
+            ans_in: Rc::new(ans_in),
+            ans_out: Rc::new(ans_out),
+        }
     }
 
     /// Create a multi-argument function type: a -> b -> c -> d
+    /// All intermediate arrows are pure (same answer type throughout)
     pub fn arrows(args: Vec<Type>, ret: Type) -> Type {
         args.into_iter()
             .rev()
@@ -122,12 +162,32 @@ impl fmt::Display for Type {
             Type::Char => write!(f, "Char"),
             Type::Unit => write!(f, "()"),
             Type::Pid => write!(f, "Pid"),
-            Type::Arrow(a, b) => {
-                let a_str = match a.resolve() {
-                    Type::Arrow(_, _) => format!("({})", a),
-                    _ => format!("{}", a),
+            Type::Arrow { arg, ret, ans_in, ans_out } => {
+                let arg_str = match arg.resolve() {
+                    Type::Arrow { .. } => format!("({})", arg),
+                    _ => format!("{}", arg),
                 };
-                write!(f, "{} -> {}", a_str, b)
+                // Check if pure (same answer types) by comparing resolved forms
+                let ans_in_resolved = ans_in.resolve();
+                let ans_out_resolved = ans_out.resolve();
+                let is_pure = match (&ans_in_resolved, &ans_out_resolved) {
+                    (Type::Var(v1), Type::Var(v2)) => {
+                        // Check if same variable by comparing IDs
+                        match (&*v1.borrow(), &*v2.borrow()) {
+                            (TypeVar::Unbound { id: id1, .. }, TypeVar::Unbound { id: id2, .. }) => id1 == id2,
+                            (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
+                            _ => false,
+                        }
+                    }
+                    _ => false, // If not both variables, check structural equality
+                };
+                if is_pure {
+                    // Pure function: show as σ → τ
+                    write!(f, "{} -> {}", arg_str, ret)
+                } else {
+                    // Effectful: show as σ/α → τ/β
+                    write!(f, "{}/{} -> {}/{}", arg_str, ans_in, ret, ans_out)
+                }
             }
             Type::Tuple(types) => {
                 write!(f, "(")?;
@@ -184,6 +244,40 @@ impl fmt::Display for Scheme {
             write!(f, ". ")?;
         }
         write!(f, "{}", self.ty)
+    }
+}
+
+// ============================================================================
+// Answer-Type Polymorphism for Delimited Continuations
+// ============================================================================
+
+/// Result of type inference for an expression, tracking answer types.
+///
+/// The five-place judgment `Γ; α ⊢ e : τ; β` is represented as:
+/// - `ty` = τ (the expression's type)
+/// - `answer_before` = α (answer type before evaluation - what context expects)
+/// - `answer_after` = β (answer type after evaluation - what context receives)
+///
+/// Pure expressions have `answer_before == answer_after`.
+#[derive(Debug, Clone)]
+pub struct InferResult {
+    /// The expression's type (τ in the judgment)
+    pub ty: Type,
+    /// Answer type before evaluation (α - what the evaluation context expects)
+    pub answer_before: Type,
+    /// Answer type after evaluation (β - what the evaluation context receives)
+    pub answer_after: Type,
+}
+
+impl InferResult {
+    /// Create result for a pure expression (doesn't modify answer type).
+    /// Pure expressions have α = β (answer type unchanged).
+    pub fn pure(ty: Type, answer: Type) -> Self {
+        InferResult {
+            ty,
+            answer_before: answer.clone(),
+            answer_after: answer,
+        }
     }
 }
 
@@ -263,7 +357,7 @@ impl PartialEq for Pred {
 }
 
 /// Check if two types are structurally equal (resolving links)
-fn types_equal(t1: &Type, t2: &Type) -> bool {
+pub fn types_equal(t1: &Type, t2: &Type) -> bool {
     let t1 = t1.resolve();
     let t2 = t2.resolve();
 
@@ -280,7 +374,13 @@ fn types_equal(t1: &Type, t2: &Type) -> bool {
             (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
             _ => false,
         },
-        (Type::Arrow(a1, b1), Type::Arrow(a2, b2)) => types_equal(a1, a2) && types_equal(b1, b2),
+        (
+            Type::Arrow { arg: a1, ret: r1, ans_in: ai1, ans_out: ao1 },
+            Type::Arrow { arg: a2, ret: r2, ans_in: ai2, ans_out: ao2 },
+        ) => {
+            types_equal(a1, a2) && types_equal(r1, r2)
+                && types_equal(ai1, ai2) && types_equal(ao1, ao2)
+        }
         (Type::Tuple(ts1), Type::Tuple(ts2)) => {
             ts1.len() == ts2.len() && ts1.iter().zip(ts2).all(|(x, y)| types_equal(x, y))
         }
@@ -325,10 +425,12 @@ pub fn apply_subst(ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
             TypeVar::Unbound { id, .. } => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
             TypeVar::Link(_) => unreachable!("resolve should follow links"),
         },
-        Type::Arrow(a, b) => Type::Arrow(
-            Rc::new(apply_subst(&a, subst)),
-            Rc::new(apply_subst(&b, subst)),
-        ),
+        Type::Arrow { arg, ret, ans_in, ans_out } => Type::Arrow {
+            arg: Rc::new(apply_subst(&arg, subst)),
+            ret: Rc::new(apply_subst(&ret, subst)),
+            ans_in: Rc::new(apply_subst(&ans_in, subst)),
+            ans_out: Rc::new(apply_subst(&ans_out, subst)),
+        },
         Type::Tuple(types) => Type::Tuple(types.iter().map(|t| apply_subst(t, subst)).collect()),
         Type::List(t) => Type::List(Rc::new(apply_subst(&t, subst))),
         Type::Constructor { name, args } => Type::Constructor {
@@ -508,8 +610,14 @@ fn types_overlap(t1: &Type, t2: &Type) -> bool {
             t1.len() == t2.len() && t1.iter().zip(t2).all(|(x, y)| types_overlap(x, y))
         }
 
-        // Arrows might overlap
-        (Type::Arrow(a1, b1), Type::Arrow(a2, b2)) => types_overlap(a1, a2) && types_overlap(b1, b2),
+        // Arrows might overlap (check all 4 components)
+        (
+            Type::Arrow { arg: a1, ret: r1, ans_in: ai1, ans_out: ao1 },
+            Type::Arrow { arg: a2, ret: r2, ans_in: ai2, ans_out: ao2 },
+        ) => {
+            types_overlap(a1, a2) && types_overlap(r1, r2)
+                && types_overlap(ai1, ai2) && types_overlap(ao1, ao2)
+        }
 
         // Different type constructors don't overlap
         _ => false,
@@ -603,9 +711,15 @@ fn match_type_inner(pattern: &Type, target: &Type, subst: &mut Substitution) -> 
             ps.iter().zip(ts).all(|(p, t)| match_type_inner(p, t, subst))
         }
 
-        // Arrows
-        (Type::Arrow(p1, p2), Type::Arrow(t1, t2)) => {
-            match_type_inner(p1, t1, subst) && match_type_inner(p2, t2, subst)
+        // Arrows (match all 4 components)
+        (
+            Type::Arrow { arg: pa, ret: pr, ans_in: pai, ans_out: pao },
+            Type::Arrow { arg: ta, ret: tr, ans_in: tai, ans_out: tao },
+        ) => {
+            match_type_inner(pa, ta, subst)
+                && match_type_inner(pr, tr, subst)
+                && match_type_inner(pai, tai, subst)
+                && match_type_inner(pao, tao, subst)
         }
 
         // No match

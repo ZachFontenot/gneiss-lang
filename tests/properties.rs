@@ -41,7 +41,16 @@ fn arb_ground_type(depth: usize) -> BoxedStrategy<Type> {
             // Compound types
             1 => arb_ground_type(depth - 1).prop_map(|t| Type::List(Rc::new(t))),
             1 => (arb_ground_type(depth - 1), arb_ground_type(depth - 1))
-                .prop_map(|(a, b)| Type::Arrow(Rc::new(a), Rc::new(b))),
+                .prop_map(|(a, b)| {
+                    // Create a pure arrow type (same answer type for both)
+                    let ans = Type::new_var(9999, 0);
+                    Type::Arrow {
+                        arg: Rc::new(a),
+                        ret: Rc::new(b),
+                        ans_in: Rc::new(ans.clone()),
+                        ans_out: Rc::new(ans),
+                    }
+                }),
             1 => prop::collection::vec(arb_ground_type(depth - 1), 2..=3)
                 .prop_map(Type::Tuple),
         ]
@@ -71,7 +80,16 @@ fn arb_type_with_vars(depth: usize) -> BoxedStrategy<Type> {
             // Compound types
             1 => arb_type_with_vars(depth - 1).prop_map(|t| Type::List(Rc::new(t))),
             1 => (arb_type_with_vars(depth - 1), arb_type_with_vars(depth - 1))
-                .prop_map(|(a, b)| Type::Arrow(Rc::new(a), Rc::new(b))),
+                .prop_map(|(a, b)| {
+                    // Create a pure arrow type (same answer type for both)
+                    let ans = Type::new_var(9999, 0);
+                    Type::Arrow {
+                        arg: Rc::new(a),
+                        ret: Rc::new(b),
+                        ans_in: Rc::new(ans.clone()),
+                        ans_out: Rc::new(ans),
+                    }
+                }),
         ]
         .boxed()
     }
@@ -350,7 +368,13 @@ proptest! {
             "Type variable t{} should occur in itself", var_id);
 
         // The variable should occur in a function type containing it
-        let arrow = Type::Arrow(Rc::new(var.clone()), Rc::new(Type::Int));
+        let ans = Type::new_var(9999, 0);
+        let arrow = Type::Arrow {
+            arg: Rc::new(var.clone()),
+            ret: Rc::new(Type::Int),
+            ans_in: Rc::new(ans.clone()),
+            ans_out: Rc::new(ans),
+        };
         prop_assert!(arrow.occurs(var_id),
             "Type variable t{} should occur in {} -> Int", var_id, var);
     }
@@ -571,7 +595,7 @@ fn value_matches_type(val: &Value, ty: &Type) -> bool {
         (Value::String(_), Type::String) => true,
         (Value::Char(_), Type::Char) => true,
         (Value::Unit, Type::Unit) => true,
-        (Value::Closure { .. }, Type::Arrow(_, _)) => true,
+        (Value::Closure { .. }, Type::Arrow { .. }) => true,
         (Value::List(items), Type::List(elem_ty)) => {
             items.iter().all(|item| value_matches_type(item, &elem_ty))
         }
