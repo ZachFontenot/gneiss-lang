@@ -963,6 +963,12 @@ impl Interpreter {
 
             Some(Frame::SendVal { channel }) => {
                 // We have the channel and the value to send
+                // Check we're in a process context (requires main function)
+                if self.runtime.current_pid().is_none() {
+                    return StepResult::Error(EvalError::RuntimeError(
+                        "Channel.send requires a process context (define a main function)".into()
+                    ));
+                }
                 // Check if there's a waiting receiver (rendezvous)
                 if self.runtime.send(channel, value) {
                     // Immediate rendezvous - sender continues with Unit
@@ -982,6 +988,12 @@ impl Interpreter {
                     Value::Channel(id) => id,
                     _ => return StepResult::Error(EvalError::TypeError("expected channel".into())),
                 };
+                // Check we're in a process context (requires main function)
+                if self.runtime.current_pid().is_none() {
+                    return StepResult::Error(EvalError::RuntimeError(
+                        "Channel.recv requires a process context (define a main function)".into()
+                    ));
+                }
                 // Check if there's a waiting sender (rendezvous)
                 if let Some(received) = self.runtime.recv(channel) {
                     // Immediate rendezvous - got value from sender
@@ -1096,6 +1108,12 @@ impl Interpreter {
                 }
 
                 // No channel ready - block on all of them
+                // Check we're in a process context (requires main function)
+                if self.runtime.current_pid().is_none() {
+                    return StepResult::Error(EvalError::RuntimeError(
+                        "select requires a process context (define a main function)".into()
+                    ));
+                }
                 self.runtime.block_on_select(&channels);
 
                 StepResult::Blocked {
@@ -1233,6 +1251,11 @@ impl Interpreter {
             }
 
             Value::Continuation { frames } => {
+                // CRITICAL: Push a fresh Prompt before splicing - this is the "reset" that wraps k's invocation
+                // This implements the canonical shift/reset semantics: k x ≡ reset E[x]
+                // Without this, we'd have control/prompt semantics instead
+                cont.push(Frame::Prompt);
+
                 // Splice captured frames back onto stack
                 for frame in frames.into_iter().rev() {
                     cont.push(frame);
@@ -2039,6 +2062,63 @@ let main () =
     with_reset (fun () -> 1 + shift (fun k -> k 10))
 "#;
         run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_shift_in_continuation_argument_cbv() {
+        // In strict CBV, the argument to a continuation is evaluated BEFORE the continuation
+        // is invoked. So `k (shift ...)` evaluates the shift in the current context, not inside k.
+        // Since the outer reset was consumed by the outer shift, this is "shift without reset".
+        let result = eval("
+            reset (
+                shift (fun k1 -> k1 (shift (fun k2 -> k2 100))) + 1
+            )
+        ");
+        // In CBV: outer shift consumes the reset, inner shift has no enclosing reset
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_continuation_body_is_delimited() {
+        // This tests the core fix: when a continuation IS invoked with a value,
+        // the body executes inside a fresh reset boundary.
+        // k 10 should work because the continuation execution is wrapped in reset.
+        let val = eval("
+            let k = reset (shift (fun k -> k)) in
+            k (1 + k 10)
+        ").unwrap();
+        // k = continuation that returns its argument (identity for this context)
+        // k 10 = reset (10) = 10
+        // 1 + k 10 = 11
+        // k 11 = reset (11) = 11
+        assert!(matches!(val, Value::Int(11)));
+    }
+
+    #[test]
+    fn test_nested_resets() {
+        let val = eval("
+            reset (
+                1 + reset (
+                    2 + shift (fun k -> k (k 10))
+                )
+            )
+        ").unwrap();
+        // Inner shift captures [2 + □] only (stopped at inner reset)
+        // k 10 = reset (2 + 10) = 12
+        // k 12 = reset (2 + 12) = 14
+        // Outer: 1 + 14 = 15
+        assert!(matches!(val, Value::Int(15)));
+    }
+
+    #[test]
+    fn test_discarded_continuation() {
+        let val = eval("
+            reset (
+                1 + shift (fun k -> 42)
+            )
+        ").unwrap();
+        // k is never called, result is just 42
+        assert!(matches!(val, Value::Int(42)));
     }
 
     // ========================================================================
