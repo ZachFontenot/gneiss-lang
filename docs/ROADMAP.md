@@ -1,162 +1,121 @@
 # Gneiss Development Roadmap
 
-## Current State (v0.1-alpha)
+## Completed Work
 
-**Working:**
-- Lexer and parser (handwritten recursive descent)
+The following features have been implemented and are working:
+
+### Concurrency (Original Phase 1) ✓
+- **CPS Interpreter**: Defunctionalized continuation-passing style with explicit frame stack
+- **Channels**: Synchronous rendezvous channels with proper blocking/resumption
+- **Select**: Multi-arm select over multiple channels with non-deterministic choice
+- **Scheduler**: Single-threaded cooperative scheduler with round-robin ready queue
+- **Deadlock Detection**: Detects when all processes are blocked
+- **Process Communication**: Two-way ping-pong, producer-consumer patterns working
+
+### Typeclasses ✓
+- **Trait Declarations**: `trait Show a = val show : a -> String end`
+- **Instance Declarations**: Basic and constrained (`impl Show for (List a) where a : Show`)
+- **Dictionary Passing**: Runtime method dispatch via dictionaries
+- **Instance Resolution**: Proper constraint propagation and overlap detection
+- **Arbitrary User-Defined Traits**: Not limited to built-ins
+
+### Delimited Continuations ✓
+- **Reset/Shift**: Full implementation of delimited continuations
+- **Multi-invocation**: Captured continuations can be called multiple times
+- **Nested Prompts**: Proper nesting of reset boundaries
+
+### Core Language ✓
 - Hindley-Milner type inference with let-polymorphism
-- Tree-walking interpreter
-- Pattern matching (literals, variables, tuples, lists, cons, constructors)
-- ADTs (algebraic data types)
-- Recursion
-- Basic REPL
-
-**Scaffolded but incomplete:**
-- Runtime scheduler (processes created but blocking/resumption not wired up)
-- Channels (parse and typecheck, runtime handoff incomplete)
+- ADTs (algebraic data types) with pattern matching
+- Local recursive functions (`let f x = ... f ... in body`)
+- Value restriction for sound polymorphism
 
 ---
 
-## Phase 1: Complete the Concurrency Story (v0.1)
+## Phase 2: Error Infrastructure
 
-**Goal:** Two processes communicating over a channel, end-to-end.
+**Goal:** Better error messages with source location and context.
 
-### 1.1 Fix the Scheduler Loop
-The current interpreter runs `main`, spawns processes, but doesn't interleave execution properly.
+### 2.1 Source Location Framework
+- [ ] Add line:column position tracking (convert byte offset to line/col)
+- [ ] Create source location infrastructure for error reporting
+- [ ] Store source text for context printing
 
-Tasks:
-- [ ] Refactor `eval` to be resumable (either CPS transform or explicit continuation stack)
-- [ ] Implement proper yield points at `Channel.send` and `Channel.recv`
-- [ ] Test: ping-pong between two processes
+### 2.2 Error Pretty-Printing
+- [ ] Print source line with error
+- [ ] Show caret pointing to error location
+- [ ] Multi-line error context for complex errors
 
-### 1.2 Blocking Semantics
-Currently `send`/`recv` return immediately. Need:
-- [ ] `send` blocks until a receiver is ready (rendezvous)
-- [ ] `recv` blocks until a sender is ready
-- [ ] Process state machine: Ready → Blocked → Ready → Done
+### 2.3 Update Error Types
+- [ ] Update ParseError to use new framework
+- [ ] Update TypeError to use new framework
+- [ ] Update EvalError to use new framework
 
-### 1.3 Basic Select
-- [ ] `select` over multiple receive operations
-- [ ] Non-deterministic choice when multiple channels ready
-
-### 1.4 Tests
-- [ ] Unit tests for scheduler
-- [ ] Integration test: producer-consumer
-- [ ] Integration test: multiple channels
-
-**Deliverable:** Can write and run concurrent Gneiss programs with channels.
+### 2.4 Structured Output
+- [ ] JSON error format option (for tooling integration)
+- [ ] Consistent error format across all error types
 
 ---
 
-## Phase 2: Error Handling & Polish (v0.2)
+## Phase 3: Module System
 
-### 2.1 Better Error Messages
-- [ ] Track source spans through inference
-- [ ] Pretty-print type errors with source location
-- [ ] Suggest fixes for common mistakes
+**Goal:** Multi-file projects with imports and exports.
 
-### 2.2 Process Failure
-- [ ] Processes can crash (panic)
-- [ ] Option: linked processes (Erlang-style)
-- [ ] Option: supervised restart
-
-### 2.3 Timeouts
-- [ ] `recv_timeout : Channel a -> Int -> Option a`
-- [ ] Or: timeout as part of `select`
-
-### 2.4 Standard Library Builtins
-- [ ] List functions: `map`, `filter`, `fold`, `length`, `reverse`
-- [ ] String functions: `concat`, `split`, `chars`
-- [ ] Integer functions: `abs`, `min`, `max`
-- [ ] IO: `read_line`, `print_line`
-
-### 2.5 REPL Improvements
-- [ ] Multi-line input
-- [ ] History (readline/rustyline)
-- [ ] `:load` command to load files
-- [ ] Show process state
-
----
-
-## Phase 3: Type System Extensions (v0.3)
-
-Pick **one** of these initially:
-
-### Option A: Typeclasses (Recommended)
-```
-trait Show a =
-  show : a -> String
-
-impl Show Int =
-  show n = int_to_string n
-
-impl Show a => Show (List a) =
-  show xs = "[" ++ join ", " (map show xs) ++ "]"
-```
-
-Tasks:
-- [ ] Parse trait/impl declarations
-- [ ] Implement dictionary-passing or monomorphization
-- [ ] Constrained type inference
-- [ ] Useful traits: `Show`, `Eq`, `Ord`
-
-### Option B: Row Polymorphism (Records)
-```
-let get_name r = r.name
-
--- Inferred: { name : a | r } -> a
-```
-
-Tasks:
-- [ ] Record syntax in parser
-- [ ] Row types in inference
-- [ ] Field access and update
-
-### Option C: Effect Tracking (Advanced)
-```
-let read_file : String -> IO String
-let pure_fn : Int -> Int  -- no effects
-```
-
-Probably too ambitious for v0.3, but worth considering.
-
----
-
-## Phase 4: Modules & Imports (v0.4)
-
-### 4.1 Basic Modules
-```
+### 3.1 Syntax
+```gneiss
 -- File: List.gn
+module List
+
 let map f xs = ...
 let filter p xs = ...
 
--- File: Main.gn  
-import List
+-- File: Main.gn
+module Main
 
-let main _ = List.map double [1, 2, 3]
+import List
+import List (map, filter)  -- selective import
+import List as L           -- qualified import
+
+let main () = List.map double [1, 2, 3]
 ```
 
-Tasks:
-- [ ] Module = file (no in-language module syntax initially)
-- [ ] `import Module` brings names into scope
-- [ ] `import Module (foo, bar)` selective import
-- [ ] Circular import detection
+### 3.2 Tasks
+- [ ] Add tokens: `module`, `import`, `export`, `as`
+- [ ] Add AST nodes for module/import/export declarations
+- [ ] Parse module declarations and imports
+- [ ] Implement module name resolution (file→module mapping)
+- [ ] Implement import resolution and name binding
+- [ ] Add circular dependency detection
+- [ ] Add visibility controls (public/private)
 
-### 4.2 Visibility
-- [ ] Public by default, or `private let`?
-- [ ] Or: export list at top of file
-
-### 4.3 Package/Project Structure
-- [ ] `gneiss.toml` manifest
-- [ ] Source directories
-- [ ] Dependencies (future)
+### 3.3 Visibility
+- [ ] Default: public exports
+- [ ] `private let` for module-internal bindings
+- [ ] Or: explicit export list
 
 ---
 
-## Phase 5: Performance (v0.5)
+## Phase 4: REPL & Tooling
+
+**Goal:** Improved developer experience.
+
+### 4.1 REPL Improvements
+- [ ] History and line editing support
+- [ ] Multi-line input mode
+- [ ] `:load` command to load .gn files
+- [ ] `:env` command to show current bindings
+- [ ] `:type` expression type inspection (basic version exists)
+
+### 4.2 Build System
+- [ ] `gneiss.toml` project manifest
+- [ ] Source directories configuration
+- [ ] Build command for multi-file projects
+
+---
+
+## Phase 5: Performance
 
 ### 5.1 Bytecode Compiler
-Replace tree-walking interpreter with:
 - [ ] Design bytecode instruction set
 - [ ] Compile AST → bytecode
 - [ ] Stack-based VM
@@ -178,7 +137,7 @@ Replace tree-walking interpreter with:
 
 ---
 
-## Phase 6: Compilation Target (v1.0)
+## Phase 6: Compilation Target
 
 Choose one:
 
@@ -200,19 +159,19 @@ Choose one:
 
 ---
 
-## Recommended Next Weekend
+## Decision Log
 
-If you have a weekend to hack:
-
-1. **Day 1 Morning:** Refactor eval to use explicit continuation stack
-2. **Day 1 Afternoon:** Wire up scheduler to actually interleave processes
-3. **Day 1 Evening:** Get ping-pong working (two processes, one channel)
-
-4. **Day 2 Morning:** Add `select` for multiple channels
-5. **Day 2 Afternoon:** Write a few real examples (counter actor, worker pool)
-6. **Day 2 Evening:** Clean up, add tests, document
-
-This gets you to a **demo-able v0.1** where you can show off the core idea: ML-style types + Go-style channels.
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Concurrency model | CML channels, not Erlang mailboxes | Matches Go-style, typed channels |
+| Type system | Hindley-Milner | Simple, well-understood |
+| Typeclasses | Dictionary passing | Simpler than monomorphization, works with separate compilation |
+| Continuations | Delimited (shift/reset) | Composable, typed, enables effects |
+| Parser | Handwritten recursive descent | Control over error messages |
+| Runtime | Single-threaded cooperative | Simpler for v0.1, can add threads later |
+| Syntax | OCaml-inspired | Familiar to ML users, minimal noise |
+| Module syntax | Explicit `module` keyword | Clear file structure, not implicit from filename |
+| Sendable constraint | Deferred | Runtime copies everything, no shared memory |
 
 ---
 
@@ -232,18 +191,3 @@ This gets you to a **demo-able v0.1** where you can show off the core idea: ML-s
 - "Crafting Interpreters" (Nystrom) - bytecode VM chapters
 - "Programming Language Pragmatics" - compilation techniques
 - "The Implementation of Functional Programming Languages" (SPJ) - STG machine
-
----
-
-## Decision Log
-
-Decisions made so far (for future reference):
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Concurrency model | CML channels, not Erlang mailboxes | Matches Go-style, typed channels |
-| Type system | Hindley-Milner first | Simple, well-understood, typeclasses later |
-| Parser | Handwritten recursive descent | Control over error messages, Chumsky was problematic |
-| Runtime | Single-threaded cooperative | Simpler for v0.1, can add threads later |
-| Syntax | OCaml-inspired | Familiar to ML users, minimal noise |
-| Sendable constraint | Deferred | Runtime copies everything, no shared memory |

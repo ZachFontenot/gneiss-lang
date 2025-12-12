@@ -170,9 +170,77 @@ When a process hits `Channel.send` with no receiver, it returns `Blocked` with i
 -- NO buffered channels
 let ch = Channel.new_buffered 10  -- doesn't exist
 
--- NO non-blocking operations  
+-- NO non-blocking operations
 let result = Channel.try_send ch x  -- doesn't exist
 ```
+
+### 7. Typeclasses: Dictionary Passing
+
+**Decision:** Implement typeclasses using dictionary passing at runtime.
+
+**Rationale:**
+- Simpler than monomorphization (no code duplication)
+- Works with separate compilation
+- Runtime overhead acceptable for interpreted language
+- Clear semantics for constrained instances
+
+**Syntax:**
+```gneiss
+trait Show a =
+  val show : a -> String
+end
+
+impl Show for Int =
+  let show n = int_to_string n
+end
+
+impl Show for (List a) where a : Show =
+  let show xs = "[" ++ join ", " (map show xs) ++ "]"
+end
+```
+
+**How it works:**
+1. Type inference collects predicates (constraints) during inference
+2. Instance resolution finds matching instances for each predicate
+3. At runtime, dictionaries are constructed containing method implementations
+4. Method calls dispatch through the dictionary
+
+**Constraints:**
+- Single-parameter typeclasses only (no multi-param or HKT)
+- Overlapping instances are detected and rejected
+- Orphan instances allowed (no coherence checking yet)
+
+### 8. Delimited Continuations
+
+**Decision:** Implement shift/reset style delimited continuations.
+
+**Rationale:**
+- Composable control flow primitive
+- Can express exceptions, generators, coroutines, etc.
+- Well-studied semantics
+- Complements channel-based concurrency
+
+**Syntax:**
+```gneiss
+-- reset delimits the continuation scope
+-- shift captures the continuation up to the enclosing reset
+let result = reset (
+  1 + shift (fun k -> k (k 10))
+)
+-- result = 1 + (1 + 10) = 12
+```
+
+**Semantics:**
+- `reset e` evaluates `e` with a prompt (delimiter)
+- `shift (fun k -> body)` captures the continuation up to the nearest reset
+- The captured continuation `k` can be called zero, once, or multiple times
+- Calling `k v` resumes computation with `v` as the result of the shift
+
+**Implementation:**
+- Uses the CPS interpreter's frame stack
+- `Frame::Prompt` marks reset boundaries
+- `Value::Continuation` holds captured frames
+- Continuation application splices frames back into the stack
 
 ## Invariants
 
@@ -265,27 +333,27 @@ let ch = Channel.new in Channel.send ch 42; f ch
 
 When working on this codebase, avoid these anti-patterns:
 
-1. **Don't add typeclasses/traits.** Deferred to v0.3+.
+1. **Don't make channels async/buffered.** Synchronous rendezvous is intentional.
 
-2. **Don't make channels async/buffered.** Synchronous rendezvous is intentional.
+2. **Don't use parser generator libraries.** Hand-written parser gives better errors and was chosen after Chumsky failed.
 
-3. **Don't use parser generator libraries.** Hand-written parser gives better errors and was chosen after Chumsky failed.
+3. **Don't add `receive` syntax (Erlang-style).** We use CML channels, not mailboxes.
 
-4. **Don't add `receive` syntax (Erlang-style).** We use CML channels, not mailboxes.
+4. **Don't add implicit parallelism.** Single-threaded cooperative scheduler is intentional.
 
-5. **Don't add implicit parallelism.** Single-threaded cooperative scheduler is intentional.
+5. **Don't generalize non-values.** Value restriction is load-bearing for soundness.
 
-6. **Don't generalize non-values.** Value restriction is load-bearing for soundness.
+6. **Don't add multi-parameter typeclasses or HKT.** Single-parameter typeclasses are sufficient for now.
 
-## Future Directions (Not For v0.1)
+## Future Directions
 
-These are documented for context, not to be implemented now:
+Next phases of development (see ROADMAP.md for details):
 
-- **v0.2:** `select` over multiple channels, better error messages
-- **v0.3:** Typeclasses OR row polymorphism (pick one)
-- **v0.4:** Modules and imports
-- **v0.5:** Bytecode compiler, tail call optimization
-- **v1.0:** Real backend (BEAM/WASM/native)
+- **Phase 2:** Error infrastructure - line:column tracking, source context in errors
+- **Phase 3:** Module system - explicit `module` keyword, imports/exports
+- **Phase 4:** REPL & tooling - history, multi-line, :load command
+- **Phase 5:** Bytecode compiler, tail call optimization
+- **Phase 6:** Real backend (BEAM/WASM/native)
 
 ## References
 
