@@ -740,7 +740,8 @@ impl Interpreter {
                     }
                 }
 
-                // Frames were popped in reverse order, fix it
+                // Frames were popped innermost-first; reverse so outermost is first
+                // (This makes restore simpler: just push in order)
                 captured.reverse();
 
                 // Create continuation value
@@ -1257,9 +1258,11 @@ impl Interpreter {
                 cont.push(Frame::Prompt);
 
                 // Splice captured frames back onto stack
-                for frame in frames.into_iter().rev() {
+                // Frames are stored outermost-first, push in order so innermost ends up on top
+                for frame in frames.into_iter() {
                     cont.push(frame);
                 }
+
                 // The argument becomes the "return value" to those frames
                 StepResult::Continue(State::Apply {
                     value: arg,
