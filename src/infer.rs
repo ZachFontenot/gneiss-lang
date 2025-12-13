@@ -881,20 +881,31 @@ impl Inferencer {
                 // α = the captured answer type (what the context expected)
                 let alpha = self.fresh_var();
 
-                // k : ∀t.(τ/t → α/t)
-                // For now, we approximate this by using a pure function type
-                // with fresh answer type variable that can unify with any context
-                let k_ans = self.fresh_var();
+                // k : ∀t.(τ/t → α/t) - truly polymorphic in answer type
+                // Each use of k gets fresh answer type variables via instantiation
                 let k_type = Type::Arrow {
                     arg: Rc::new(tau.clone()),
                     ret: Rc::new(alpha.clone()),
-                    ans_in: Rc::new(k_ans.clone()),
-                    ans_out: Rc::new(k_ans), // Pure! (same ans_in and ans_out)
+                    ans_in: Rc::new(Type::new_generic(0)),  // Generic 't'
+                    ans_out: Rc::new(Type::new_generic(0)), // Same 't' (pure)
+                };
+                let k_scheme = Scheme {
+                    num_generics: 1,
+                    ty: k_type,
                 };
 
-                // Bind k in body's environment
+                // Bind k with polymorphic scheme (not monomorphic)
                 let mut body_env = env.clone();
-                self.bind_pattern(&mut body_env, param, &k_type)?;
+                match &param.node {
+                    PatternKind::Var(name) => {
+                        body_env.insert(name.clone(), k_scheme);
+                    }
+                    PatternKind::Wildcard => { /* k unused */ }
+                    _ => {
+                        // shift parameter should be a variable or wildcard
+                        return Err(TypeError::PatternMismatch);
+                    }
+                }
 
                 // Infer body with its own answer type tracking
                 let body_result = self.infer_expr_full(&body_env, body)?;
@@ -1207,12 +1218,17 @@ impl Inferencer {
         let mut env = TypeEnv::new();
 
         // Add built-in functions
-        // print : a -> ()
-        let print_ty = {
-            let a = self.fresh_var();
-            Type::arrow(a, Type::Unit)
+        // print : forall a t. a/t -> ()/t  (polymorphic in arg type and answer type)
+        let print_scheme = Scheme {
+            num_generics: 2,
+            ty: Type::Arrow {
+                arg: Rc::new(Type::new_generic(0)),    // Generic arg type
+                ret: Rc::new(Type::Unit),
+                ans_in: Rc::new(Type::new_generic(1)), // Generic answer type
+                ans_out: Rc::new(Type::new_generic(1)), // Same (pure)
+            },
         };
-        env.insert("print".into(), self.generalize(&print_ty));
+        env.insert("print".into(), print_scheme);
 
         // int_to_string : Int -> String
         env.insert("int_to_string".into(), Scheme::mono(Type::arrow(Type::Int, Type::String)));
