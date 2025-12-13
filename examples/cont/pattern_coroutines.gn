@@ -154,9 +154,9 @@ let ping () =
     let rec loop count =
         if count > 5 then print "Ping: done"
         else (
-            print ("Ping: sending " ^ int_to_string count);
+            print ("Ping: sending " ++ int_to_string count);
             let response = send count in
-            print ("Ping: got " ^ int_to_string response);
+            print ("Ping: got " ++ int_to_string response);
             loop (response + 1)
         )
     in
@@ -165,9 +165,9 @@ let ping () =
 let pong () =
     let rec loop () =
         let x = send 0 in  -- Initial send (ignored first time)
-        print ("Pong: received " ^ int_to_string x);
+        print ("Pong: received " ++ int_to_string x);
         let doubled = x * 2 in
-        print ("Pong: sending " ^ int_to_string doubled);
+        print ("Pong: sending " ++ int_to_string doubled);
         loop ()
     in
     loop ()
@@ -208,10 +208,10 @@ let async_example () =
     reset (
         print "Starting async operations...";
         let a = await (make_async 10 2) in
-        print ("Got a: " ^ int_to_string a);
+        print ("Got a: " ++ int_to_string a);
         let b = await (make_async 20 1) in
-        print ("Got b: " ^ int_to_string b);
-        print ("Sum: " ^ int_to_string (a + b));
+        print ("Got b: " ++ int_to_string b);
+        print ("Sum: " ++ int_to_string (a + b));
         Resolved ()
     )
 

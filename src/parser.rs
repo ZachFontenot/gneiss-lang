@@ -1393,6 +1393,7 @@ impl Parser {
         matches!(
             self.peek(),
             Token::Ident(_)
+                | Token::UpperIdent(_)
                 | Token::Int(_)
                 | Token::String(_)
                 | Token::Char(_)
@@ -1415,6 +1416,14 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
                 Ok(Spanned::new(PatternKind::Var(name), start))
+            }
+            Token::UpperIdent(name) => {
+                // Nullary constructor as pattern atom (e.g., Get in "StateOp Get k")
+                self.advance();
+                Ok(Spanned::new(
+                    PatternKind::Constructor { name, args: vec![] },
+                    start,
+                ))
             }
             Token::Int(n) => {
                 self.advance();
