@@ -1,0 +1,8 @@
+-- NAME ERROR ----------------------------------------------
+
+test.gn:1:9
+
+I cannot find a variable named `unknownVar`.
+
+1 | let x = unknownVar
+            ^^^^^^^^^^

@@ -1,0 +1,10 @@
+-- NAME ERROR ----------------------------------------------
+
+test.gn:1:14
+
+I cannot find a variable named `prnt`.
+
+Did you mean print?
+
+1 | let result = prnt 42
+                 ^^^^

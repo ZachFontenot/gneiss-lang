@@ -6,6 +6,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 use gneiss::errors::{Colors, format_header, format_snippet, format_suggestions};
 use gneiss::infer::TypeError;
+use gneiss::lexer::LexError;
 use gneiss::parser::ParseError;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser, SourceMap, TypeEnv};
 
@@ -38,7 +39,7 @@ fn run_file(path: &str) {
     let tokens = match Lexer::new(&source).tokenize() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Lexer error: {}", e);
+            eprint!("{}", format_lex_error(&e, &source_map, Some(path), &colors));
             return;
         }
     };
@@ -97,6 +98,7 @@ fn repl() {
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    let colors = Colors::new(std::io::stderr().is_terminal());
 
     let mut interpreter = Interpreter::new();
     let mut type_env = TypeEnv::new();
@@ -147,7 +149,8 @@ fn repl() {
         let tokens = match Lexer::new(line).tokenize() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("Lexer error: {}", e);
+                let source_map = SourceMap::new(line);
+                eprint!("{}", format_lex_error(&e, &source_map, None, &colors));
                 continue;
             }
         };
@@ -165,7 +168,8 @@ fn repl() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Type error: {}", e);
+                        let source_map = SourceMap::new(line);
+                        eprint!("{}", format_type_error(&e, &source_map, None, &colors));
                         continue;
                     }
                 }
@@ -196,10 +200,16 @@ fn repl() {
                             Err(e) => eprintln!("Runtime error: {}", e),
                         }
                     }
-                    Err(e) => eprintln!("Type error: {}", e),
+                    Err(e) => {
+                        let source_map = SourceMap::new(line);
+                        eprint!("{}", format_type_error(&e, &source_map, None, &colors));
+                    }
                 }
             }
-            Err(e) => eprintln!("Parse error: {}", e),
+            Err(e) => {
+                let source_map = SourceMap::new(line);
+                eprint!("{}", format_parse_error(&e, &source_map, None, &colors));
+            }
         }
     }
 
@@ -393,6 +403,48 @@ fn format_parse_error(err: &ParseError, source_map: &SourceMap, filename: Option
         out.push('\n');
         out.push_str(&format_snippet(source_map, span, colors));
     }
+
+    out.push('\n');
+    out
+}
+
+fn format_lex_error(err: &LexError, source_map: &SourceMap, filename: Option<&str>, colors: &Colors) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format_header("SYNTAX ERROR", colors));
+    out.push('\n');
+    out.push('\n');
+
+    let (msg, span) = match err {
+        LexError::UnexpectedChar(c, span) => {
+            (format!("I found an unexpected character: '{}'", c), span)
+        }
+        LexError::UnterminatedString(span) => {
+            ("I found a string that was never closed.".to_string(), span)
+        }
+        LexError::UnterminatedChar(span) => {
+            ("I found a character literal that was never closed.".to_string(), span)
+        }
+        LexError::InvalidEscape(c, span) => {
+            (format!("I found an invalid escape sequence: \\{}", c), span)
+        }
+        LexError::InvalidNumber(s, span) => {
+            (format!("I could not parse this as a number: {}", s), span)
+        }
+    };
+
+    // Location
+    let pos = source_map.position(span.start);
+    let file = filename.unwrap_or("<input>");
+    out.push_str(&format!("{}{}:{}{}\n\n", colors.bold(), file, pos, colors.reset()));
+
+    // Message
+    out.push_str(&msg);
+    out.push('\n');
+
+    // Source snippet
+    out.push('\n');
+    out.push_str(&format_snippet(source_map, span, colors));
 
     out.push('\n');
     out

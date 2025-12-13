@@ -145,12 +145,88 @@ pub fn find_similar<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str
 
 /// Format a source code snippet with line number and caret/underline.
 ///
-/// Example output:
+/// For single-line spans:
 /// ```text
 /// 12 | let x = add 5 "hello"
 ///              ^^^^^^^^^^^^^
 /// ```
+///
+/// For multi-line spans:
+/// ```text
+/// 12 | let x = match foo with
+///              ^^^^^^^^^^^^^^
+/// 13 | | Some y -> y
+/// 14 | | None -> 0
+///      ^
+/// ```
 pub fn format_snippet(source_map: &SourceMap, span: &Span, colors: &Colors) -> String {
+    let loc = source_map.locate(span);
+
+    // For single-line spans, use simple format
+    if loc.start.line == loc.end.line {
+        return format_single_line_snippet(source_map, span, colors);
+    }
+
+    // Multi-line span: show all affected lines
+    let mut out = String::new();
+    let max_line_num = loc.end.line;
+    let gutter_width = format!("{}", max_line_num).len();
+
+    for line_num in loc.start.line..=loc.end.line {
+        let line_text = source_map.line(line_num).unwrap_or("");
+        let gutter = format!("{:>width$}", line_num, width = gutter_width);
+
+        // Source line with line number
+        out.push_str(&format!(
+            "{}{} |{} {}\n",
+            colors.cyan(),
+            gutter,
+            colors.reset(),
+            line_text
+        ));
+
+        // Marker line
+        let marker_padding = " ".repeat(gutter_width + 3);
+
+        if line_num == loc.start.line {
+            // First line: caret at start column, underline to end of line content
+            let spaces = " ".repeat(loc.start.column.saturating_sub(1));
+            let underline_len = line_text.chars().count().saturating_sub(loc.start.column.saturating_sub(1)).max(1);
+            let marks = "^".repeat(underline_len);
+            out.push_str(&format!(
+                "{}{}{}{}{}\n",
+                marker_padding,
+                spaces,
+                colors.red(),
+                marks,
+                colors.reset()
+            ));
+        } else if line_num == loc.end.line {
+            // Last line: caret at column 1 pointing to where error ends
+            let marks = "^".repeat(loc.end.column.max(1));
+            out.push_str(&format!(
+                "{}{}{}{}\n",
+                marker_padding,
+                colors.red(),
+                marks,
+                colors.reset()
+            ));
+        } else {
+            // Middle lines: vertical bar continuation marker
+            out.push_str(&format!(
+                "{}{}|{}\n",
+                marker_padding,
+                colors.red(),
+                colors.reset()
+            ));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+/// Format a single-line source snippet (internal helper)
+fn format_single_line_snippet(source_map: &SourceMap, span: &Span, colors: &Colors) -> String {
     let loc = source_map.locate(span);
     let line_text = source_map.line(loc.start.line).unwrap_or("");
     let line_num = loc.start.line;
@@ -172,16 +248,10 @@ pub fn format_snippet(source_map: &SourceMap, span: &Span, colors: &Colors) -> S
 
     // The caret/underline line
     // Pad to align with content after "NN | "
-    let padding = " ".repeat(gutter_width + 3 + loc.start.column - 1);
+    let padding = " ".repeat(gutter_width + 3 + loc.start.column.saturating_sub(1));
 
-    let underline = if loc.start.line == loc.end.line {
-        // Single line: underline the whole span
-        let len = (loc.end.column - loc.start.column).max(1);
-        "^".repeat(len)
-    } else {
-        // Multi-line: just mark the start
-        "^".to_string()
-    };
+    let len = (loc.end.column.saturating_sub(loc.start.column)).max(1);
+    let underline = "^".repeat(len);
 
     out.push_str(&format!(
         "{}{}{}{}",
@@ -336,5 +406,36 @@ mod tests {
         let colors = Colors::new(false);
         let result = format_suggestions(&[], &colors);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_snippet_single_line() {
+        use crate::ast::{SourceMap, Span};
+        let source = "let x = 1 + \"hello\"";
+        let map = SourceMap::new(source);
+        let span = Span::new(8, 19); // "1 + \"hello\""
+        let colors = Colors::new(false);
+        let result = format_snippet(&map, &span, &colors);
+        assert!(result.contains("let x = 1 + \"hello\""));
+        assert!(result.contains("^^^")); // Should have carets
+    }
+
+    #[test]
+    fn test_format_snippet_multiline() {
+        use crate::ast::{SourceMap, Span};
+        let source = "let x = match foo with\n| Some y -> y\n| None -> 0";
+        let map = SourceMap::new(source);
+        // Span covering "match foo with\n| Some y -> y\n| None"
+        let span = Span::new(8, 48);
+        let colors = Colors::new(false);
+        let result = format_snippet(&map, &span, &colors);
+        // Should show all three lines
+        assert!(result.contains("match foo"));
+        assert!(result.contains("Some y"));
+        assert!(result.contains("None"));
+        // Should have line numbers
+        assert!(result.contains("1 |"));
+        assert!(result.contains("2 |"));
+        assert!(result.contains("3 |"));
     }
 }

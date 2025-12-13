@@ -1,0 +1,8 @@
+-- SYNTAX ERROR --------------------------------------------
+
+test.gn:1:9
+
+I found an unexpected character: '@'
+
+1 | let x = @invalid
+            ^

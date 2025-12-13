@@ -96,15 +96,28 @@ pub struct SpannedToken {
 #[derive(Error, Debug)]
 pub enum LexError {
     #[error("unexpected character: {0}")]
-    UnexpectedChar(char),
+    UnexpectedChar(char, Span),
     #[error("unterminated string")]
-    UnterminatedString,
+    UnterminatedString(Span),
     #[error("unterminated char literal")]
-    UnterminatedChar,
+    UnterminatedChar(Span),
     #[error("invalid escape sequence: \\{0}")]
-    InvalidEscape(char),
+    InvalidEscape(char, Span),
     #[error("invalid number: {0}")]
-    InvalidNumber(String),
+    InvalidNumber(String, Span),
+}
+
+impl LexError {
+    /// Get the source span where this error occurred
+    pub fn span(&self) -> &Span {
+        match self {
+            LexError::UnexpectedChar(_, span) => span,
+            LexError::UnterminatedString(span) => span,
+            LexError::UnterminatedChar(span) => span,
+            LexError::InvalidEscape(_, span) => span,
+            LexError::InvalidNumber(_, span) => span,
+        }
+    }
 }
 
 pub struct Lexer<'a> {
@@ -285,7 +298,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Token::Neq
                 } else {
-                    return Err(LexError::UnexpectedChar('!'));
+                    return Err(LexError::UnexpectedChar('!', Span::new(start, self.pos)));
                 }
             }
             '<' => {
@@ -332,7 +345,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Token::AndAnd
                 } else {
-                    return Err(LexError::UnexpectedChar('&'));
+                    return Err(LexError::UnexpectedChar('&', Span::new(start, self.pos)));
                 }
             }
             '|' => {
@@ -348,18 +361,18 @@ impl<'a> Lexer<'a> {
             }
 
             // String literal
-            '"' => self.lex_string()?,
+            '"' => self.lex_string(start)?,
 
             // Char literal
-            '\'' => self.lex_char()?,
+            '\'' => self.lex_char(start)?,
 
             // Number
-            c if c.is_ascii_digit() => self.lex_number(c)?,
+            c if c.is_ascii_digit() => self.lex_number(c, start)?,
 
             // Identifier or keyword
             c if c.is_alphabetic() || c == '_' => self.lex_ident(c),
 
-            _ => return Err(LexError::UnexpectedChar(c)),
+            _ => return Err(LexError::UnexpectedChar(c, Span::new(start, self.pos))),
         };
 
         Ok(SpannedToken {
@@ -368,7 +381,7 @@ impl<'a> Lexer<'a> {
         })
     }
 
-    fn lex_string(&mut self) -> Result<Token, LexError> {
+    fn lex_string(&mut self, start: usize) -> Result<Token, LexError> {
         let mut s = String::new();
         loop {
             match self.advance() {
@@ -380,19 +393,19 @@ impl<'a> Lexer<'a> {
                         Some('r') => '\r',
                         Some('\\') => '\\',
                         Some('"') => '"',
-                        Some(c) => return Err(LexError::InvalidEscape(c)),
-                        None => return Err(LexError::UnterminatedString),
+                        Some(c) => return Err(LexError::InvalidEscape(c, Span::new(start, self.pos))),
+                        None => return Err(LexError::UnterminatedString(Span::new(start, self.pos))),
                     };
                     s.push(escaped);
                 }
                 Some(c) => s.push(c),
-                None => return Err(LexError::UnterminatedString),
+                None => return Err(LexError::UnterminatedString(Span::new(start, self.pos))),
             }
         }
         Ok(Token::String(s))
     }
 
-    fn lex_char(&mut self) -> Result<Token, LexError> {
+    fn lex_char(&mut self, start: usize) -> Result<Token, LexError> {
         let c = match self.advance() {
             Some('\\') => match self.advance() {
                 Some('n') => '\n',
@@ -400,19 +413,19 @@ impl<'a> Lexer<'a> {
                 Some('r') => '\r',
                 Some('\\') => '\\',
                 Some('\'') => '\'',
-                Some(c) => return Err(LexError::InvalidEscape(c)),
-                None => return Err(LexError::UnterminatedChar),
+                Some(c) => return Err(LexError::InvalidEscape(c, Span::new(start, self.pos))),
+                None => return Err(LexError::UnterminatedChar(Span::new(start, self.pos))),
             },
             Some(c) => c,
-            None => return Err(LexError::UnterminatedChar),
+            None => return Err(LexError::UnterminatedChar(Span::new(start, self.pos))),
         };
         if self.advance() != Some('\'') {
-            return Err(LexError::UnterminatedChar);
+            return Err(LexError::UnterminatedChar(Span::new(start, self.pos)));
         }
         Ok(Token::Char(c))
     }
 
-    fn lex_number(&mut self, first: char) -> Result<Token, LexError> {
+    fn lex_number(&mut self, first: char, start: usize) -> Result<Token, LexError> {
         let mut s = String::new();
         s.push(first);
 
@@ -443,14 +456,14 @@ impl<'a> Lexer<'a> {
                 }
                 let f: f64 = s
                     .parse()
-                    .map_err(|_| LexError::InvalidNumber(s.clone()))?;
+                    .map_err(|_| LexError::InvalidNumber(s.clone(), Span::new(start, self.pos)))?;
                 return Ok(Token::Float(f));
             }
         }
 
         let n: i64 = s
             .parse()
-            .map_err(|_| LexError::InvalidNumber(s.clone()))?;
+            .map_err(|_| LexError::InvalidNumber(s.clone(), Span::new(start, self.pos)))?;
         Ok(Token::Int(n))
     }
 

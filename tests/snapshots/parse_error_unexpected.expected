@@ -1,0 +1,8 @@
+-- PARSE ERROR ---------------------------------------------
+
+test.gn:1:12
+
+I was expecting pattern but found Eof instead.
+
+1 | let x = let
+               ^

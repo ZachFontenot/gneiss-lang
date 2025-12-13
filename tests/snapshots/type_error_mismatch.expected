@@ -1,0 +1,7 @@
+-- TYPE ERROR ----------------------------------------------
+
+I found a type mismatch.
+
+  I expected:  String
+  But found:   Int
+

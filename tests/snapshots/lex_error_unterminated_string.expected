@@ -1,0 +1,8 @@
+-- SYNTAX ERROR --------------------------------------------
+
+test.gn:1:9
+
+I found a string that was never closed.
+
+1 | let x = "hello
+            ^^^^^^
