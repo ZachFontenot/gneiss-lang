@@ -305,6 +305,11 @@ impl TypeEnv {
         new_env.insert(name, scheme);
         new_env
     }
+
+    /// Get an iterator over all bound names
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.bindings.keys()
+    }
 }
 
 /// Information about a data type constructor
@@ -336,6 +341,11 @@ impl TypeContext {
 
     pub fn get_constructor(&self, name: &str) -> Option<&ConstructorInfo> {
         self.constructors.get(name)
+    }
+
+    /// Get an iterator over all constructor names
+    pub fn constructor_names(&self) -> impl Iterator<Item = &str> {
+        self.constructors.keys().map(|s| s.as_str())
     }
 }
 

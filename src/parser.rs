@@ -8,11 +8,11 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum ParseError {
     #[error("unexpected token: expected {expected}, found {found:?}")]
-    UnexpectedToken { expected: String, found: Token },
+    UnexpectedToken { expected: String, found: Token, span: Span },
     #[error("unexpected end of file")]
-    UnexpectedEof,
+    UnexpectedEof { expected: String, last_span: Span },
     #[error("invalid pattern")]
-    InvalidPattern,
+    InvalidPattern { span: Span },
 }
 
 pub struct Parser {
@@ -172,6 +172,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: format!("{:?}", expected),
                 found: self.peek().clone(),
+                span: self.current_span(),
             })
         }
     }
@@ -185,6 +186,15 @@ impl Parser {
         }
     }
 
+    /// Create an UnexpectedToken error at the current position
+    fn unexpected_token(&self, expected: &str) -> ParseError {
+        ParseError::UnexpectedToken {
+            expected: expected.to_string(),
+            found: self.peek().clone(),
+            span: self.current_span(),
+        }
+    }
+
     // ========================================================================
     // Declarations
     // ========================================================================
@@ -195,10 +205,7 @@ impl Parser {
             Token::Type => self.parse_type_decl(),
             Token::Trait => self.parse_trait_decl(),
             Token::Impl => self.parse_instance_decl(),
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "declaration".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("declaration")),
         }
     }
 
@@ -522,10 +529,7 @@ impl Parser {
                     Ok(first)
                 }
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "type".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("type")),
         }
     }
 
@@ -668,10 +672,7 @@ impl Parser {
         self.consume(Token::End)?;
 
         if arms.is_empty() {
-            return Err(ParseError::UnexpectedToken {
-                expected: "select arm".into(),
-                found: self.peek().clone(),
-            });
+            return Err(self.unexpected_token("select arm"));
         }
 
         let span = start.merge(&self.current_span());
@@ -1145,10 +1146,7 @@ impl Parser {
                                 span,
                             ))
                         }
-                        _ => Err(ParseError::UnexpectedToken {
-                            expected: "identifier".into(),
-                            found: self.peek().clone(),
-                        }),
+                        _ => Err(self.unexpected_token("identifier")),
                     }
                 } else {
                     // Just a constructor
@@ -1185,10 +1183,7 @@ impl Parser {
                             body: body.clone(),
                         }, span))
                     }
-                    _ => Err(ParseError::UnexpectedToken {
-                        expected: "function (fun k -> ...)".into(),
-                        found: self.peek().clone(),
-                    })
+                    _ => Err(self.unexpected_token("function (fun k -> ...)"))
                 }
             }
             Token::LParen => {
@@ -1243,10 +1238,7 @@ impl Parser {
                 let span = start.merge(&self.current_span());
                 Ok(Spanned::new(ExprKind::List(exprs), span))
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "expression".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("expression")),
         }
     }
 
@@ -1393,10 +1385,7 @@ impl Parser {
                 let span = start.merge(&self.current_span());
                 Ok(Spanned::new(PatternKind::List(pats), span))
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "pattern".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("pattern")),
         }
     }
 
@@ -1495,10 +1484,7 @@ impl Parser {
                 let span = start.merge(&self.current_span());
                 Ok(Spanned::new(PatternKind::List(pats), span))
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "pattern".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("pattern")),
         }
     }
 
@@ -1512,10 +1498,7 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "identifier".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("identifier")),
         }
     }
 
@@ -1525,10 +1508,7 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "constructor".into(),
-                found: self.peek().clone(),
-            }),
+            _ => Err(self.unexpected_token("constructor")),
         }
     }
 }

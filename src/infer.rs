@@ -1,6 +1,7 @@
 //! Hindley-Milner type inference
 
 use crate::ast::*;
+use crate::errors::find_similar;
 use crate::types::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -8,24 +9,24 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum TypeError {
-    #[error("unbound variable: {0}")]
-    UnboundVariable(String),
+    #[error("unbound variable: {name}")]
+    UnboundVariable { name: String, span: Span, suggestions: Vec<String> },
     #[error("type mismatch: expected {expected}, found {found}")]
-    TypeMismatch { expected: Type, found: Type },
-    #[error("occurs check failed: {0} occurs in {1}")]
-    OccursCheck(TypeVarId, Type),
-    #[error("unknown constructor: {0}")]
-    UnknownConstructor(String),
+    TypeMismatch { expected: Type, found: Type, span: Option<Span> },
+    #[error("occurs check failed: {var_id} occurs in {ty}")]
+    OccursCheck { var_id: TypeVarId, ty: Type, span: Option<Span> },
+    #[error("unknown constructor: {name}")]
+    UnknownConstructor { name: String, span: Span, suggestions: Vec<String> },
     #[error("pattern type mismatch")]
-    PatternMismatch,
+    PatternMismatch { span: Span },
     #[error("non-exhaustive patterns")]
-    NonExhaustivePatterns,
-    #[error("unknown trait: {0}")]
-    UnknownTrait(String),
+    NonExhaustivePatterns { span: Span },
+    #[error("unknown trait: {name}")]
+    UnknownTrait { name: String, span: Option<Span> },
     #[error("overlapping instances for trait {trait_name}: {existing} and {new}")]
-    OverlappingInstance { trait_name: String, existing: Type, new: Type },
+    OverlappingInstance { trait_name: String, existing: Type, new: Type, span: Option<Span> },
     #[error("no instance of {trait_name} for type {ty}")]
-    NoInstance { trait_name: String, ty: Type },
+    NoInstance { trait_name: String, ty: Type, span: Option<Span> },
 }
 
 pub struct Inferencer {
@@ -83,7 +84,7 @@ impl Inferencer {
                     TypeVar::Unbound { id, level } => {
                         // Occurs check
                         if other.occurs(id) {
-                            return Err(TypeError::OccursCheck(id, other.clone()));
+                            return Err(TypeError::OccursCheck { var_id: id, ty: other.clone(), span: None });
                         }
                         // Update levels for let-polymorphism
                         self.update_levels(&other, level);
@@ -94,6 +95,7 @@ impl Inferencer {
                     TypeVar::Generic(_) => Err(TypeError::TypeMismatch {
                         expected: t1.clone(),
                         found: t2.clone(),
+                        span: None,
                     }),
                 }
             }
@@ -144,6 +146,7 @@ impl Inferencer {
             _ => Err(TypeError::TypeMismatch {
                 expected: t1,
                 found: t2,
+                span: None,
             }),
         }
     }
@@ -350,7 +353,14 @@ impl Inferencer {
 
                     instantiated
                 } else {
-                    return Err(TypeError::UnboundVariable(name.clone()));
+                    // Collect suggestions for "did you mean?"
+                    let candidates: Vec<&str> = env.keys().map(|s| s.as_str()).collect();
+                    let suggestions = find_similar(name, candidates, 2);
+                    return Err(TypeError::UnboundVariable {
+                        name: name.clone(),
+                        span: expr.span.clone(),
+                        suggestions,
+                    });
                 };
                 Ok(InferResult::pure(ty, ans))
             }
@@ -676,6 +686,7 @@ impl Inferencer {
                         return Err(TypeError::TypeMismatch {
                             expected: result_ty,
                             found: Type::Unit,
+                            span: Some(expr.span.clone()),
                         });
                     }
 
@@ -687,8 +698,14 @@ impl Inferencer {
 
                     Ok(InferResult::pure(result_ty, ans))
                 } else {
-                    // Unknown constructor - for now just create a generic type
-                    Err(TypeError::UnknownConstructor(name.clone()))
+                    // Unknown constructor - gather suggestions from known constructors
+                    let candidates: Vec<&str> = self.type_ctx.constructor_names().collect();
+                    let suggestions = find_similar(name, candidates, 2);
+                    Err(TypeError::UnknownConstructor {
+                        name: name.clone(),
+                        span: expr.span.clone(),
+                        suggestions,
+                    })
                 }
             }
 
@@ -903,7 +920,7 @@ impl Inferencer {
                     PatternKind::Wildcard => { /* k unused */ }
                     _ => {
                         // shift parameter should be a variable or wildcard
-                        return Err(TypeError::PatternMismatch);
+                        return Err(TypeError::PatternMismatch { span: param.span.clone() });
                     }
                 }
 
@@ -1009,7 +1026,13 @@ impl Inferencer {
                     }
                     Ok(())
                 } else {
-                    Err(TypeError::UnknownConstructor(name.clone()))
+                    let candidates: Vec<&str> = self.type_ctx.constructor_names().collect();
+                    let suggestions = find_similar(name, candidates, 2);
+                    Err(TypeError::UnknownConstructor {
+                        name: name.clone(),
+                        span: pattern.span.clone(),
+                        suggestions,
+                    })
                 }
             }
         }
@@ -1046,7 +1069,11 @@ impl Inferencer {
                 if let Some(&id) = param_map.get(name) {
                     Ok(Type::new_generic(id))
                 } else {
-                    Err(TypeError::UnboundVariable(name.clone()))
+                    Err(TypeError::UnboundVariable {
+                        name: name.clone(),
+                        span: expr.span.clone(),
+                        suggestions: vec![],  // No suggestions for type variables
+                    })
                 }
             }
             TypeExprKind::Named(name) => match name.as_str() {
@@ -1071,7 +1098,7 @@ impl Inferencer {
                         name: name.clone(),
                         args: arg_types?,
                     }),
-                    _ => Err(TypeError::PatternMismatch),
+                    _ => Err(TypeError::PatternMismatch { span: constructor.span.clone() }),
                 }
             }
             TypeExprKind::Arrow { from, to } => {
@@ -1170,7 +1197,7 @@ impl Inferencer {
         {
             // Check that the trait exists
             if self.class_env.get_trait(trait_name).is_none() {
-                return Err(TypeError::UnknownTrait(trait_name.clone()));
+                return Err(TypeError::UnknownTrait { name: trait_name.clone(), span: None });
             }
 
             // Build a param_map for type variables that might appear in the instance head
@@ -1204,9 +1231,9 @@ impl Inferencer {
 
             // Add instance with overlap checking
             self.class_env.add_instance(info).map_err(|e| match e {
-                ClassError::UnknownTrait(name) => TypeError::UnknownTrait(name),
+                ClassError::UnknownTrait(name) => TypeError::UnknownTrait { name, span: None },
                 ClassError::OverlappingInstance { trait_name, existing, new } => {
-                    TypeError::OverlappingInstance { trait_name, existing, new }
+                    TypeError::OverlappingInstance { trait_name, existing, new, span: None }
                 }
             })?;
         }
@@ -1653,7 +1680,7 @@ end
 "#;
         let (result, _) = typecheck_program_with_inferencer(source);
         assert!(result.is_err());
-        if let Err(TypeError::UnknownTrait(name)) = result {
+        if let Err(TypeError::UnknownTrait { name, .. }) = result {
             assert_eq!(name, "Show");
         } else {
             panic!("Expected UnknownTrait error");
