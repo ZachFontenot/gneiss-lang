@@ -7,6 +7,31 @@ use crate::operators::{OpInfo, OperatorTable};
 use std::rc::Rc;
 use thiserror::Error;
 
+/// What expression forms are allowed in the current parsing context.
+/// This makes explicit where each expression form can appear.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExprContext {
+    /// Full language: let, if, match, fun, seq, binary
+    /// Used for: lambda bodies, top-level expressions
+    Full,
+    /// No sequences: let, if, match, fun, binary
+    /// Used for: if branches, match arms, select arms
+    NoSeq,
+    /// Only binary/application expressions
+    /// Used for: match guards (intentional restriction)
+    BinaryOnly,
+}
+
+impl ExprContext {
+    fn allows_seq(self) -> bool {
+        matches!(self, ExprContext::Full)
+    }
+
+    fn allows_let(self) -> bool {
+        matches!(self, ExprContext::Full | ExprContext::NoSeq)
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ParseError {
     #[error("unexpected token: expected {expected}, found {found:?}")]
@@ -106,16 +131,17 @@ impl Parser {
         // Check for prefix operator syntax: let (<|>) a b = ...
         if self.check(&Token::LParen) {
             if let Some(op) = self.peek_operator_in_parens() {
-                return self.parse_operator_def_prefix(start, op);
+                return self.parse_operator_def(start, op, None);
             }
         }
 
         // Parse first identifier
+        let first_span = self.current_span();
         let first_name = self.parse_ident()?;
 
         // Check for infix operator syntax: let a <|> b = ...
         if let Some(op) = self.try_peek_operator() {
-            return self.parse_operator_def_infix(start, first_name, op);
+            return self.parse_operator_def(start, op, Some((first_name, first_span)));
         }
 
         // Regular let binding/function: let f x y = ...
@@ -191,37 +217,11 @@ impl Parser {
             return None;
         }
         // Look ahead: we need (op) where op is an operator
-        if self.pos + 1 >= self.tokens.len() {
-            return None;
-        }
-        let next = &self.tokens[self.pos + 1].token;
-        let op_str = match next {
-            Token::OpSymbol(s) => s.clone(),
-            Token::Plus => "+".to_string(),
-            Token::Minus => "-".to_string(),
-            Token::Star => "*".to_string(),
-            Token::Slash => "/".to_string(),
-            Token::Percent => "%".to_string(),
-            Token::EqEq => "==".to_string(),
-            Token::Neq => "!=".to_string(),
-            Token::Lt => "<".to_string(),
-            Token::Gt => ">".to_string(),
-            Token::Lte => "<=".to_string(),
-            Token::Gte => ">=".to_string(),
-            Token::AndAnd => "&&".to_string(),
-            Token::OrOr => "||".to_string(),
-            Token::Cons => "::".to_string(),
-            Token::Concat => "++".to_string(),
-            Token::Compose => ">>".to_string(),
-            Token::ComposeBack => "<<".to_string(),
-            Token::PipeOp => "|>".to_string(),
-            Token::PipeBack => "<|".to_string(),
-            _ => return None,
-        };
-        // Check that token after operator is RParen
         if self.pos + 2 >= self.tokens.len() {
             return None;
         }
+        let op_str = self.tokens[self.pos + 1].token.operator_symbol()?;
+        // Check that token after operator is RParen
         if !matches!(self.tokens[self.pos + 2].token, Token::RParen) {
             return None;
         }
@@ -230,71 +230,30 @@ impl Parser {
 
     /// Try to peek for an operator token (for infix syntax detection)
     fn try_peek_operator(&self) -> Option<String> {
-        match self.peek() {
-            Token::OpSymbol(s) => Some(s.clone()),
-            Token::Plus => Some("+".to_string()),
-            Token::Minus => Some("-".to_string()),
-            Token::Star => Some("*".to_string()),
-            Token::Slash => Some("/".to_string()),
-            Token::Percent => Some("%".to_string()),
-            Token::EqEq => Some("==".to_string()),
-            Token::Neq => Some("!=".to_string()),
-            Token::Lt => Some("<".to_string()),
-            Token::Gt => Some(">".to_string()),
-            Token::Lte => Some("<=".to_string()),
-            Token::Gte => Some(">=".to_string()),
-            Token::AndAnd => Some("&&".to_string()),
-            Token::OrOr => Some("||".to_string()),
-            Token::Cons => Some("::".to_string()),
-            Token::Concat => Some("++".to_string()),
-            Token::Compose => Some(">>".to_string()),
-            Token::ComposeBack => Some("<<".to_string()),
-            Token::PipeOp => Some("|>".to_string()),
-            Token::PipeBack => Some("<|".to_string()),
-            _ => None,
-        }
+        self.peek().operator_symbol()
     }
 
-    /// Parse prefix operator definition: let (<|>) a b = body
-    fn parse_operator_def_prefix(&mut self, _start: Span, op: String) -> Result<Item, ParseError> {
-        // Consume ( op )
-        self.consume(Token::LParen)?;
-        self.advance(); // consume the operator token
-        self.consume(Token::RParen)?;
-
-        // Parse parameters
+    /// Parse operator definition (both prefix and infix syntax)
+    /// Prefix: let (<|>) a b = body
+    /// Infix: let a <|> b = body
+    fn parse_operator_def(&mut self, start: Span, op: String, first_param: Option<(String, Span)>) -> Result<Item, ParseError> {
         let mut params = Vec::new();
-        while self.is_pattern_start() && !self.check(&Token::Eq) {
+
+        if let Some((name, param_span)) = first_param {
+            // Infix syntax: we have the first param already, consume the operator
+            self.advance();
+            params.push(Spanned::new(PatternKind::Var(name), param_span));
+            // Parse second parameter
             params.push(self.parse_simple_pattern()?);
+        } else {
+            // Prefix syntax: consume ( op ) then parse all params
+            self.consume(Token::LParen)?;
+            self.advance(); // consume the operator token
+            self.consume(Token::RParen)?;
+            while self.is_pattern_start() && !self.check(&Token::Eq) {
+                params.push(self.parse_simple_pattern()?);
+            }
         }
-
-        self.consume(Token::Eq)?;
-        let body = self.parse_expr()?;
-
-        self.match_token(&Token::DoubleSemi);
-
-        Ok(Item::Decl(Decl::OperatorDef {
-            op,
-            params,
-            body,
-        }))
-    }
-
-    /// Parse infix operator definition: let a <|> b = body
-    fn parse_operator_def_infix(&mut self, start: Span, first_param_name: String, op: String) -> Result<Item, ParseError> {
-        // Consume the operator token
-        self.advance();
-
-        // Create first param from the identifier we already parsed
-        let first_param = Spanned::new(
-            PatternKind::Var(first_param_name),
-            start,
-        );
-
-        // Parse second parameter
-        let second_param = self.parse_simple_pattern()?;
-
-        let params = vec![first_param, second_param];
 
         self.consume(Token::Eq)?;
         let body = self.parse_expr()?;
@@ -408,34 +367,9 @@ impl Parser {
 
         // Parse one or more operator symbols
         let mut operators = Vec::new();
-        loop {
-            match self.peek() {
-                Token::OpSymbol(s) => {
-                    operators.push(s.clone());
-                    self.advance();
-                }
-                // Also accept built-in operator tokens
-                Token::Plus => { operators.push("+".to_string()); self.advance(); }
-                Token::Minus => { operators.push("-".to_string()); self.advance(); }
-                Token::Star => { operators.push("*".to_string()); self.advance(); }
-                Token::Slash => { operators.push("/".to_string()); self.advance(); }
-                Token::Percent => { operators.push("%".to_string()); self.advance(); }
-                Token::EqEq => { operators.push("==".to_string()); self.advance(); }
-                Token::Neq => { operators.push("!=".to_string()); self.advance(); }
-                Token::Lt => { operators.push("<".to_string()); self.advance(); }
-                Token::Gt => { operators.push(">".to_string()); self.advance(); }
-                Token::Lte => { operators.push("<=".to_string()); self.advance(); }
-                Token::Gte => { operators.push(">=".to_string()); self.advance(); }
-                Token::AndAnd => { operators.push("&&".to_string()); self.advance(); }
-                Token::OrOr => { operators.push("||".to_string()); self.advance(); }
-                Token::Cons => { operators.push("::".to_string()); self.advance(); }
-                Token::Concat => { operators.push("++".to_string()); self.advance(); }
-                Token::Compose => { operators.push(">>".to_string()); self.advance(); }
-                Token::ComposeBack => { operators.push("<<".to_string()); self.advance(); }
-                Token::PipeOp => { operators.push("|>".to_string()); self.advance(); }
-                Token::PipeBack => { operators.push("<|".to_string()); self.advance(); }
-                _ => break,
-            }
+        while let Some(op_str) = self.peek().operator_symbol() {
+            operators.push(op_str);
+            self.advance();
         }
 
         if operators.is_empty() {
@@ -892,7 +826,19 @@ impl Parser {
     // ========================================================================
 
     pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_expr_seq()
+        self.parse_expr_in(ExprContext::Full)
+    }
+
+    /// Parse an expression in a specific context.
+    /// This is the main entry point for context-aware expression parsing.
+    fn parse_expr_in(&mut self, ctx: ExprContext) -> Result<Expr, ParseError> {
+        if ctx.allows_seq() {
+            self.parse_expr_seq()
+        } else if ctx.allows_let() {
+            self.parse_expr_let()
+        } else {
+            self.parse_expr_binary(0)
+        }
     }
 
     fn parse_expr_seq(&mut self) -> Result<Expr, ParseError> {
@@ -927,18 +873,19 @@ impl Parser {
             // Check for prefix operator syntax: let (<|>) a b = ... in ...
             if self.check(&Token::LParen) {
                 if let Some(op) = self.peek_operator_in_parens() {
-                    return self.parse_operator_let_expr_prefix(start, op);
+                    return self.parse_operator_let_expr(start, op, None);
                 }
             }
 
             // First, try to parse a simple pattern (for regular let or function name)
+            let first_span = self.current_span();
             let first_pattern = self.parse_simple_pattern()?;
 
             // Check for infix operator syntax: let a <|> b = ... in ...
             // But only if first_pattern is a Var (identifier)
             if let PatternKind::Var(ref name) = first_pattern.node {
                 if let Some(op) = self.try_peek_operator() {
-                    return self.parse_operator_let_expr_infix(start, name.clone(), op);
+                    return self.parse_operator_let_expr(start, op, Some((name.clone(), first_span)));
                 }
             }
 
@@ -986,64 +933,27 @@ impl Parser {
         }
     }
 
-    /// Parse prefix operator let-expression: let (<|>) a b = e in body
-    fn parse_operator_let_expr_prefix(&mut self, start: Span, op: String) -> Result<Expr, ParseError> {
-        // Consume ( op )
-        self.consume(Token::LParen)?;
-        self.advance(); // consume the operator token
-        self.consume(Token::RParen)?;
-
-        // Parse parameters
+    /// Parse operator let-expression (both prefix and infix syntax)
+    /// Prefix: let (<|>) a b = e in body
+    /// Infix: let a <|> b = e in body
+    fn parse_operator_let_expr(&mut self, start: Span, op: String, first_param: Option<(String, Span)>) -> Result<Expr, ParseError> {
         let mut params = Vec::new();
-        while self.is_pattern_start() && !self.check(&Token::Eq) {
+
+        if let Some((name, param_span)) = first_param {
+            // Infix syntax: we have the first param already, consume the operator
+            self.advance();
+            params.push(Spanned::new(PatternKind::Var(name), param_span));
+            // Parse second parameter
             params.push(self.parse_simple_pattern()?);
+        } else {
+            // Prefix syntax: consume ( op ) then parse all params
+            self.consume(Token::LParen)?;
+            self.advance(); // consume the operator token
+            self.consume(Token::RParen)?;
+            while self.is_pattern_start() && !self.check(&Token::Eq) {
+                params.push(self.parse_simple_pattern()?);
+            }
         }
-
-        self.consume(Token::Eq)?;
-        let value_expr = self.parse_expr()?;
-        self.consume(Token::In)?;
-        let in_body = self.parse_expr()?;
-
-        let span = start.merge(&in_body.span);
-
-        // Create a lambda for the operator: fun params -> value_expr
-        let lambda_span = value_expr.span.clone();
-        let lambda = Spanned::new(
-            ExprKind::Lambda {
-                params,
-                body: Rc::new(value_expr),
-            },
-            lambda_span,
-        );
-
-        // Create a Var pattern for the operator name
-        let op_pattern = Spanned::new(PatternKind::Var(op), start.clone());
-
-        Ok(Spanned::new(
-            ExprKind::Let {
-                pattern: op_pattern,
-                value: Rc::new(lambda),
-                body: Some(Rc::new(in_body)),
-            },
-            span,
-        ))
-    }
-
-    /// Parse infix operator let-expression: let a <|> b = e in body
-    fn parse_operator_let_expr_infix(&mut self, start: Span, first_param_name: String, op: String) -> Result<Expr, ParseError> {
-        // Consume the operator token
-        self.advance();
-
-        // Create first param from the identifier we already parsed
-        let first_param = Spanned::new(
-            PatternKind::Var(first_param_name),
-            start.clone(),
-        );
-
-        // Parse second parameter
-        let second_param = self.parse_simple_pattern()?;
-
-        let params = vec![first_param, second_param];
 
         self.consume(Token::Eq)?;
         let value_expr = self.parse_expr()?;
@@ -1106,13 +1016,12 @@ impl Parser {
             let start = self.current_span();
             self.advance();
 
-            // Use parse_expr_let for branches to exclude top-level sequences
-            // (like OCaml: sequences in branches require parentheses)
-            let cond = self.parse_expr_let()?;
+            // Use NoSeq context for branches - sequences require parentheses
+            let cond = self.parse_expr_in(ExprContext::NoSeq)?;
             self.consume(Token::Then)?;
-            let then_branch = self.parse_expr_let()?;
+            let then_branch = self.parse_expr_in(ExprContext::NoSeq)?;
             self.consume(Token::Else)?;
-            let else_branch = self.parse_expr_let()?;
+            let else_branch = self.parse_expr_in(ExprContext::NoSeq)?;
 
             let span = start.merge(&else_branch.span);
             Ok(Spanned::new(
@@ -1151,7 +1060,7 @@ impl Parser {
             self.consume(Token::LArrow)?;
             let channel = self.parse_expr_app()?; // Parse channel expr (no operators to avoid <- ambiguity)
             self.consume(Token::Arrow)?;
-            let body = self.parse_expr_binary(0)?; // Body can have operators
+            let body = self.parse_expr_in(ExprContext::NoSeq)?; // Body allows let/if/fun
 
             arms.push(SelectArm {
                 channel,
@@ -1180,7 +1089,7 @@ impl Parser {
         }
 
         self.consume(Token::Arrow)?;
-        let body = self.parse_expr()?;
+        let body = self.parse_expr_in(ExprContext::Full)?; // Lambda bodies allow full language
 
         let span = start.merge(&body.span);
         Ok(Spanned::new(
@@ -1205,15 +1114,15 @@ impl Parser {
         loop {
             let pattern = self.parse_pattern()?;
 
-            // Optional guard
+            // Optional guard - uses BinaryOnly context (intentional restriction)
             let guard = if self.match_token(&Token::If) {
-                Some(self.parse_expr_binary(0)?)
+                Some(self.parse_expr_in(ExprContext::BinaryOnly)?)
             } else {
                 None
             };
 
             self.consume(Token::Arrow)?;
-            let body = self.parse_expr_binary(0)?;
+            let body = self.parse_expr_in(ExprContext::NoSeq)?; // Body allows let/if/fun
 
             arms.push(MatchArm {
                 pattern,
@@ -1319,31 +1228,7 @@ impl Parser {
     /// Check if the current token is an operator and return its string representation.
     fn peek_operator_symbol(&self) -> Option<(String, Span)> {
         let span = self.current_span();
-        let op_str = match self.peek() {
-            // Built-in operators
-            Token::Plus => "+".to_string(),
-            Token::Minus => "-".to_string(),
-            Token::Star => "*".to_string(),
-            Token::Slash => "/".to_string(),
-            Token::Percent => "%".to_string(),
-            Token::EqEq => "==".to_string(),
-            Token::Neq => "!=".to_string(),
-            Token::Lt => "<".to_string(),
-            Token::Gt => ">".to_string(),
-            Token::Lte => "<=".to_string(),
-            Token::Gte => ">=".to_string(),
-            Token::AndAnd => "&&".to_string(),
-            Token::OrOr => "||".to_string(),
-            Token::Cons => "::".to_string(),
-            Token::Concat => "++".to_string(),
-            Token::Compose => ">>".to_string(),
-            Token::ComposeBack => "<<".to_string(),
-            Token::PipeOp => "|>".to_string(),
-            Token::PipeBack => "<|".to_string(),
-            // User-defined operators
-            Token::OpSymbol(s) => s.clone(),
-            _ => return None,
-        };
+        let op_str = self.peek().operator_symbol()?;
         Some((op_str, span))
     }
 
@@ -1691,111 +1576,17 @@ impl Parser {
         }
     }
 
+    /// Parse a simple pattern (constructor with args allowed)
     fn parse_simple_pattern(&mut self) -> Result<Pattern, ParseError> {
-        let start = self.current_span();
-
-        match self.peek().clone() {
-            Token::Underscore => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Wildcard, start))
-            }
-            Token::Ident(name) => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Var(name), start))
-            }
-            Token::UpperIdent(name) => {
-                self.advance();
-                // Constructor pattern
-                let mut args = Vec::new();
-                while self.is_simple_pattern_atom() {
-                    args.push(self.parse_pattern_atom()?);
-                }
-                let span = if args.is_empty() {
-                    start
-                } else {
-                    start.merge(&args.last().unwrap().span)
-                };
-                Ok(Spanned::new(
-                    PatternKind::Constructor { name, args },
-                    span,
-                ))
-            }
-            Token::Int(n) => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Lit(Literal::Int(n)), start))
-            }
-            Token::String(s) => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Lit(Literal::String(s)), start))
-            }
-            Token::Char(c) => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Lit(Literal::Char(c)), start))
-            }
-            Token::True => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Lit(Literal::Bool(true)), start))
-            }
-            Token::False => {
-                self.advance();
-                Ok(Spanned::new(PatternKind::Lit(Literal::Bool(false)), start))
-            }
-            Token::LParen => {
-                self.advance();
-                if self.match_token(&Token::RParen) {
-                    // Unit pattern
-                    let span = start.merge(&self.current_span());
-                    return Ok(Spanned::new(PatternKind::Lit(Literal::Unit), span));
-                }
-
-                let first = self.parse_pattern()?;
-
-                if self.match_token(&Token::Comma) {
-                    // Tuple pattern
-                    let mut pats = vec![first];
-                    loop {
-                        if self.check(&Token::RParen) {
-                            break;
-                        }
-                        pats.push(self.parse_pattern()?);
-                        if !self.match_token(&Token::Comma) {
-                            break;
-                        }
-                    }
-                    self.consume(Token::RParen)?;
-                    let span = start.merge(&self.current_span());
-                    Ok(Spanned::new(PatternKind::Tuple(pats), span))
-                } else {
-                    // Parenthesized pattern
-                    self.consume(Token::RParen)?;
-                    Ok(first)
-                }
-            }
-            Token::LBracket => {
-                self.advance();
-                let mut pats = Vec::new();
-
-                if !self.check(&Token::RBracket) {
-                    loop {
-                        pats.push(self.parse_pattern()?);
-                        if !self.match_token(&Token::Comma) {
-                            break;
-                        }
-                        if self.check(&Token::RBracket) {
-                            break;
-                        }
-                    }
-                }
-
-                self.consume(Token::RBracket)?;
-                let span = start.merge(&self.current_span());
-                Ok(Spanned::new(PatternKind::List(pats), span))
-            }
-            _ => Err(self.unexpected_token("pattern")),
-        }
+        self.parse_pattern_primary(true)
     }
 
-    fn is_simple_pattern_atom(&self) -> bool {
+    /// Parse a pattern atom (no constructor args - used for constructor arguments themselves)
+    fn parse_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
+        self.parse_pattern_primary(false)
+    }
+
+    fn is_pattern_atom(&self) -> bool {
         matches!(
             self.peek(),
             Token::Ident(_)
@@ -1811,7 +1602,9 @@ impl Parser {
         )
     }
 
-    fn parse_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
+    /// Unified pattern parsing - the allow_constructor_args parameter controls whether
+    /// constructors can take arguments (true for simple patterns, false for atoms)
+    fn parse_pattern_primary(&mut self, allow_constructor_args: bool) -> Result<Pattern, ParseError> {
         let start = self.current_span();
 
         match self.peek().clone() {
@@ -1824,12 +1617,26 @@ impl Parser {
                 Ok(Spanned::new(PatternKind::Var(name), start))
             }
             Token::UpperIdent(name) => {
-                // Nullary constructor as pattern atom (e.g., Get in "StateOp Get k")
                 self.advance();
-                Ok(Spanned::new(
-                    PatternKind::Constructor { name, args: vec![] },
-                    start,
-                ))
+                if allow_constructor_args {
+                    // Constructor with args: "Some x" or "Pair a b"
+                    let mut args = Vec::new();
+                    while self.is_pattern_atom() {
+                        args.push(self.parse_pattern_atom()?);
+                    }
+                    let span = if args.is_empty() {
+                        start
+                    } else {
+                        start.merge(&args.last().unwrap().span)
+                    };
+                    Ok(Spanned::new(PatternKind::Constructor { name, args }, span))
+                } else {
+                    // Nullary constructor as atom: "Get" in "StateOp Get k"
+                    Ok(Spanned::new(
+                        PatternKind::Constructor { name, args: vec![] },
+                        start,
+                    ))
+                }
             }
             Token::Int(n) => {
                 self.advance();
@@ -2311,6 +2118,69 @@ mod tests {
                     assert!(body.is_some());
                 }
                 _ => panic!("expected LetRec expression"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_let_in_match_arm() {
+        // Match arm bodies should allow let expressions
+        let prog = parse("match x with | Some y -> let z = y + 1 in z | None -> 0");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 2);
+                    // First arm body should be a Let expression
+                    match &arms[0].body.node {
+                        ExprKind::Let { .. } => {}
+                        _ => panic!("expected Let expression in match arm body"),
+                    }
+                }
+                _ => panic!("expected Match expression"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_if_in_match_arm() {
+        // Match arm bodies should allow if expressions
+        let prog = parse("match x with | Some y -> if y > 0 then y else 0 | None -> 0");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 2);
+                    // First arm body should be an If expression
+                    match &arms[0].body.node {
+                        ExprKind::If { .. } => {}
+                        _ => panic!("expected If expression in match arm body"),
+                    }
+                }
+                _ => panic!("expected Match expression"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_fun_in_match_arm() {
+        // Match arm bodies should allow lambda expressions
+        let prog = parse("match x with | Some y -> fun z -> y + z | None -> fun z -> z");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 2);
+                    // First arm body should be a Lambda expression
+                    match &arms[0].body.node {
+                        ExprKind::Lambda { .. } => {}
+                        _ => panic!("expected Lambda expression in match arm body"),
+                    }
+                }
+                _ => panic!("expected Match expression"),
             },
             _ => panic!("expected expression"),
         }

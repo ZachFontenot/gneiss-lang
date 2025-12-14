@@ -1409,6 +1409,11 @@ impl Interpreter {
             (BinOp::Lte, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
             (BinOp::Gte, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
 
+            (BinOp::Lt, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a < b)),
+            (BinOp::Gt, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a > b)),
+            (BinOp::Lte, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a <= b)),
+            (BinOp::Gte, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a >= b)),
+
             // Boolean
             (BinOp::And, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
             (BinOp::Or, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),

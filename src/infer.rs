@@ -827,8 +827,8 @@ impl Inferencer {
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::Lte | BinOp::Gte => {
-                        self.unify_at(&left_result.ty, &Type::Int, &left.span)?;
-                        self.unify_at(&right_result.ty, &Type::Int, &right.span)?;
+                        // Comparison operators work on any type that unifies (Int, Char, etc.)
+                        self.unify_at(&left_result.ty, &right_result.ty, &right.span)?;
                         Type::Bool
                     }
                     BinOp::And | BinOp::Or => {

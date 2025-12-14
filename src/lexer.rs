@@ -92,6 +92,41 @@ pub enum Token {
     Eof,
 }
 
+impl Token {
+    /// If this token represents an operator, return its symbol string.
+    /// This is the single source of truth for token-to-operator conversion.
+    pub fn operator_symbol(&self) -> Option<String> {
+        match self {
+            Token::Plus => Some("+".to_string()),
+            Token::Minus => Some("-".to_string()),
+            Token::Star => Some("*".to_string()),
+            Token::Slash => Some("/".to_string()),
+            Token::Percent => Some("%".to_string()),
+            Token::EqEq => Some("==".to_string()),
+            Token::Neq => Some("!=".to_string()),
+            Token::Lt => Some("<".to_string()),
+            Token::Gt => Some(">".to_string()),
+            Token::Lte => Some("<=".to_string()),
+            Token::Gte => Some(">=".to_string()),
+            Token::AndAnd => Some("&&".to_string()),
+            Token::OrOr => Some("||".to_string()),
+            Token::Cons => Some("::".to_string()),
+            Token::Concat => Some("++".to_string()),
+            Token::PipeOp => Some("|>".to_string()),
+            Token::PipeBack => Some("<|".to_string()),
+            Token::Compose => Some(">>".to_string()),
+            Token::ComposeBack => Some("<<".to_string()),
+            Token::OpSymbol(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this token represents an operator
+    pub fn is_operator(&self) -> bool {
+        self.operator_symbol().is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SpannedToken {
     pub token: Token,

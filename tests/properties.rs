@@ -546,6 +546,21 @@ fn test_nested_let_polymorphism() {
     assert!(result.is_ok(), "Nested let-polymorphism should work: {:?}", result);
 }
 
+#[test]
+fn test_char_comparison_operators() {
+    // Comparison operators should work on Char, not just Int
+    let source = "fun c -> c >= '0' && c <= '9'";
+    let result = infer_source(source);
+    assert!(result.is_ok(), "Char comparison should type-check: {:?}", result);
+
+    // The result should be Char -> Bool
+    if let Ok(ty) = result {
+        let ty_str = format!("{}", ty);
+        assert!(ty_str.contains("Char") && ty_str.contains("Bool"),
+            "Expected Char -> Bool, got {}", ty_str);
+    }
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
