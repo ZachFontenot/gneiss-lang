@@ -49,7 +49,11 @@ pub enum Frame {
     /// After evaluating left operand, evaluate right
     BinOpLeft { op: BinOp, right: Rc<Expr>, env: Env },
     /// After evaluating right operand, compute the result
-    BinOpRight { op: BinOp, left: Value },
+    /// env is needed to look up user-defined operators
+    BinOpRight { op: BinOp, left: Value, env: Env },
+    /// Apply the incoming value (a function) to this argument
+    /// Used for user-defined operator evaluation: ((op left) right)
+    ApplyTo { arg: Value },
 
     /// After evaluating operand, apply unary operator
     UnaryOp { op: UnaryOp },
@@ -385,6 +389,10 @@ impl Interpreter {
             env.define("print".into(), Value::Builtin("print".into()));
             env.define("int_to_string".into(), Value::Builtin("int_to_string".into()));
             env.define("string_length".into(), Value::Builtin("string_length".into()));
+            env.define("string_to_chars".into(), Value::Builtin("string_to_chars".into()));
+            env.define("chars_to_string".into(), Value::Builtin("chars_to_string".into()));
+            env.define("char_to_string".into(), Value::Builtin("char_to_string".into()));
+            env.define("char_to_int".into(), Value::Builtin("char_to_int".into()));
         }
 
         Self {
@@ -497,6 +505,35 @@ impl Interpreter {
             Decl::Val { .. } => {
                 // Type signatures are handled during type inference
                 // At runtime, nothing to do
+                Ok(())
+            }
+            Decl::OperatorDef { op, params, body } => {
+                // Operator definitions are like regular function definitions
+                // The operator name is bound to a closure in the global env
+                let closure = Value::Closure {
+                    params: params.clone(),
+                    body: Rc::new(body.clone()),
+                    env: self.global_env.clone(),
+                };
+                self.global_env.borrow_mut().define(op.clone(), closure);
+                Ok(())
+            }
+            Decl::Fixity(_) => {
+                // Fixity declarations are handled during parsing
+                // At runtime, nothing to do
+                Ok(())
+            }
+            Decl::LetRec { bindings } => {
+                // Create all closures that share the global environment
+                // They can reference each other since they all look up in global_env
+                for binding in bindings {
+                    let closure = Value::Closure {
+                        params: binding.params.clone(),
+                        body: Rc::new(binding.body.clone()),
+                        env: self.global_env.clone(),
+                    };
+                    self.global_env.borrow_mut().define(binding.name.node.clone(), closure);
+                }
                 Ok(())
             }
         }
@@ -644,6 +681,27 @@ impl Interpreter {
                 StepResult::Continue(State::Eval { expr: value.clone(), env, cont })
             }
 
+            ExprKind::LetRec { bindings, body } => {
+                // Create a shared recursive environment
+                let rec_env = EnvInner::with_parent(&env);
+
+                // Create all closures with the shared env so they can reference each other
+                for binding in bindings {
+                    let closure = Value::Closure {
+                        params: binding.params.clone(),
+                        body: Rc::new(binding.body.clone()),
+                        env: rec_env.clone(),
+                    };
+                    rec_env.borrow_mut().define(binding.name.node.clone(), closure);
+                }
+
+                // Evaluate body with the recursive environment
+                match body {
+                    Some(b) => StepResult::Continue(State::Eval { expr: b.clone(), env: rec_env, cont }),
+                    None => StepResult::Continue(State::Apply { value: Value::Unit, cont }),
+                }
+            }
+
             ExprKind::If { cond, then_branch, else_branch } => {
                 cont.push(Frame::If {
                     then_branch: then_branch.clone(),
@@ -655,7 +713,7 @@ impl Interpreter {
 
             ExprKind::BinOp { op, left, right } => {
                 cont.push(Frame::BinOpLeft {
-                    op: *op,
+                    op: op.clone(),
                     right: right.clone(),
                     env: env.clone(),
                 });
@@ -886,15 +944,41 @@ impl Interpreter {
             }
 
             Some(Frame::BinOpLeft { op, right, env }) => {
-                cont.push(Frame::BinOpRight { op, left: value });
+                cont.push(Frame::BinOpRight { op, left: value, env: env.clone() });
                 StepResult::Continue(State::Eval { expr: right, env, cont })
             }
 
-            Some(Frame::BinOpRight { op, left }) => {
-                match self.eval_binop(op, left, value) {
-                    Ok(result) => StepResult::Continue(State::Apply { value: result, cont }),
-                    Err(e) => StepResult::Error(e),
+            Some(Frame::BinOpRight { op, left, env }) => {
+                // Handle user-defined operators by looking them up as functions
+                if let BinOp::UserDefined(name) = &op {
+                    let right = value;
+                    // Look up the operator in the environment
+                    match env.borrow().get(name) {
+                        Some(func) => {
+                            // Apply curried: ((op left) right)
+                            // 1. Apply op to left to get a partial application
+                            // 2. Apply the result (partial app) to right
+                            // Push frame to apply result to right
+                            cont.push(Frame::ApplyTo { arg: right }); // step 2
+                            // step 1: apply op to left
+                            self.do_apply(func, left, cont)
+                        }
+                        None => StepResult::Error(EvalError::RuntimeError(
+                            format!("undefined operator: {}", name)
+                        )),
+                    }
+                } else {
+                    // Built-in operator
+                    match self.eval_binop(&op, left, value) {
+                        Ok(result) => StepResult::Continue(State::Apply { value: result, cont }),
+                        Err(e) => StepResult::Error(e),
+                    }
                 }
+            }
+
+            Some(Frame::ApplyTo { arg }) => {
+                // value is a function, apply it to arg
+                self.do_apply(value, arg, cont)
             }
 
             Some(Frame::UnaryOp { op }) => {
@@ -1293,7 +1377,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_binop(&self, op: BinOp, left: Value, right: Value) -> Result<Value, EvalError> {
+    fn eval_binop(&self, op: &BinOp, left: Value, right: Value) -> Result<Value, EvalError> {
         match (op, &left, &right) {
             // Arithmetic
             (BinOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
@@ -1356,6 +1440,12 @@ impl Interpreter {
                 unreachable!("pipe operators should be desugared")
             }
 
+            // User-defined operators are handled in Frame::BinOpRight (lines 913-931)
+            // via curried function application, so they should never reach eval_binop
+            (BinOp::UserDefined(_), _, _) => {
+                unreachable!("user-defined operators should be handled via function application")
+            }
+
             _ => Err(EvalError::TypeError(format!(
                 "cannot apply {:?} to {} and {}",
                 op,
@@ -1392,6 +1482,34 @@ impl Interpreter {
             "string_length" => match arg {
                 Value::String(s) => Ok(Value::Int(s.len() as i64)),
                 _ => Err(EvalError::TypeError("expected string".into())),
+            },
+            "string_to_chars" => match arg {
+                Value::String(s) => {
+                    let chars: Vec<Value> = s.chars().map(Value::Char).collect();
+                    Ok(Value::List(chars))
+                }
+                _ => Err(EvalError::TypeError("expected string".into())),
+            },
+            "chars_to_string" => match arg {
+                Value::List(items) => {
+                    let mut s = String::new();
+                    for item in items {
+                        match item {
+                            Value::Char(c) => s.push(c),
+                            _ => return Err(EvalError::TypeError("expected list of chars".into())),
+                        }
+                    }
+                    Ok(Value::String(s))
+                }
+                _ => Err(EvalError::TypeError("expected list".into())),
+            },
+            "char_to_string" => match arg {
+                Value::Char(c) => Ok(Value::String(c.to_string())),
+                _ => Err(EvalError::TypeError("expected char".into())),
+            },
+            "char_to_int" => match arg {
+                Value::Char(c) => Ok(Value::Int(c as i64)),
+                _ => Err(EvalError::TypeError("expected char".into())),
             },
             _ => Err(EvalError::RuntimeError(format!(
                 "unknown builtin: {}",
@@ -2426,5 +2544,100 @@ let result = show 42
 
         let result = interp.eval_expr(&env, &show_42).unwrap();
         assert!(matches!(result, Value::String(s) if s == "42"));
+    }
+
+    // ========================================================================
+    // User-defined operators
+    // ========================================================================
+
+    #[test]
+    fn test_user_defined_operator_basic() {
+        // Define and use a simple user-defined operator using let-in
+        let val = eval(r#"
+            let (<|>) a b = a + b in
+            3 <|> 5
+        "#).unwrap();
+        // result should be 8
+        assert!(matches!(val, Value::Int(8)));
+    }
+
+    #[test]
+    fn test_user_defined_operator_prefix_syntax() {
+        // Define operator with prefix syntax
+        let val = eval(r#"
+            let (<+>) a b = a * b in
+            4 <+> 5
+        "#).unwrap();
+        assert!(matches!(val, Value::Int(20)));
+    }
+
+    #[test]
+    fn test_user_defined_operator_complex() {
+        // More complex operator definition
+        let val = eval(r#"
+            let (<?>) a b = if a > b then a else b in
+            10 <?> 5
+        "#).unwrap();
+        assert!(matches!(val, Value::Int(10)));
+    }
+
+    // ========================================================================
+    // Mutual recursion (let rec ... and ...)
+    // ========================================================================
+
+    #[test]
+    fn test_let_rec_simple() {
+        // Simple recursive function using let rec
+        let val = eval(r#"
+            let rec factorial n = if n == 0 then 1 else n * factorial (n - 1) in
+            factorial 5
+        "#).unwrap();
+        assert!(matches!(val, Value::Int(120)));
+    }
+
+    #[test]
+    fn test_let_rec_mutual_even_odd() {
+        // Classic mutual recursion: is_even and is_odd
+        let val = eval(r#"
+            let rec is_even n = if n == 0 then true else is_odd (n - 1)
+            and is_odd n = if n == 0 then false else is_even (n - 1)
+            in is_even 10
+        "#).unwrap();
+        assert!(matches!(val, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_let_rec_mutual_even_odd_false() {
+        // Test the other branch
+        let val = eval(r#"
+            let rec is_even n = if n == 0 then true else is_odd (n - 1)
+            and is_odd n = if n == 0 then false else is_even (n - 1)
+            in is_even 7
+        "#).unwrap();
+        assert!(matches!(val, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_let_rec_mutual_is_odd() {
+        // Test is_odd function
+        let val = eval(r#"
+            let rec is_even n = if n == 0 then true else is_odd (n - 1)
+            and is_odd n = if n == 0 then false else is_even (n - 1)
+            in is_odd 7
+        "#).unwrap();
+        assert!(matches!(val, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_let_rec_three_functions() {
+        // Three mutually recursive functions
+        let val = eval(r#"
+            let rec f n = if n == 0 then 0 else g (n - 1)
+            and g n = if n == 0 then 1 else h (n - 1)
+            and h n = if n == 0 then 2 else f (n - 1)
+            in f 6
+        "#).unwrap();
+        // f(6) -> g(5) -> h(4) -> f(3) -> g(2) -> h(1) -> f(0) = 0
+        assert!(matches!(val, Value::Int(0)));
     }
 }

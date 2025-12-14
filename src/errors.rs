@@ -5,8 +5,59 @@
 //! - Levenshtein distance for "did you mean?" suggestions
 //! - Source snippet formatting with carets/underlines
 //! - First-person error message templates
+//! - Compiler warnings (non-fatal issues)
 
 use crate::ast::{SourceMap, Span};
+
+// ============================================================================
+// Warnings
+// ============================================================================
+
+/// Compiler warnings (non-fatal issues)
+#[derive(Debug, Clone)]
+pub enum Warning {
+    /// User-defined operator shadows a built-in operator
+    ShadowingBuiltinOperator { op: String, span: Span },
+}
+
+impl Warning {
+    /// Format the warning for display
+    pub fn format(&self, source_map: &SourceMap, filename: Option<&str>, colors: &Colors) -> String {
+        match self {
+            Warning::ShadowingBuiltinOperator { op, span } => {
+                let mut out = String::new();
+
+                out.push_str(&format!(
+                    "{}-- WARNING {}{}",
+                    colors.yellow(),
+                    "-".repeat(55),
+                    colors.reset()
+                ));
+                out.push('\n');
+                out.push('\n');
+
+                let pos = source_map.position(span.start);
+                let file = filename.unwrap_or("<input>");
+                out.push_str(&format!("{}{}:{}{}\n\n", colors.bold(), file, pos, colors.reset()));
+
+                out.push_str(&format!(
+                    "You are shadowing the built-in operator `{}{}{}`.\n\
+                     This may cause confusion, as the operator will no longer have\n\
+                     its default behavior in this scope.",
+                    colors.bold(),
+                    op,
+                    colors.reset()
+                ));
+                out.push('\n');
+                out.push('\n');
+                out.push_str(&format_snippet(source_map, span, colors));
+                out.push('\n');
+
+                out
+            }
+        }
+    }
+}
 
 /// ANSI color codes for terminal output
 #[derive(Debug, Clone)]

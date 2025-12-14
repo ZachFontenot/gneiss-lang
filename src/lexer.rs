@@ -21,6 +21,8 @@ pub enum Token {
 
     // Keywords
     Let,
+    Rec,  // for 'let rec'
+    And,  // for mutual recursion: 'let rec f = ... and g = ...'
     In,
     Fun,
     Match,
@@ -82,6 +84,9 @@ pub enum Token {
     ComposeBack, // <<
     Underscore,  // _
     Dot,      // .
+
+    // User-defined operator symbol (e.g., <|>, >>=, ***)
+    OpSymbol(String),
 
     // Special
     Eof,
@@ -271,7 +276,7 @@ impl<'a> Lexer<'a> {
             '_' if !self.peek().map_or(false, is_ident_continue) => Token::Underscore,
             '.' => Token::Dot,
 
-            // Operators that might be multi-char
+            // Colon: either `:` (type annotation) or `::` (cons)
             ':' => {
                 if self.peek() == Some(':') {
                     self.advance();
@@ -280,83 +285,17 @@ impl<'a> Lexer<'a> {
                     Token::Colon
                 }
             }
-            '=' => {
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Token::EqEq
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    Token::FatArrow
-                } else {
-                    Token::Eq
-                }
-            }
-            '!' => {
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Token::Neq
-                } else {
-                    return Err(LexError::UnexpectedChar('!', Span::new(start, self.pos)));
-                }
-            }
+            // Left angle: special case for `<-` (left arrow), otherwise operator
             '<' => {
                 if self.peek() == Some('-') {
                     self.advance();
                     Token::LArrow
-                } else if self.peek() == Some('=') {
-                    self.advance();
-                    Token::Lte
-                } else if self.peek() == Some('|') {
-                    self.advance();
-                    Token::PipeBack
-                } else if self.peek() == Some('<') {
-                    self.advance();
-                    Token::ComposeBack
                 } else {
-                    Token::Lt
+                    self.lex_operator(c)
                 }
             }
-            '>' => {
-                if self.peek() == Some('=') {
-                    self.advance();
-                    Token::Gte
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    Token::Compose
-                } else {
-                    Token::Gt
-                }
-            }
-            '+' => {
-                if self.peek() == Some('+') {
-                    self.advance();
-                    Token::Concat
-                } else {
-                    Token::Plus
-                }
-            }
-            '*' => Token::Star,
-            '/' => Token::Slash,
-            '%' => Token::Percent,
-            '&' => {
-                if self.peek() == Some('&') {
-                    self.advance();
-                    Token::AndAnd
-                } else {
-                    return Err(LexError::UnexpectedChar('&', Span::new(start, self.pos)));
-                }
-            }
-            '|' => {
-                if self.peek() == Some('|') {
-                    self.advance();
-                    Token::OrOr
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    Token::PipeOp
-                } else {
-                    Token::Pipe
-                }
-            }
+            // All other operator characters: use generic operator lexing
+            c if is_operator_char(c) => self.lex_operator(c),
 
             // String literal
             '"' => self.lex_string(start)?,
@@ -465,6 +404,24 @@ impl<'a> Lexer<'a> {
         Ok(Token::Int(n))
     }
 
+    /// Lex an operator sequence starting with the given character.
+    /// Collects all consecutive operator characters and classifies the result.
+    fn lex_operator(&mut self, first: char) -> Token {
+        let mut s = String::new();
+        s.push(first);
+
+        while let Some(c) = self.peek() {
+            if is_operator_char(c) {
+                s.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        classify_operator(&s)
+    }
+
     fn lex_ident(&mut self, first: char) -> Token {
         let mut s = String::new();
         s.push(first);
@@ -481,6 +438,8 @@ impl<'a> Lexer<'a> {
         // Check for keywords
         match s.as_str() {
             "let" => Token::Let,
+            "rec" => Token::Rec,
+            "and" => Token::And,
             "in" => Token::In,
             "fun" => Token::Fun,
             "match" => Token::Match,
@@ -516,6 +475,49 @@ impl<'a> Lexer<'a> {
 
 fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Characters that can appear in operator symbols.
+/// Note: `-` is handled specially due to `--` comments.
+fn is_operator_char(c: char) -> bool {
+    matches!(c, '!' | '$' | '%' | '&' | '*' | '+' | '/' | '<' | '=' | '>' | '?' | '@' | '^' | '|' | '~')
+}
+
+/// Classify an operator string into a specific token or OpSymbol
+fn classify_operator(s: &str) -> Token {
+    match s {
+        // Comparison
+        "==" => Token::EqEq,
+        "!=" => Token::Neq,
+        "<" => Token::Lt,
+        ">" => Token::Gt,
+        "<=" => Token::Lte,
+        ">=" => Token::Gte,
+        // Arithmetic
+        "+" => Token::Plus,
+        "*" => Token::Star,
+        "/" => Token::Slash,
+        "%" => Token::Percent,
+        // Boolean
+        "&&" => Token::AndAnd,
+        "||" => Token::OrOr,
+        // List
+        "++" => Token::Concat,
+        // Pipe
+        "|>" => Token::PipeOp,
+        "<|" => Token::PipeBack,
+        // Compose
+        ">>" => Token::Compose,
+        "<<" => Token::ComposeBack,
+        // Fat arrow (used in match)
+        "=>" => Token::FatArrow,
+        // Single pipe is pattern separator, not an operator
+        "|" => Token::Pipe,
+        // Single equals is assignment
+        "=" => Token::Eq,
+        // Everything else is a user-defined operator
+        _ => Token::OpSymbol(s.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -594,5 +596,88 @@ mod tests {
         let toks = tokens("trait");
         assert!(!matches!(toks[0], Token::Ident(_)));
         assert!(matches!(toks[0], Token::Trait));
+    }
+
+    #[test]
+    fn test_user_defined_operators() {
+        // User-defined operators should be lexed as OpSymbol
+        assert_eq!(
+            tokens("<|>"),
+            vec![Token::OpSymbol("<|>".into()), Token::Eof]
+        );
+        assert_eq!(
+            tokens(">>="),
+            vec![Token::OpSymbol(">>=".into()), Token::Eof]
+        );
+        assert_eq!(
+            tokens("***"),
+            vec![Token::OpSymbol("***".into()), Token::Eof]
+        );
+        assert_eq!(
+            tokens("$"),
+            vec![Token::OpSymbol("$".into()), Token::Eof]
+        );
+        // Built-ins should still work
+        assert_eq!(
+            tokens("+ - * /"),
+            vec![Token::Plus, Token::Minus, Token::Star, Token::Slash, Token::Eof]
+        );
+        // Mixed: built-in followed by user operator
+        assert_eq!(
+            tokens("x <|> y"),
+            vec![
+                Token::Ident("x".into()),
+                Token::OpSymbol("<|>".into()),
+                Token::Ident("y".into()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_arrows_preserved() {
+        // Arrows should not become operators
+        assert_eq!(
+            tokens("->"),
+            vec![Token::Arrow, Token::Eof]
+        );
+        assert_eq!(
+            tokens("<-"),
+            vec![Token::LArrow, Token::Eof]
+        );
+        assert_eq!(
+            tokens("=>"),
+            vec![Token::FatArrow, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn test_rec_and_keywords() {
+        // 'rec' and 'and' should be keywords
+        assert_eq!(
+            tokens("let rec f = 1 and g = 2"),
+            vec![
+                Token::Let,
+                Token::Rec,
+                Token::Ident("f".into()),
+                Token::Eq,
+                Token::Int(1),
+                Token::And,
+                Token::Ident("g".into()),
+                Token::Eq,
+                Token::Int(2),
+                Token::Eof
+            ]
+        );
+        // 'record' should be ident, not 'rec' + 'ord'
+        assert_eq!(
+            tokens("record"),
+            vec![Token::Ident("record".into()), Token::Eof]
+        );
+        // 'android' should be ident
+        assert_eq!(
+            tokens("android"),
+            vec![Token::Ident("android".into()), Token::Eof]
+        );
     }
 }

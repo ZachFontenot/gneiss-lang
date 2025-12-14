@@ -1,7 +1,9 @@
 //! Recursive descent parser for Gneiss
 
 use crate::ast::*;
+use crate::errors::Warning;
 use crate::lexer::{SpannedToken, Token};
+use crate::operators::{OpInfo, OperatorTable};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -18,11 +20,30 @@ pub enum ParseError {
 pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    /// Operator precedence and associativity table
+    op_table: OperatorTable,
+    /// Warnings collected during parsing
+    warnings: Vec<Warning>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            op_table: OperatorTable::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Get collected warnings
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+
+    /// Take ownership of warnings, clearing the internal list
+    pub fn take_warnings(&mut self) -> Vec<Warning> {
+        std::mem::take(&mut self.warnings)
     }
 
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
@@ -49,6 +70,12 @@ impl Parser {
                 self.match_token(&Token::DoubleSemi);
                 Ok(Item::Decl(decl))
             }
+            // Fixity declarations: infixl, infixr, infix
+            Token::Ident(ref s) if s == "infixl" || s == "infixr" || s == "infix" => {
+                let decl = self.parse_fixity_decl()?;
+                self.match_token(&Token::DoubleSemi);
+                Ok(Item::Decl(decl))
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 // Optionally consume ;; after expression
@@ -60,13 +87,38 @@ impl Parser {
 
     /// Parse a let that could be either a declaration or a let-expression.
     /// Returns Item::Decl if no `in`, Item::Expr if `in` is present.
+    ///
+    /// Also handles operator definitions:
+    /// - `let (<|>) a b = ...` (prefix syntax)
+    /// - `let a <|> b = ...` (infix syntax)
+    ///
+    /// And mutual recursion:
+    /// - `let rec f = ... and g = ...`
     fn parse_let_item(&mut self) -> Result<Item, ParseError> {
         let start = self.current_span();
         self.consume(Token::Let)?;
 
-        let name = self.parse_ident()?;
+        // Check for 'rec' keyword for mutual recursion
+        if self.match_token(&Token::Rec) {
+            return self.parse_let_rec(start);
+        }
 
-        // Collect parameters (function syntax: let f x y = ...)
+        // Check for prefix operator syntax: let (<|>) a b = ...
+        if self.check(&Token::LParen) {
+            if let Some(op) = self.peek_operator_in_parens() {
+                return self.parse_operator_def_prefix(start, op);
+            }
+        }
+
+        // Parse first identifier
+        let first_name = self.parse_ident()?;
+
+        // Check for infix operator syntax: let a <|> b = ...
+        if let Some(op) = self.try_peek_operator() {
+            return self.parse_operator_def_infix(start, first_name, op);
+        }
+
+        // Regular let binding/function: let f x y = ...
         let mut params = Vec::new();
         while self.is_pattern_start() && !self.check(&Token::Eq) {
             params.push(self.parse_simple_pattern()?);
@@ -86,7 +138,7 @@ impl Parser {
             let (pattern, value) = if params.is_empty() {
                 // Simple pattern: just the name as a variable pattern
                 let name_pattern = Spanned::new(
-                    PatternKind::Var(name),
+                    PatternKind::Var(first_name),
                     start.clone(),
                 );
                 (name_pattern, value_expr)
@@ -102,7 +154,7 @@ impl Parser {
                     lambda_span,
                 );
                 let name_pattern = Spanned::new(
-                    PatternKind::Var(name),
+                    PatternKind::Var(first_name),
                     start.clone(),
                 );
                 (name_pattern, lambda)
@@ -124,12 +176,296 @@ impl Parser {
             // Optionally consume ;; after declaration
             self.match_token(&Token::DoubleSemi);
             Ok(Item::Decl(Decl::Let {
-                name,
+                name: first_name,
                 type_ann: None,
                 params,
                 body: value_expr,
             }))
         }
+    }
+
+    /// Check if the next tokens are `( <op> )` and return the operator symbol
+    fn peek_operator_in_parens(&self) -> Option<String> {
+        // Current token should be LParen
+        if !matches!(self.peek(), Token::LParen) {
+            return None;
+        }
+        // Look ahead: we need (op) where op is an operator
+        if self.pos + 1 >= self.tokens.len() {
+            return None;
+        }
+        let next = &self.tokens[self.pos + 1].token;
+        let op_str = match next {
+            Token::OpSymbol(s) => s.clone(),
+            Token::Plus => "+".to_string(),
+            Token::Minus => "-".to_string(),
+            Token::Star => "*".to_string(),
+            Token::Slash => "/".to_string(),
+            Token::Percent => "%".to_string(),
+            Token::EqEq => "==".to_string(),
+            Token::Neq => "!=".to_string(),
+            Token::Lt => "<".to_string(),
+            Token::Gt => ">".to_string(),
+            Token::Lte => "<=".to_string(),
+            Token::Gte => ">=".to_string(),
+            Token::AndAnd => "&&".to_string(),
+            Token::OrOr => "||".to_string(),
+            Token::Cons => "::".to_string(),
+            Token::Concat => "++".to_string(),
+            Token::Compose => ">>".to_string(),
+            Token::ComposeBack => "<<".to_string(),
+            Token::PipeOp => "|>".to_string(),
+            Token::PipeBack => "<|".to_string(),
+            _ => return None,
+        };
+        // Check that token after operator is RParen
+        if self.pos + 2 >= self.tokens.len() {
+            return None;
+        }
+        if !matches!(self.tokens[self.pos + 2].token, Token::RParen) {
+            return None;
+        }
+        Some(op_str)
+    }
+
+    /// Try to peek for an operator token (for infix syntax detection)
+    fn try_peek_operator(&self) -> Option<String> {
+        match self.peek() {
+            Token::OpSymbol(s) => Some(s.clone()),
+            Token::Plus => Some("+".to_string()),
+            Token::Minus => Some("-".to_string()),
+            Token::Star => Some("*".to_string()),
+            Token::Slash => Some("/".to_string()),
+            Token::Percent => Some("%".to_string()),
+            Token::EqEq => Some("==".to_string()),
+            Token::Neq => Some("!=".to_string()),
+            Token::Lt => Some("<".to_string()),
+            Token::Gt => Some(">".to_string()),
+            Token::Lte => Some("<=".to_string()),
+            Token::Gte => Some(">=".to_string()),
+            Token::AndAnd => Some("&&".to_string()),
+            Token::OrOr => Some("||".to_string()),
+            Token::Cons => Some("::".to_string()),
+            Token::Concat => Some("++".to_string()),
+            Token::Compose => Some(">>".to_string()),
+            Token::ComposeBack => Some("<<".to_string()),
+            Token::PipeOp => Some("|>".to_string()),
+            Token::PipeBack => Some("<|".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Parse prefix operator definition: let (<|>) a b = body
+    fn parse_operator_def_prefix(&mut self, _start: Span, op: String) -> Result<Item, ParseError> {
+        // Consume ( op )
+        self.consume(Token::LParen)?;
+        self.advance(); // consume the operator token
+        self.consume(Token::RParen)?;
+
+        // Parse parameters
+        let mut params = Vec::new();
+        while self.is_pattern_start() && !self.check(&Token::Eq) {
+            params.push(self.parse_simple_pattern()?);
+        }
+
+        self.consume(Token::Eq)?;
+        let body = self.parse_expr()?;
+
+        self.match_token(&Token::DoubleSemi);
+
+        Ok(Item::Decl(Decl::OperatorDef {
+            op,
+            params,
+            body,
+        }))
+    }
+
+    /// Parse infix operator definition: let a <|> b = body
+    fn parse_operator_def_infix(&mut self, start: Span, first_param_name: String, op: String) -> Result<Item, ParseError> {
+        // Consume the operator token
+        self.advance();
+
+        // Create first param from the identifier we already parsed
+        let first_param = Spanned::new(
+            PatternKind::Var(first_param_name),
+            start,
+        );
+
+        // Parse second parameter
+        let second_param = self.parse_simple_pattern()?;
+
+        let params = vec![first_param, second_param];
+
+        self.consume(Token::Eq)?;
+        let body = self.parse_expr()?;
+
+        self.match_token(&Token::DoubleSemi);
+
+        Ok(Item::Decl(Decl::OperatorDef {
+            op,
+            params,
+            body,
+        }))
+    }
+
+    /// Parse mutually recursive let: let rec f x = ... and g y = ...
+    fn parse_let_rec(&mut self, start: Span) -> Result<Item, ParseError> {
+        let mut bindings = Vec::new();
+
+        // Parse first binding
+        bindings.push(self.parse_rec_binding()?);
+
+        // Parse additional bindings with 'and'
+        while self.match_token(&Token::And) {
+            bindings.push(self.parse_rec_binding()?);
+        }
+
+        // Check for 'in' (expression) or end (declaration)
+        if self.check(&Token::In) {
+            self.advance(); // consume 'in'
+            let body = self.parse_expr()?;
+            let span = start.merge(&body.span);
+
+            let expr = Spanned::new(
+                ExprKind::LetRec {
+                    bindings,
+                    body: Some(Rc::new(body)),
+                },
+                span,
+            );
+            self.match_token(&Token::DoubleSemi);
+            Ok(Item::Expr(expr))
+        } else {
+            // Top-level declaration
+            self.match_token(&Token::DoubleSemi);
+            Ok(Item::Decl(Decl::LetRec { bindings }))
+        }
+    }
+
+    /// Parse a single recursive binding: name params = expr
+    fn parse_rec_binding(&mut self) -> Result<RecBinding, ParseError> {
+        let name_start = self.current_span();
+        let name = self.parse_ident()?;
+
+        // Collect parameters
+        let mut params = Vec::new();
+        while self.is_pattern_start() && !self.check(&Token::Eq) {
+            params.push(self.parse_simple_pattern()?);
+        }
+
+        self.consume(Token::Eq)?;
+        let body = self.parse_expr()?;
+
+        Ok(RecBinding {
+            name: Spanned::new(name, name_start),
+            params,
+            body,
+        })
+    }
+
+    /// Parse a fixity declaration: `infixl 6 +` or `infixr 5 :: ++`
+    fn parse_fixity_decl(&mut self) -> Result<Decl, ParseError> {
+        let start = self.current_span();
+
+        // Parse associativity keyword
+        let assoc = match self.peek() {
+            Token::Ident(s) if s == "infixl" => {
+                self.advance();
+                Associativity::Left
+            }
+            Token::Ident(s) if s == "infixr" => {
+                self.advance();
+                Associativity::Right
+            }
+            Token::Ident(s) if s == "infix" => {
+                self.advance();
+                Associativity::None
+            }
+            other => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "infixl, infixr, or infix".to_string(),
+                    found: other.clone(),
+                    span: self.current_span(),
+                });
+            }
+        };
+
+        // Parse precedence (0-9)
+        let precedence = match self.peek() {
+            Token::Int(n) if *n >= 0 && *n <= 9 => {
+                let p = *n as u8;
+                self.advance();
+                p
+            }
+            other => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "precedence (0-9)".to_string(),
+                    found: other.clone(),
+                    span: self.current_span(),
+                });
+            }
+        };
+
+        // Parse one or more operator symbols
+        let mut operators = Vec::new();
+        loop {
+            match self.peek() {
+                Token::OpSymbol(s) => {
+                    operators.push(s.clone());
+                    self.advance();
+                }
+                // Also accept built-in operator tokens
+                Token::Plus => { operators.push("+".to_string()); self.advance(); }
+                Token::Minus => { operators.push("-".to_string()); self.advance(); }
+                Token::Star => { operators.push("*".to_string()); self.advance(); }
+                Token::Slash => { operators.push("/".to_string()); self.advance(); }
+                Token::Percent => { operators.push("%".to_string()); self.advance(); }
+                Token::EqEq => { operators.push("==".to_string()); self.advance(); }
+                Token::Neq => { operators.push("!=".to_string()); self.advance(); }
+                Token::Lt => { operators.push("<".to_string()); self.advance(); }
+                Token::Gt => { operators.push(">".to_string()); self.advance(); }
+                Token::Lte => { operators.push("<=".to_string()); self.advance(); }
+                Token::Gte => { operators.push(">=".to_string()); self.advance(); }
+                Token::AndAnd => { operators.push("&&".to_string()); self.advance(); }
+                Token::OrOr => { operators.push("||".to_string()); self.advance(); }
+                Token::Cons => { operators.push("::".to_string()); self.advance(); }
+                Token::Concat => { operators.push("++".to_string()); self.advance(); }
+                Token::Compose => { operators.push(">>".to_string()); self.advance(); }
+                Token::ComposeBack => { operators.push("<<".to_string()); self.advance(); }
+                Token::PipeOp => { operators.push("|>".to_string()); self.advance(); }
+                Token::PipeBack => { operators.push("<|".to_string()); self.advance(); }
+                _ => break,
+            }
+        }
+
+        if operators.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "operator symbol".to_string(),
+                found: self.peek().clone(),
+                span: self.current_span(),
+            });
+        }
+
+        let span = start.merge(&self.current_span());
+
+        // Register operators in the operator table so they affect parsing
+        for op in &operators {
+            let info = OpInfo {
+                precedence,
+                assoc,
+                is_builtin: false,
+            };
+            if let Some(warning) = self.op_table.register(op.clone(), info, span.clone()) {
+                self.warnings.push(warning);
+            }
+        }
+
+        Ok(Decl::Fixity(FixityDecl {
+            assoc,
+            precedence,
+            operators,
+            span,
+        }))
     }
 
     // ========================================================================
@@ -583,8 +919,28 @@ impl Parser {
             let start = self.current_span();
             self.advance();
 
-            // First, try to parse a simple pattern
+            // Check for 'rec' keyword for mutual recursion
+            if self.match_token(&Token::Rec) {
+                return self.parse_let_rec_expr(start);
+            }
+
+            // Check for prefix operator syntax: let (<|>) a b = ... in ...
+            if self.check(&Token::LParen) {
+                if let Some(op) = self.peek_operator_in_parens() {
+                    return self.parse_operator_let_expr_prefix(start, op);
+                }
+            }
+
+            // First, try to parse a simple pattern (for regular let or function name)
             let first_pattern = self.parse_simple_pattern()?;
+
+            // Check for infix operator syntax: let a <|> b = ... in ...
+            // But only if first_pattern is a Var (identifier)
+            if let PatternKind::Var(ref name) = first_pattern.node {
+                if let Some(op) = self.try_peek_operator() {
+                    return self.parse_operator_let_expr_infix(start, name.clone(), op);
+                }
+            }
 
             // Check if this is function syntax: let f x y = ... in ...
             // by looking for more patterns before the '='
@@ -630,6 +986,121 @@ impl Parser {
         }
     }
 
+    /// Parse prefix operator let-expression: let (<|>) a b = e in body
+    fn parse_operator_let_expr_prefix(&mut self, start: Span, op: String) -> Result<Expr, ParseError> {
+        // Consume ( op )
+        self.consume(Token::LParen)?;
+        self.advance(); // consume the operator token
+        self.consume(Token::RParen)?;
+
+        // Parse parameters
+        let mut params = Vec::new();
+        while self.is_pattern_start() && !self.check(&Token::Eq) {
+            params.push(self.parse_simple_pattern()?);
+        }
+
+        self.consume(Token::Eq)?;
+        let value_expr = self.parse_expr()?;
+        self.consume(Token::In)?;
+        let in_body = self.parse_expr()?;
+
+        let span = start.merge(&in_body.span);
+
+        // Create a lambda for the operator: fun params -> value_expr
+        let lambda_span = value_expr.span.clone();
+        let lambda = Spanned::new(
+            ExprKind::Lambda {
+                params,
+                body: Rc::new(value_expr),
+            },
+            lambda_span,
+        );
+
+        // Create a Var pattern for the operator name
+        let op_pattern = Spanned::new(PatternKind::Var(op), start.clone());
+
+        Ok(Spanned::new(
+            ExprKind::Let {
+                pattern: op_pattern,
+                value: Rc::new(lambda),
+                body: Some(Rc::new(in_body)),
+            },
+            span,
+        ))
+    }
+
+    /// Parse infix operator let-expression: let a <|> b = e in body
+    fn parse_operator_let_expr_infix(&mut self, start: Span, first_param_name: String, op: String) -> Result<Expr, ParseError> {
+        // Consume the operator token
+        self.advance();
+
+        // Create first param from the identifier we already parsed
+        let first_param = Spanned::new(
+            PatternKind::Var(first_param_name),
+            start.clone(),
+        );
+
+        // Parse second parameter
+        let second_param = self.parse_simple_pattern()?;
+
+        let params = vec![first_param, second_param];
+
+        self.consume(Token::Eq)?;
+        let value_expr = self.parse_expr()?;
+        self.consume(Token::In)?;
+        let in_body = self.parse_expr()?;
+
+        let span = start.merge(&in_body.span);
+
+        // Create a lambda for the operator: fun params -> value_expr
+        let lambda_span = value_expr.span.clone();
+        let lambda = Spanned::new(
+            ExprKind::Lambda {
+                params,
+                body: Rc::new(value_expr),
+            },
+            lambda_span,
+        );
+
+        // Create a Var pattern for the operator name
+        let op_pattern = Spanned::new(PatternKind::Var(op), start.clone());
+
+        Ok(Spanned::new(
+            ExprKind::Let {
+                pattern: op_pattern,
+                value: Rc::new(lambda),
+                body: Some(Rc::new(in_body)),
+            },
+            span,
+        ))
+    }
+
+    /// Parse let rec expression: let rec f x = ... and g y = ... in body
+    fn parse_let_rec_expr(&mut self, start: Span) -> Result<Expr, ParseError> {
+        let mut bindings = Vec::new();
+
+        // Parse first binding
+        bindings.push(self.parse_rec_binding()?);
+
+        // Parse additional bindings with 'and'
+        while self.match_token(&Token::And) {
+            bindings.push(self.parse_rec_binding()?);
+        }
+
+        // Must have 'in' for expression form
+        self.consume(Token::In)?;
+        let body = self.parse_expr()?;
+        let span = start.merge(&body.span);
+
+        Ok(Spanned::new(
+            ExprKind::LetRec {
+                bindings,
+                body: Some(Rc::new(body)),
+            },
+            span,
+        ))
+    }
+
     fn parse_expr_if(&mut self) -> Result<Expr, ParseError> {
         if self.check(&Token::If) {
             let start = self.current_span();
@@ -659,7 +1130,7 @@ impl Parser {
         } else if self.check(&Token::Select) {
             self.parse_select()
         } else {
-            self.parse_expr_pipe()
+            self.parse_expr_binary(0)
         }
     }
 
@@ -680,7 +1151,7 @@ impl Parser {
             self.consume(Token::LArrow)?;
             let channel = self.parse_expr_app()?; // Parse channel expr (no operators to avoid <- ambiguity)
             self.consume(Token::Arrow)?;
-            let body = self.parse_expr_pipe()?; // Body can have operators
+            let body = self.parse_expr_binary(0)?; // Body can have operators
 
             arms.push(SelectArm {
                 channel,
@@ -724,7 +1195,7 @@ impl Parser {
     fn parse_match(&mut self) -> Result<Expr, ParseError> {
         let start = self.current_span();
         self.consume(Token::Match)?;
-        let scrutinee = self.parse_expr_pipe()?;
+        let scrutinee = self.parse_expr_binary(0)?;
         self.consume(Token::With)?;
 
         let mut arms = Vec::new();
@@ -736,13 +1207,13 @@ impl Parser {
 
             // Optional guard
             let guard = if self.match_token(&Token::If) {
-                Some(self.parse_expr_pipe()?)
+                Some(self.parse_expr_binary(0)?)
             } else {
                 None
             };
 
             self.consume(Token::Arrow)?;
-            let body = self.parse_expr_pipe()?;
+            let body = self.parse_expr_binary(0)?;
 
             arms.push(MatchArm {
                 pattern,
@@ -765,14 +1236,28 @@ impl Parser {
         ))
     }
 
-    // Pipe operators: |> <|
-    fn parse_expr_pipe(&mut self) -> Result<Expr, ParseError> {
+    /// Pratt parser for binary expressions.
+    /// Uses precedence climbing to handle operator precedence and associativity.
+    fn parse_expr_binary(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let start = self.current_span();
-        let mut left = self.parse_expr_or()?;
+        let mut left = self.parse_expr_unary()?;
 
         loop {
-            if self.match_token(&Token::PipeOp) {
-                let right = self.parse_expr_or()?;
+            // Check if current token is an operator
+            let (op_str, _op_span) = match self.peek_operator_symbol() {
+                Some(o) => o,
+                None => break,
+            };
+
+            // Special case: |> and <| desugar to App, not BinOp
+            if op_str == "|>" {
+                let pipe_info = self.op_table.get("|>").cloned().unwrap_or_else(OpInfo::default);
+                if pipe_info.precedence < min_prec {
+                    break;
+                }
+                self.advance(); // consume |>
+                let next_min = pipe_info.precedence + 1; // left-associative
+                let right = self.parse_expr_binary(next_min)?;
                 let span = start.merge(&right.span);
                 // x |> f  =>  f x
                 left = Spanned::new(
@@ -782,8 +1267,17 @@ impl Parser {
                     },
                     span,
                 );
-            } else if self.match_token(&Token::PipeBack) {
-                let right = self.parse_expr_or()?;
+                continue;
+            }
+
+            if op_str == "<|" {
+                let pipe_info = self.op_table.get("<|").cloned().unwrap_or_else(OpInfo::default);
+                if pipe_info.precedence < min_prec {
+                    break;
+                }
+                self.advance(); // consume <|
+                let next_min = pipe_info.precedence; // right-associative
+                let right = self.parse_expr_binary(next_min)?;
                 let span = start.merge(&right.span);
                 // f <| x  =>  f x
                 left = Spanned::new(
@@ -793,206 +1287,98 @@ impl Parser {
                     },
                     span,
                 );
-            } else {
+                continue;
+            }
+
+            // Look up precedence in table
+            let info = self.op_table.get(&op_str).cloned().unwrap_or_else(OpInfo::default);
+
+            if info.precedence < min_prec {
                 break;
             }
-        }
 
-        Ok(left)
-    }
+            self.advance(); // consume the operator
 
-    // Boolean or: ||
-    fn parse_expr_or(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let mut left = self.parse_expr_and()?;
+            // Calculate next min_prec based on associativity
+            let next_min = match info.assoc {
+                Associativity::Left => info.precedence + 1,
+                Associativity::Right => info.precedence,
+                Associativity::None => info.precedence + 1,
+            };
 
-        while self.match_token(&Token::OrOr) {
-            let right = self.parse_expr_and()?;
+            let right = self.parse_expr_binary(next_min)?;
             let span = start.merge(&right.span);
-            left = Spanned::new(
-                ExprKind::BinOp {
-                    op: BinOp::Or,
-                    left: Rc::new(left),
-                    right: Rc::new(right),
-                },
-                span,
-            );
+
+            // Build the BinOp node
+            left = self.make_binop(&op_str, left, right, span);
         }
 
         Ok(left)
     }
 
-    // Boolean and: &&
-    fn parse_expr_and(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let mut left = self.parse_expr_cmp()?;
-
-        while self.match_token(&Token::AndAnd) {
-            let right = self.parse_expr_cmp()?;
-            let span = start.merge(&right.span);
-            left = Spanned::new(
-                ExprKind::BinOp {
-                    op: BinOp::And,
-                    left: Rc::new(left),
-                    right: Rc::new(right),
-                },
-                span,
-            );
-        }
-
-        Ok(left)
+    /// Check if the current token is an operator and return its string representation.
+    fn peek_operator_symbol(&self) -> Option<(String, Span)> {
+        let span = self.current_span();
+        let op_str = match self.peek() {
+            // Built-in operators
+            Token::Plus => "+".to_string(),
+            Token::Minus => "-".to_string(),
+            Token::Star => "*".to_string(),
+            Token::Slash => "/".to_string(),
+            Token::Percent => "%".to_string(),
+            Token::EqEq => "==".to_string(),
+            Token::Neq => "!=".to_string(),
+            Token::Lt => "<".to_string(),
+            Token::Gt => ">".to_string(),
+            Token::Lte => "<=".to_string(),
+            Token::Gte => ">=".to_string(),
+            Token::AndAnd => "&&".to_string(),
+            Token::OrOr => "||".to_string(),
+            Token::Cons => "::".to_string(),
+            Token::Concat => "++".to_string(),
+            Token::Compose => ">>".to_string(),
+            Token::ComposeBack => "<<".to_string(),
+            Token::PipeOp => "|>".to_string(),
+            Token::PipeBack => "<|".to_string(),
+            // User-defined operators
+            Token::OpSymbol(s) => s.clone(),
+            _ => return None,
+        };
+        Some((op_str, span))
     }
 
-    // Comparison: == != < > <= >=
-    fn parse_expr_cmp(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let left = self.parse_expr_cons()?;
-
-        let op = match self.peek() {
-            Token::EqEq => BinOp::Eq,
-            Token::Neq => BinOp::Neq,
-            Token::Lt => BinOp::Lt,
-            Token::Gt => BinOp::Gt,
-            Token::Lte => BinOp::Lte,
-            Token::Gte => BinOp::Gte,
-            _ => return Ok(left),
+    /// Build a BinOp expression from an operator string.
+    fn make_binop(&self, op_str: &str, left: Expr, right: Expr, span: Span) -> Expr {
+        let op = match op_str {
+            "+" => BinOp::Add,
+            "-" => BinOp::Sub,
+            "*" => BinOp::Mul,
+            "/" => BinOp::Div,
+            "%" => BinOp::Mod,
+            "==" => BinOp::Eq,
+            "!=" => BinOp::Neq,
+            "<" => BinOp::Lt,
+            ">" => BinOp::Gt,
+            "<=" => BinOp::Lte,
+            ">=" => BinOp::Gte,
+            "&&" => BinOp::And,
+            "||" => BinOp::Or,
+            "::" => BinOp::Cons,
+            "++" => BinOp::Concat,
+            ">>" => BinOp::Compose,
+            "<<" => BinOp::ComposeBack,
+            // User-defined operator
+            _ => BinOp::UserDefined(op_str.to_string()),
         };
 
-        self.advance();
-        let right = self.parse_expr_cons()?;
-        let span = start.merge(&right.span);
-
-        Ok(Spanned::new(
+        Spanned::new(
             ExprKind::BinOp {
                 op,
                 left: Rc::new(left),
                 right: Rc::new(right),
             },
             span,
-        ))
-    }
-
-    // Cons and concat: :: ++
-    fn parse_expr_cons(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let left = self.parse_expr_add()?;
-
-        if self.match_token(&Token::Cons) {
-            let right = self.parse_expr_cons()?; // Right associative
-            let span = start.merge(&right.span);
-            Ok(Spanned::new(
-                ExprKind::BinOp {
-                    op: BinOp::Cons,
-                    left: Rc::new(left),
-                    right: Rc::new(right),
-                },
-                span,
-            ))
-        } else if self.match_token(&Token::Concat) {
-            let right = self.parse_expr_cons()?; // Right associative
-            let span = start.merge(&right.span);
-            Ok(Spanned::new(
-                ExprKind::BinOp {
-                    op: BinOp::Concat,
-                    left: Rc::new(left),
-                    right: Rc::new(right),
-                },
-                span,
-            ))
-        } else {
-            Ok(left)
-        }
-    }
-
-    // Addition and subtraction: + -
-    fn parse_expr_add(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let mut left = self.parse_expr_mul()?;
-
-        loop {
-            let op = match self.peek() {
-                Token::Plus => BinOp::Add,
-                Token::Minus => BinOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_expr_mul()?;
-            let span = start.merge(&right.span);
-            left = Spanned::new(
-                ExprKind::BinOp {
-                    op,
-                    left: Rc::new(left),
-                    right: Rc::new(right),
-                },
-                span,
-            );
-        }
-
-        Ok(left)
-    }
-
-    // Multiplication, division, modulo: * / %
-    fn parse_expr_mul(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let mut left = self.parse_expr_compose()?;
-
-        loop {
-            let op = match self.peek() {
-                Token::Star => BinOp::Mul,
-                Token::Slash => BinOp::Div,
-                Token::Percent => BinOp::Mod,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_expr_compose()?;
-            let span = start.merge(&right.span);
-            left = Spanned::new(
-                ExprKind::BinOp {
-                    op,
-                    left: Rc::new(left),
-                    right: Rc::new(right),
-                },
-                span,
-            );
-        }
-
-        Ok(left)
-    }
-
-    // Function composition: >> <<
-    fn parse_expr_compose(&mut self) -> Result<Expr, ParseError> {
-        let start = self.current_span();
-        let mut left = self.parse_expr_unary()?;
-
-        loop {
-            if self.match_token(&Token::Compose) {
-                let right = self.parse_expr_unary()?;
-                let span = start.merge(&right.span);
-                left = Spanned::new(
-                    ExprKind::BinOp {
-                        op: BinOp::Compose,
-                        left: Rc::new(left),
-                        right: Rc::new(right),
-                    },
-                    span,
-                );
-            } else if self.match_token(&Token::ComposeBack) {
-                let right = self.parse_expr_unary()?;
-                let span = start.merge(&right.span);
-                left = Spanned::new(
-                    ExprKind::BinOp {
-                        op: BinOp::ComposeBack,
-                        left: Rc::new(left),
-                        right: Rc::new(right),
-                    },
-                    span,
-                );
-            } else {
-                break;
-            }
-        }
-
-        Ok(left)
+        )
     }
 
     // Unary: not, -
@@ -1694,5 +2080,239 @@ mod tests {
         let tokens = Lexer::new(";;").tokenize().unwrap();
         assert_eq!(tokens.len(), 2); // DoubleSemi + Eof
         assert!(matches!(tokens[0].token, Token::DoubleSemi));
+    }
+
+    #[test]
+    fn test_fixity_decl() {
+        // Test basic fixity declaration
+        let prog = parse("infixl 6 +");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Fixity(f)) => {
+                assert_eq!(f.assoc, Associativity::Left);
+                assert_eq!(f.precedence, 6);
+                assert_eq!(f.operators, vec!["+"]);
+            }
+            _ => panic!("expected fixity decl"),
+        }
+    }
+
+    #[test]
+    fn test_fixity_decl_user_op() {
+        // Test fixity declaration with user-defined operator
+        let prog = parse("infixl 4 <|>");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Fixity(f)) => {
+                assert_eq!(f.assoc, Associativity::Left);
+                assert_eq!(f.precedence, 4);
+                assert_eq!(f.operators, vec!["<|>"]);
+            }
+            _ => panic!("expected fixity decl"),
+        }
+    }
+
+    #[test]
+    fn test_fixity_decl_multiple_ops() {
+        // Test fixity declaration with multiple operators
+        let prog = parse("infixr 5 :: ++");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Fixity(f)) => {
+                assert_eq!(f.assoc, Associativity::Right);
+                assert_eq!(f.precedence, 5);
+                assert_eq!(f.operators, vec!["::", "++"]);
+            }
+            _ => panic!("expected fixity decl"),
+        }
+    }
+
+    #[test]
+    fn test_fixity_decl_non_assoc() {
+        // Test non-associative fixity
+        let prog = parse("infix 4 ==");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Fixity(f)) => {
+                assert_eq!(f.assoc, Associativity::None);
+                assert_eq!(f.precedence, 4);
+                assert_eq!(f.operators, vec!["=="]);
+            }
+            _ => panic!("expected fixity decl"),
+        }
+    }
+
+    #[test]
+    fn test_user_defined_operator_expr() {
+        // Test that user-defined operators are parsed in expressions
+        let prog = parse("a <|> b");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::BinOp { op, .. } => {
+                    assert_eq!(*op, BinOp::UserDefined("<|>".to_string()));
+                }
+                _ => panic!("expected BinOp"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_user_defined_operator_precedence() {
+        // Test that built-in operators still work correctly with Pratt parser
+        // a + b * c should parse as a + (b * c)
+        let prog = parse("a + b * c");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::BinOp { op, left, right } => {
+                    assert_eq!(*op, BinOp::Add);
+                    // left is just 'a'
+                    assert!(matches!(left.node, ExprKind::Var(_)));
+                    // right should be b * c
+                    match &right.node {
+                        ExprKind::BinOp { op: inner_op, .. } => {
+                            assert_eq!(*inner_op, BinOp::Mul);
+                        }
+                        _ => panic!("expected inner BinOp"),
+                    }
+                }
+                _ => panic!("expected BinOp"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_pipe_desugaring() {
+        // Test that |> is desugared to application
+        let prog = parse("x |> f");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::App { func, arg } => {
+                    // f applied to x
+                    assert!(matches!(func.node, ExprKind::Var(ref n) if n == "f"));
+                    assert!(matches!(arg.node, ExprKind::Var(ref n) if n == "x"));
+                }
+                _ => panic!("expected App, got {:?}", expr.node),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_operator_def_prefix() {
+        // Test prefix syntax: let (<|>) a b = a
+        let prog = parse("let (<|>) a b = a");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::OperatorDef { op, params, .. }) => {
+                assert_eq!(op, "<|>");
+                assert_eq!(params.len(), 2);
+            }
+            _ => panic!("expected OperatorDef"),
+        }
+    }
+
+    #[test]
+    fn test_operator_def_infix() {
+        // Test infix syntax: let a <|> b = a
+        let prog = parse("let a <|> b = a");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::OperatorDef { op, params, .. }) => {
+                assert_eq!(op, "<|>");
+                assert_eq!(params.len(), 2);
+            }
+            _ => panic!("expected OperatorDef"),
+        }
+    }
+
+    #[test]
+    fn test_operator_def_builtin_op() {
+        // Test redefining a built-in operator with prefix syntax
+        let prog = parse("let (+) a b = a * b");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::OperatorDef { op, params, .. }) => {
+                assert_eq!(op, "+");
+                assert_eq!(params.len(), 2);
+            }
+            _ => panic!("expected OperatorDef"),
+        }
+    }
+
+    #[test]
+    fn test_fixity_shadowing_warning() {
+        // Test that shadowing a built-in operator produces a warning
+        let tokens = Lexer::new("infixl 9 +").tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let _prog = parser.parse_program().unwrap();
+        let warnings = parser.warnings();
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            Warning::ShadowingBuiltinOperator { op, .. } => {
+                assert_eq!(op, "+");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixity_no_warning_for_new_op() {
+        // Test that declaring a new operator produces no warning
+        let tokens = Lexer::new("infixl 4 <|>").tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let _prog = parser.parse_program().unwrap();
+        let warnings = parser.warnings();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_let_rec_simple() {
+        // Test simple let rec
+        let prog = parse("let rec f n = n");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::LetRec { bindings }) => {
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0].name.node, "f");
+                assert_eq!(bindings[0].params.len(), 1);
+            }
+            _ => panic!("expected LetRec"),
+        }
+    }
+
+    #[test]
+    fn test_let_rec_mutual() {
+        // Test mutual recursion with 'and'
+        let prog = parse("let rec f n = g n and g n = f n");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::LetRec { bindings }) => {
+                assert_eq!(bindings.len(), 2);
+                assert_eq!(bindings[0].name.node, "f");
+                assert_eq!(bindings[1].name.node, "g");
+            }
+            _ => panic!("expected LetRec"),
+        }
+    }
+
+    #[test]
+    fn test_let_rec_expr() {
+        // Test let rec as expression (with 'in')
+        let prog = parse("let rec f n = n in f 5");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::LetRec { bindings, body } => {
+                    assert_eq!(bindings.len(), 1);
+                    assert!(body.is_some());
+                }
+                _ => panic!("expected LetRec expression"),
+            },
+            _ => panic!("expected expression"),
+        }
     }
 }

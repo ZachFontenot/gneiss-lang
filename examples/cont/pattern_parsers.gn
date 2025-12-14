@@ -2,6 +2,10 @@
 -- Pattern: Parser Combinators with Backtracking
 -- =============================================================================
 --
+-- NOTE: This example currently fails with an infinite type error due to
+-- limitations in the type system's handling of complex continuation patterns.
+-- It remains here as a goal for future type system improvements.
+--
 -- Parser combinators let us build complex parsers from simple pieces.
 -- With shift/reset, we get:
 -- - Clean direct-style code (no monad clutter)
@@ -14,6 +18,9 @@
 -- =============================================================================
 -- Part 1: Core Parser Infrastructure
 -- =============================================================================
+
+-- Option type for optional parsing
+type Option a = | Some a | None
 
 -- Parser state: remaining input
 type ParseState = List Char
@@ -58,21 +65,22 @@ let any_char () =
     let input = get_input () in
     match input with
     | [] -> parse_fail "unexpected end of input"
-    | c :: rest ->
+    | c :: rest -> (
         set_input rest;
         c
+    )
 
 -- Parse a specific character
 let char expected =
     let c = any_char () in
     if c == expected then c
-    else parse_fail ("expected '" ^ char_to_string expected ^ "'")
+    else parse_fail ("expected '" ++ char_to_string expected ++ "'")
 
 -- Parse a character satisfying a predicate
 let satisfy pred name =
     let c = any_char () in
     if pred c then c
-    else parse_fail ("expected " ^ name)
+    else parse_fail ("expected " ++ name)
 
 -- Parse end of input
 let eof () =
@@ -311,10 +319,14 @@ and json_object () =
     let _ = char '}' in
     JObject pairs
 
--- Helpers
-let char_to_string c = "?"  -- stub
-let chars_to_string cs = "?"  -- stub
-let chars_to_int cs = 0  -- stub
+-- Helper: convert list of digit chars to int
+let chars_to_int cs =
+    let rec go acc digits =
+        match digits with
+        | [] -> acc
+        | d :: rest -> go (acc * 10 + (char_to_int d - char_to_int '0')) rest
+    in
+    go 0 cs
 
 let main () =
     print "=== Expression Parser ===";
@@ -323,7 +335,7 @@ let main () =
     | Parsed e _ ->
         print (eval_expr e)  -- 14
     | ParseFail msg ->
-        print ("Parse error: " ^ msg);
+        print ("Parse error: " ++ msg);
     
     print "";
     print "=== JSON Parser ===";
@@ -331,6 +343,4 @@ let main () =
     let json_result = run_parser json_value json_input in
     match json_result with
     | Parsed j _ -> print "JSON parsed successfully"
-    | ParseFail msg -> print ("JSON parse error: " ^ msg)
-
-let string_to_chars s = []  -- stub
+    | ParseFail msg -> print ("JSON parse error: " ++ msg)

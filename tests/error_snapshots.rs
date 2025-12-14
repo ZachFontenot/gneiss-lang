@@ -140,7 +140,8 @@ fn snapshot_parse_error_unexpected_eof() {
 
 #[test]
 fn snapshot_lex_error_unexpected_char() {
-    let source = "let x = @invalid";
+    // Use a character that's NOT a valid operator char (@ is now valid for operators)
+    let source = "let x = `invalid";
     let err = Lexer::new(source).tokenize().unwrap_err();
 
     let source_map = SourceMap::new(source);

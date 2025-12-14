@@ -203,6 +203,12 @@ pub enum ExprKind {
         body: Option<Rc<Expr>>, // None for top-level lets
     },
 
+    /// Mutually recursive let bindings: let rec f = ... and g = ... in body
+    LetRec {
+        bindings: Vec<RecBinding>,
+        body: Option<Rc<Expr>>, // None for top-level
+    },
+
     // If expression
     If {
         cond: Rc<Expr>,
@@ -301,6 +307,17 @@ pub struct SelectArm {
     pub body: Expr,
 }
 
+/// A single binding in a let rec group
+#[derive(Debug, Clone)]
+pub struct RecBinding {
+    /// Function name (must be a simple identifier for recursion to work)
+    pub name: Spanned<String>,
+    /// Function parameters
+    pub params: Vec<Pattern>,
+    /// Function body
+    pub body: Expr,
+}
+
 #[derive(Debug, Clone)]
 pub enum Literal {
     Int(i64),
@@ -311,7 +328,8 @@ pub enum Literal {
     Unit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Binary operators (built-in and user-defined)
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinOp {
     // Arithmetic
     Add,
@@ -337,6 +355,54 @@ pub enum BinOp {
     PipeBack, // <|
     Compose,  // >>
     ComposeBack, // <<
+    // User-defined operator (looked up as a function)
+    UserDefined(String),
+}
+
+/// An operator: either a built-in or a user-defined symbol
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operator {
+    /// Built-in operator with hardcoded semantics
+    Builtin(BinOp),
+    /// User-defined operator (looked up as a function)
+    User(String),
+}
+
+impl Operator {
+    /// Get the operator symbol as a string
+    pub fn symbol(&self) -> String {
+        match self {
+            Operator::Builtin(op) => match op {
+                BinOp::Add => "+".to_string(),
+                BinOp::Sub => "-".to_string(),
+                BinOp::Mul => "*".to_string(),
+                BinOp::Div => "/".to_string(),
+                BinOp::Mod => "%".to_string(),
+                BinOp::Eq => "==".to_string(),
+                BinOp::Neq => "!=".to_string(),
+                BinOp::Lt => "<".to_string(),
+                BinOp::Gt => ">".to_string(),
+                BinOp::Lte => "<=".to_string(),
+                BinOp::Gte => ">=".to_string(),
+                BinOp::And => "&&".to_string(),
+                BinOp::Or => "||".to_string(),
+                BinOp::Cons => "::".to_string(),
+                BinOp::Concat => "++".to_string(),
+                BinOp::Pipe => "|>".to_string(),
+                BinOp::PipeBack => "<|".to_string(),
+                BinOp::Compose => ">>".to_string(),
+                BinOp::ComposeBack => "<<".to_string(),
+                BinOp::UserDefined(s) => s.clone(),
+            },
+            Operator::User(s) => s.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.symbol())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +484,30 @@ pub enum TypeExprKind {
 }
 
 // ============================================================================
+// Operator Fixity Declarations
+// ============================================================================
+
+/// Operator associativity for fixity declarations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Associativity {
+    /// Left-associative: `a op b op c` = `(a op b) op c`
+    Left,
+    /// Right-associative: `a op b op c` = `a op (b op c)`
+    Right,
+    /// Non-associative: `a op b op c` is a parse error
+    None,
+}
+
+/// Fixity declaration: `infixl 6 +` or `infixr 5 ::`
+#[derive(Debug, Clone)]
+pub struct FixityDecl {
+    pub assoc: Associativity,
+    pub precedence: u8,
+    pub operators: Vec<String>,
+    pub span: Span,
+}
+
+// ============================================================================
 // Declarations
 // ============================================================================
 
@@ -430,6 +520,21 @@ pub enum Decl {
         params: Vec<Pattern>,
         body: Expr,
     },
+
+    /// Mutually recursive function definitions: let rec f x = ... and g y = ...
+    LetRec {
+        bindings: Vec<RecBinding>,
+    },
+
+    // Operator definition: let (<|>) a b = e or let a <|> b = e
+    OperatorDef {
+        op: String,
+        params: Vec<Pattern>,
+        body: Expr,
+    },
+
+    // Fixity declaration: infixl 6 +
+    Fixity(FixityDecl),
 
     // type Option a = | Some a | None
     Type {

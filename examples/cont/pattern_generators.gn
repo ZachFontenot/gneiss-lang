@@ -50,7 +50,7 @@ let evens_up_to n =
     let go i =
         if i > n then []
         else (
-            if i mod 2 == 0 then yield i else ();
+            if i % 2 == 0 then yield i else ();
             go (i + 1)
         )
     in

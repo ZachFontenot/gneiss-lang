@@ -2,7 +2,7 @@
 
 test.gn:1:9
 
-I found an unexpected character: '@'
+I found an unexpected character: '`'
 
-1 | let x = @invalid
+1 | let x = `invalid
             ^

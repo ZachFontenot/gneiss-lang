@@ -62,24 +62,16 @@ impl Inferencer {
 
     /// Unify two types with source location for error reporting
     fn unify_at(&mut self, t1: &Type, t2: &Type, span: &Span) -> Result<(), TypeError> {
-        self.unify(t1, t2).map_err(|e| self.add_span_to_error(e, span.clone()))
-    }
-
-    /// Add span to a TypeError if it doesn't have one
-    fn add_span_to_error(&self, err: TypeError, span: Span) -> TypeError {
-        match err {
-            TypeError::TypeMismatch { expected, found, span: None } => {
-                TypeError::TypeMismatch { expected, found, span: Some(span) }
-            }
-            TypeError::OccursCheck { var_id, ty, span: None } => {
-                TypeError::OccursCheck { var_id, ty, span: Some(span) }
-            }
-            other => other,
-        }
+        self.unify_inner(t1, t2, Some(span))
     }
 
     /// Unify two types (no span - use unify_at when possible)
     fn unify(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError> {
+        self.unify_inner(t1, t2, None)
+    }
+
+    /// Core unification logic with optional span for error reporting
+    fn unify_inner(&mut self, t1: &Type, t2: &Type, span: Option<&Span>) -> Result<(), TypeError> {
         let t1 = t1.resolve();
         let t2 = t2.resolve();
 
@@ -102,7 +94,7 @@ impl Inferencer {
                     TypeVar::Unbound { id, level } => {
                         // Occurs check
                         if other.occurs(id) {
-                            return Err(TypeError::OccursCheck { var_id: id, ty: other.clone(), span: None });
+                            return Err(TypeError::OccursCheck { var_id: id, ty: other.clone(), span: span.cloned() });
                         }
                         // Update levels for let-polymorphism
                         self.update_levels(&other, level);
@@ -113,7 +105,7 @@ impl Inferencer {
                     TypeVar::Generic(_) => Err(TypeError::TypeMismatch {
                         expected: t1.clone(),
                         found: t2.clone(),
-                        span: None,
+                        span: span.cloned(),
                     }),
                 }
             }
@@ -123,23 +115,23 @@ impl Inferencer {
                 Type::Arrow { arg: a1, ret: r1, ans_in: ai1, ans_out: ao1 },
                 Type::Arrow { arg: a2, ret: r2, ans_in: ai2, ans_out: ao2 },
             ) => {
-                self.unify(a1, a2)?;
-                self.unify(r1, r2)?;
-                self.unify(ai1, ai2)?;
-                self.unify(ao1, ao2)?;
+                self.unify_inner(a1, a2, span)?;
+                self.unify_inner(r1, r2, span)?;
+                self.unify_inner(ai1, ai2, span)?;
+                self.unify_inner(ao1, ao2, span)?;
                 Ok(())
             }
 
             // Tuples
             (Type::Tuple(ts1), Type::Tuple(ts2)) if ts1.len() == ts2.len() => {
                 for (t1, t2) in ts1.iter().zip(ts2.iter()) {
-                    self.unify(t1, t2)?;
+                    self.unify_inner(t1, t2, span)?;
                 }
                 Ok(())
             }
 
             // Channels
-            (Type::Channel(t1), Type::Channel(t2)) => self.unify(t1, t2),
+            (Type::Channel(t1), Type::Channel(t2)) => self.unify_inner(t1, t2, span),
 
             // Named constructors
             (
@@ -153,7 +145,7 @@ impl Inferencer {
                 },
             ) if n1 == n2 && a1.len() == a2.len() => {
                 for (t1, t2) in a1.iter().zip(a2.iter()) {
-                    self.unify(t1, t2)?;
+                    self.unify_inner(t1, t2, span)?;
                 }
                 Ok(())
             }
@@ -161,7 +153,7 @@ impl Inferencer {
             _ => Err(TypeError::TypeMismatch {
                 expected: t1,
                 found: t2,
-                span: None,
+                span: span.cloned(),
             }),
         }
     }
@@ -459,11 +451,11 @@ impl Inferencer {
                 // CRITICAL THREADING:
                 // 1. arg.ans_out = fun.ans_in (= γ)
                 //    "arg's output answer type = fun's input answer type"
-                self.unify(&arg_result.answer_after, &fun_result.answer_before)?;
+                self.unify_at(&arg_result.answer_after, &fun_result.answer_before, &arg.span)?;
 
                 // 2. arg.ans_in = β (function's latent ans_out)
                 //    "arg starts where function body will end"
-                self.unify(&arg_result.answer_before, &beta)?;
+                self.unify_at(&arg_result.answer_before, &beta, &arg.span)?;
 
                 Ok(InferResult {
                     ty: ret_ty,
@@ -502,7 +494,7 @@ impl Inferencer {
                         recursive_env.insert(name.clone(), Scheme::mono(preliminary_ty.clone()));
 
                         let inferred_result = self.infer_expr_full(&recursive_env, value)?;
-                        self.unify(&preliminary_ty, &inferred_result.ty)?;
+                        self.unify_at(&preliminary_ty, &inferred_result.ty, &value.span)?;
                         inferred_result
                     } else {
                         unreachable!()
@@ -545,7 +537,7 @@ impl Inferencer {
 
                     // CRITICAL: Thread answer types (sequential)
                     // value.ans_out = body.ans_in
-                    self.unify(&value_result.answer_after, &body_result.answer_before)?;
+                    self.unify_at(&value_result.answer_after, &body_result.answer_before, &body.span)?;
 
                     Ok(InferResult {
                         ty: body_result.ty,
@@ -558,6 +550,95 @@ impl Inferencer {
                         ty: Type::Unit,
                         answer_before: value_result.answer_before.clone(),
                         answer_after: value_result.answer_after,
+                    })
+                }
+            }
+
+            // Mutually recursive let bindings: let rec f = ... and g = ... in body
+            ExprKind::LetRec { bindings, body } => {
+                // Enter a new level for let-polymorphism
+                self.level += 1;
+
+                // Step 1: Create preliminary types for all bindings
+                // This allows mutual references
+                let mut rec_env = env.clone();
+                let mut preliminary_types: Vec<Type> = Vec::new();
+
+                for binding in bindings {
+                    let preliminary_ty = self.fresh_var();
+                    preliminary_types.push(preliminary_ty.clone());
+                    rec_env.insert(binding.name.node.clone(), Scheme::mono(preliminary_ty));
+                }
+
+                // Step 2: Infer each binding's body using the recursive environment
+                let mut value_results: Vec<InferResult> = Vec::new();
+                for binding in bindings {
+                    // Build a lambda type for function with params
+                    let mut body_env = rec_env.clone();
+                    let mut param_types = Vec::new();
+
+                    for param in &binding.params {
+                        let param_ty = self.fresh_var();
+                        self.bind_pattern(&mut body_env, param, &param_ty)?;
+                        param_types.push(param_ty);
+                    }
+
+                    let body_result = self.infer_expr_full(&body_env, &binding.body)?;
+
+                    // Build the function type
+                    let func_ty = if param_types.is_empty() {
+                        body_result.ty.clone()
+                    } else {
+                        // Build arrow type from right to left
+                        let mut func_ty = Type::Arrow {
+                            arg: Rc::new(param_types.pop().unwrap()),
+                            ret: Rc::new(body_result.ty.clone()),
+                            ans_in: Rc::new(body_result.answer_before.clone()),
+                            ans_out: Rc::new(body_result.answer_after.clone()),
+                        };
+
+                        while let Some(param_ty) = param_types.pop() {
+                            let pure_ans = self.fresh_var();
+                            func_ty = Type::Arrow {
+                                arg: Rc::new(param_ty),
+                                ret: Rc::new(func_ty),
+                                ans_in: Rc::new(pure_ans.clone()),
+                                ans_out: Rc::new(pure_ans),
+                            };
+                        }
+                        func_ty
+                    };
+
+                    value_results.push(InferResult {
+                        ty: func_ty,
+                        answer_before: body_result.answer_before,
+                        answer_after: body_result.answer_after,
+                    });
+                }
+
+                // Step 3: Unify preliminary types with inferred types
+                for (i, (binding, result)) in bindings.iter().zip(value_results.iter()).enumerate() {
+                    self.unify_at(&preliminary_types[i], &result.ty, &binding.name.span)?;
+                }
+
+                self.level -= 1;
+
+                // Step 4: Generalize and bind in the outer environment
+                let mut new_env = env.clone();
+                for (i, binding) in bindings.iter().enumerate() {
+                    let scheme = self.generalize(&preliminary_types[i]);
+                    new_env.insert(binding.name.node.clone(), scheme);
+                }
+
+                // Step 5: Infer body if present
+                if let Some(body) = body {
+                    let body_result = self.infer_expr_full(&new_env, body)?;
+                    Ok(body_result)
+                } else {
+                    Ok(InferResult {
+                        ty: Type::Unit,
+                        answer_before: self.fresh_var(),
+                        answer_after: self.fresh_var(),
                     })
                 }
             }
@@ -581,11 +662,11 @@ impl Inferencer {
                 self.unify_at(&then_result.ty, &else_result.ty, &else_branch.span)?;
 
                 // Branches must have same answer type effects (they're alternatives)
-                self.unify(&then_result.answer_before, &else_result.answer_before)?;
-                self.unify(&then_result.answer_after, &else_result.answer_after)?;
+                self.unify_at(&then_result.answer_before, &else_result.answer_before, &else_branch.span)?;
+                self.unify_at(&then_result.answer_after, &else_result.answer_after, &else_branch.span)?;
 
                 // Thread: condition feeds into branches
-                self.unify(&cond_result.answer_after, &then_result.answer_before)?;
+                self.unify_at(&cond_result.answer_after, &then_result.answer_before, &then_branch.span)?;
 
                 Ok(InferResult {
                     ty: then_result.ty,
@@ -608,9 +689,9 @@ impl Inferencer {
                     // Handle guard if present
                     let guard_ans_out = if let Some(guard) = &arm.guard {
                         let guard_result = self.infer_expr_full(&arm_env, guard)?;
-                        self.unify(&guard_result.ty, &Type::Bool)?;
+                        self.unify_at(&guard_result.ty, &Type::Bool, &guard.span)?;
                         // Guard starts where arms start
-                        self.unify(&guard_result.answer_before, &arms_ans_in)?;
+                        self.unify_at(&guard_result.answer_before, &arms_ans_in, &guard.span)?;
                         guard_result.answer_after
                     } else {
                         arms_ans_in.clone()
@@ -620,12 +701,12 @@ impl Inferencer {
                     self.unify_at(&result_ty, &body_result.ty, &arm.body.span)?;
 
                     // All arms must have same answer type effects
-                    self.unify(&body_result.answer_before, &guard_ans_out)?;
-                    self.unify(&body_result.answer_after, &arms_ans_out)?;
+                    self.unify_at(&body_result.answer_before, &guard_ans_out, &arm.body.span)?;
+                    self.unify_at(&body_result.answer_after, &arms_ans_out, &arm.body.span)?;
                 }
 
                 // Thread: scrutinee feeds into arms
-                self.unify(&scrutinee_result.answer_after, &arms_ans_in)?;
+                self.unify_at(&scrutinee_result.answer_after, &arms_ans_in, &scrutinee.span)?;
 
                 Ok(InferResult {
                     ty: result_ty,
@@ -648,9 +729,9 @@ impl Inferencer {
             // List: pure
             ExprKind::List(exprs) => {
                 let elem_ty = self.fresh_var();
-                for expr in exprs {
-                    let ty = self.infer_expr(env, expr)?;
-                    self.unify(&elem_ty, &ty)?;
+                for e in exprs {
+                    let ty = self.infer_expr(env, e)?;
+                    self.unify_at(&elem_ty, &ty, &e.span)?;
                 }
                 Ok(InferResult::pure(Type::list(elem_ty), ans))
             }
@@ -707,7 +788,7 @@ impl Inferencer {
                     for (arg, field_ty) in args.iter().zip(&info.field_types) {
                         let arg_ty = self.infer_expr(env, arg)?;
                         let expected_ty = self.substitute(field_ty, &subst);
-                        self.unify(&arg_ty, &expected_ty)?;
+                        self.unify_at(&arg_ty, &expected_ty, &arg.span)?;
                     }
 
                     Ok(InferResult::pure(result_ty, ans))
@@ -733,7 +814,7 @@ impl Inferencer {
 
                 // CRITICAL: Thread answer types left-to-right
                 // Left's output becomes right's input
-                self.unify(&left_result.answer_after, &right_result.answer_before)?;
+                self.unify_at(&left_result.answer_after, &right_result.answer_before, &right.span)?;
 
                 let result_ty = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
@@ -789,6 +870,30 @@ impl Inferencer {
                         }
                         Type::arrow(a, c)
                     }
+                    BinOp::UserDefined(op_name) => {
+                        // User-defined operator: look up as function and apply to both operands
+                        // op_name : a -> b -> c, where left : a, right : b, result : c
+                        let result_ty = self.fresh_var();
+                        let func_ty = Type::arrow(
+                            left_result.ty.clone(),
+                            Type::arrow(right_result.ty.clone(), result_ty.clone()),
+                        );
+                        // Look up the operator in the environment
+                        match env.get(op_name) {
+                            Some(scheme) => {
+                                let instantiated = self.instantiate(scheme);
+                                self.unify_at(&instantiated, &func_ty, &expr.span)?;
+                            }
+                            None => {
+                                return Err(TypeError::UnboundVariable {
+                                    name: op_name.clone(),
+                                    span: expr.span.clone(),
+                                    suggestions: vec![],  // No suggestions for operators
+                                });
+                            }
+                        }
+                        result_ty
+                    }
                 };
 
                 // Result: start where left starts, end where right ends
@@ -821,7 +926,7 @@ impl Inferencer {
                 let second_result = self.infer_expr_full(env, second)?;
 
                 // Thread: first's answer_out becomes second's answer_in
-                self.unify(&first_result.answer_after, &second_result.answer_before)?;
+                self.unify_at(&first_result.answer_after, &second_result.answer_before, &second.span)?;
 
                 Ok(InferResult {
                     ty: second_result.ty,
@@ -835,7 +940,7 @@ impl Inferencer {
                 let body_ty = self.infer_expr(env, body)?;
                 // Body should be a thunk: () -> a
                 let ret_ty = self.fresh_var();
-                self.unify(&body_ty, &Type::arrow(Type::Unit, ret_ty))?;
+                self.unify_at(&body_ty, &Type::arrow(Type::Unit, ret_ty), &body.span)?;
                 Ok(InferResult::pure(Type::Pid, ans))
             }
 
@@ -847,14 +952,14 @@ impl Inferencer {
             ExprKind::ChanSend { channel, value } => {
                 let chan_ty = self.infer_expr(env, channel)?;
                 let val_ty = self.infer_expr(env, value)?;
-                self.unify(&chan_ty, &Type::Channel(Rc::new(val_ty)))?;
+                self.unify_at(&chan_ty, &Type::Channel(Rc::new(val_ty)), &channel.span)?;
                 Ok(InferResult::pure(Type::Unit, ans))
             }
 
             ExprKind::ChanRecv(channel) => {
                 let chan_ty = self.infer_expr(env, channel)?;
                 let elem_ty = self.fresh_var();
-                self.unify(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())))?;
+                self.unify_at(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())), &channel.span)?;
                 Ok(InferResult::pure(elem_ty, ans))
             }
 
@@ -867,7 +972,7 @@ impl Inferencer {
                     // Infer channel type
                     let chan_ty = self.infer_expr(env, &arm.channel)?;
                     let elem_ty = self.fresh_var();
-                    self.unify(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())))?;
+                    self.unify_at(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())), &arm.channel.span)?;
 
                     // Bind pattern in arm's environment
                     let mut arm_env = env.clone();
@@ -875,7 +980,7 @@ impl Inferencer {
 
                     // Infer body type and unify with result
                     let body_ty = self.infer_expr(&arm_env, &arm.body)?;
-                    self.unify(&result_ty, &body_ty)?;
+                    self.unify_at(&result_ty, &body_ty, &arm.body.span)?;
                 }
 
                 Ok(InferResult::pure(result_ty, ans))
@@ -893,7 +998,7 @@ impl Inferencer {
 
                 // The body's initial answer type should equal its own type
                 // This is the key constraint: inside reset, the "expected answer" is the body's type
-                self.unify(&body_result.answer_before, &body_result.ty)?;
+                self.unify_at(&body_result.answer_before, &body_result.ty, &body.span)?;
 
                 // Reset produces the body's final answer type as its result
                 // Reset itself is PURE from the outside - it delimits all effects
@@ -944,7 +1049,7 @@ impl Inferencer {
 
                 // Body type must equal body's initial answer type
                 // This ensures the shift body produces a value compatible with the reset
-                self.unify(&body_result.ty, &body_result.answer_before)?;
+                self.unify_at(&body_result.ty, &body_result.answer_before, &body.span)?;
 
                 // Shift returns τ (the hole type) with answer type α → β
                 // α = original answer type (before shift)
@@ -986,13 +1091,13 @@ impl Inferencer {
 
             PatternKind::Lit(lit) => {
                 let lit_ty = self.infer_literal(lit);
-                self.unify(ty, &lit_ty)?;
+                self.unify_at(ty, &lit_ty, &pattern.span)?;
                 Ok(())
             }
 
             PatternKind::Tuple(pats) => {
                 let pat_types: Vec<_> = pats.iter().map(|_| self.fresh_var()).collect();
-                self.unify(ty, &Type::Tuple(pat_types.clone()))?;
+                self.unify_at(ty, &Type::Tuple(pat_types.clone()), &pattern.span)?;
                 for (pat, pat_ty) in pats.iter().zip(&pat_types) {
                     self.bind_pattern(env, pat, pat_ty)?;
                 }
@@ -1002,7 +1107,7 @@ impl Inferencer {
             PatternKind::List(pats) => {
                 let elem_ty = self.fresh_var();
                 let list_ty = Type::list(elem_ty.clone());
-                self.unify(ty, &list_ty)?;
+                self.unify_at(ty, &list_ty, &pattern.span)?;
                 for pat in pats {
                     self.bind_pattern(env, pat, &elem_ty)?;
                 }
@@ -1012,7 +1117,7 @@ impl Inferencer {
             PatternKind::Cons { head, tail } => {
                 let elem_ty = self.fresh_var();
                 let list_ty = Type::list(elem_ty.clone());
-                self.unify(ty, &list_ty)?;
+                self.unify_at(ty, &list_ty, &pattern.span)?;
                 self.bind_pattern(env, head, &elem_ty)?;
                 self.bind_pattern(env, tail, &list_ty)?;
                 Ok(())
@@ -1029,7 +1134,7 @@ impl Inferencer {
                         name: info.type_name.clone(),
                         args: type_args.clone(),
                     };
-                    self.unify(ty, &constructor_ty)?;
+                    self.unify_at(ty, &constructor_ty, &pattern.span)?;
 
                     let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
                     for (i, ty) in type_args.iter().enumerate() {
@@ -1292,6 +1397,18 @@ impl Inferencer {
         // string_length : String -> Int
         env.insert("string_length".into(), Scheme::mono(Type::arrow(Type::String, Type::Int)));
 
+        // string_to_chars : String -> List Char
+        env.insert("string_to_chars".into(), Scheme::mono(Type::arrow(Type::String, Type::list(Type::Char))));
+
+        // chars_to_string : List Char -> String
+        env.insert("chars_to_string".into(), Scheme::mono(Type::arrow(Type::list(Type::Char), Type::String)));
+
+        // char_to_string : Char -> String
+        env.insert("char_to_string".into(), Scheme::mono(Type::arrow(Type::Char, Type::String)));
+
+        // char_to_int : Char -> Int
+        env.insert("char_to_int".into(), Scheme::mono(Type::arrow(Type::Char, Type::Int)));
+
         // First pass: register all type declarations
         for item in &program.items {
             if let Item::Decl(decl) = item {
@@ -1349,7 +1466,7 @@ impl Inferencer {
                     let body_result = self.infer_expr_full(&local_env, body)?;
 
                     // Unify the body type with what we predicted
-                    self.unify(&ret_ty, &body_result.ty)?;
+                    self.unify_at(&ret_ty, &body_result.ty, &body.span)?;
 
                     // Build the function type with proper answer types
                     let func_ty = if param_types.is_empty() {
@@ -1385,7 +1502,7 @@ impl Inferencer {
                     // Check against declared type signature if one exists (from `val` declaration)
                     if let Some(declared_scheme) = env.get(name) {
                         let declared_ty = self.instantiate(declared_scheme);
-                        self.unify(&func_ty, &declared_ty)?;
+                        self.unify_at(&func_ty, &declared_ty, &body.span)?;
                     }
 
                     let scheme = self.generalize(&func_ty);
@@ -1404,6 +1521,111 @@ impl Inferencer {
                     let declared_ty = self.type_expr_to_type(type_sig, &param_map)?;
                     let scheme = self.generalize(&declared_ty);
                     env.insert(name.clone(), scheme);
+                }
+                Item::Decl(Decl::OperatorDef { op, params, body }) => {
+                    // Operator definitions work like function definitions
+                    self.level += 1;
+                    self.wanted_preds.clear();
+
+                    let mut local_env = env.clone();
+                    let mut param_types = Vec::new();
+
+                    for param in params {
+                        let param_ty = self.fresh_var();
+                        self.bind_pattern(&mut local_env, param, &param_ty)?;
+                        param_types.push(param_ty);
+                    }
+
+                    let body_result = self.infer_expr_full(&local_env, body)?;
+
+                    let func_ty = if param_types.is_empty() {
+                        body_result.ty
+                    } else {
+                        let mut result = Type::Arrow {
+                            arg: Rc::new(param_types.pop().unwrap()),
+                            ret: Rc::new(body_result.ty),
+                            ans_in: Rc::new(body_result.answer_before),
+                            ans_out: Rc::new(body_result.answer_after),
+                        };
+                        for param_ty in param_types.into_iter().rev() {
+                            let ans = self.fresh_var();
+                            result = Type::Arrow {
+                                arg: Rc::new(param_ty),
+                                ret: Rc::new(result),
+                                ans_in: Rc::new(ans.clone()),
+                                ans_out: Rc::new(ans),
+                            };
+                        }
+                        result
+                    };
+
+                    self.level -= 1;
+                    let scheme = self.generalize(&func_ty);
+                    env.insert(op.clone(), scheme);
+                }
+                Item::Decl(Decl::Fixity(_)) => {
+                    // Fixity declarations are handled during parsing
+                    // No type inference needed
+                }
+                Item::Decl(Decl::LetRec { bindings }) => {
+                    // Mutually recursive function definitions
+                    self.level += 1;
+                    self.wanted_preds.clear();
+
+                    // Step 1: Create preliminary types for all bindings
+                    let mut local_env = env.clone();
+                    let mut preliminary_types: Vec<Type> = Vec::new();
+
+                    for binding in bindings {
+                        let preliminary_ty = self.fresh_var();
+                        preliminary_types.push(preliminary_ty.clone());
+                        local_env.insert(binding.name.node.clone(), Scheme::mono(preliminary_ty));
+                    }
+
+                    // Step 2: Infer each binding's body
+                    for (i, binding) in bindings.iter().enumerate() {
+                        let mut body_env = local_env.clone();
+                        let mut param_types = Vec::new();
+
+                        for param in &binding.params {
+                            let param_ty = self.fresh_var();
+                            self.bind_pattern(&mut body_env, param, &param_ty)?;
+                            param_types.push(param_ty);
+                        }
+
+                        let body_result = self.infer_expr_full(&body_env, &binding.body)?;
+
+                        let func_ty = if param_types.is_empty() {
+                            body_result.ty
+                        } else {
+                            let mut result = Type::Arrow {
+                                arg: Rc::new(param_types.pop().unwrap()),
+                                ret: Rc::new(body_result.ty),
+                                ans_in: Rc::new(body_result.answer_before),
+                                ans_out: Rc::new(body_result.answer_after),
+                            };
+                            for param_ty in param_types.into_iter().rev() {
+                                let ans = self.fresh_var();
+                                result = Type::Arrow {
+                                    arg: Rc::new(param_ty),
+                                    ret: Rc::new(result),
+                                    ans_in: Rc::new(ans.clone()),
+                                    ans_out: Rc::new(ans),
+                                };
+                            }
+                            result
+                        };
+
+                        self.unify_at(&preliminary_types[i], &func_ty, &binding.name.span)?;
+                    }
+
+                    self.level -= 1;
+
+                    // Generalize and add to global env
+                    for (i, binding) in bindings.iter().enumerate() {
+                        let scheme = self.generalize(&preliminary_types[i]);
+                        env.insert(binding.name.node.clone(), scheme);
+                    }
                 }
                 Item::Expr(expr) => {
                     // Type-check top-level expressions
