@@ -36,3 +36,10 @@ tmp/
 .beads/bd.pipe
 .beads/.exclusive-lock
 .git/beads-worktrees/
+
+# Archives
+*.tar.gz
+*.zip
+
+# Issue tracking notes (tracked in beads, not markdown)
+issues/
