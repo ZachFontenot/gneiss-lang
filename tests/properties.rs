@@ -39,7 +39,7 @@ fn arb_ground_type(depth: usize) -> BoxedStrategy<Type> {
             3 => Just(Type::String),
             3 => Just(Type::Unit),
             // Compound types
-            1 => arb_ground_type(depth - 1).prop_map(|t| Type::List(Rc::new(t))),
+            1 => arb_ground_type(depth - 1).prop_map(|t| Type::list(t)),
             1 => (arb_ground_type(depth - 1), arb_ground_type(depth - 1))
                 .prop_map(|(a, b)| {
                     // Create a pure arrow type (same answer type for both)
@@ -78,7 +78,7 @@ fn arb_type_with_vars(depth: usize) -> BoxedStrategy<Type> {
             3 => Just(Type::Bool),
             2 => (0u32..100).prop_map(|id| Type::new_var(id, 0)),
             // Compound types
-            1 => arb_type_with_vars(depth - 1).prop_map(|t| Type::List(Rc::new(t))),
+            1 => arb_type_with_vars(depth - 1).prop_map(|t| Type::list(t)),
             1 => (arb_type_with_vars(depth - 1), arb_type_with_vars(depth - 1))
                 .prop_map(|(a, b)| {
                     // Create a pure arrow type (same answer type for both)
@@ -596,8 +596,8 @@ fn value_matches_type(val: &Value, ty: &Type) -> bool {
         (Value::Char(_), Type::Char) => true,
         (Value::Unit, Type::Unit) => true,
         (Value::Closure { .. }, Type::Arrow { .. }) => true,
-        (Value::List(items), Type::List(elem_ty)) => {
-            items.iter().all(|item| value_matches_type(item, &elem_ty))
+        (Value::List(items), Type::Constructor { name, args }) if name == "List" && args.len() == 1 => {
+            items.iter().all(|item| value_matches_type(item, &args[0]))
         }
         (Value::Tuple(items), Type::Tuple(types)) => {
             items.len() == types.len()

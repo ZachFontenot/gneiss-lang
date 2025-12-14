@@ -60,7 +60,25 @@ impl Inferencer {
         Type::new_var(id, self.level)
     }
 
-    /// Unify two types
+    /// Unify two types with source location for error reporting
+    fn unify_at(&mut self, t1: &Type, t2: &Type, span: &Span) -> Result<(), TypeError> {
+        self.unify(t1, t2).map_err(|e| self.add_span_to_error(e, span.clone()))
+    }
+
+    /// Add span to a TypeError if it doesn't have one
+    fn add_span_to_error(&self, err: TypeError, span: Span) -> TypeError {
+        match err {
+            TypeError::TypeMismatch { expected, found, span: None } => {
+                TypeError::TypeMismatch { expected, found, span: Some(span) }
+            }
+            TypeError::OccursCheck { var_id, ty, span: None } => {
+                TypeError::OccursCheck { var_id, ty, span: Some(span) }
+            }
+            other => other,
+        }
+    }
+
+    /// Unify two types (no span - use unify_at when possible)
     fn unify(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError> {
         let t1 = t1.resolve();
         let t2 = t2.resolve();
@@ -120,9 +138,6 @@ impl Inferencer {
                 Ok(())
             }
 
-            // Lists
-            (Type::List(t1), Type::List(t2)) => self.unify(t1, t2),
-
             // Channels
             (Type::Channel(t1), Type::Channel(t2)) => self.unify(t1, t2),
 
@@ -174,7 +189,6 @@ impl Inferencer {
                     self.update_levels(&t, level);
                 }
             }
-            Type::List(t) => self.update_levels(&t, level),
             Type::Channel(t) => self.update_levels(&t, level),
             Type::Constructor { args, .. } => {
                 for t in args {
@@ -214,7 +228,6 @@ impl Inferencer {
                 ans_out: Rc::new(self.substitute(ans_out, subst)),
             },
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
-            Type::List(t) => Type::List(Rc::new(self.substitute(t, subst))),
             Type::Channel(t) => Type::Channel(Rc::new(self.substitute(t, subst))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
@@ -265,7 +278,6 @@ impl Inferencer {
                     .map(|t| self.generalize_inner(t, generics))
                     .collect(),
             ),
-            Type::List(t) => Type::List(Rc::new(self.generalize_inner(t, generics))),
             Type::Channel(t) => Type::Channel(Rc::new(self.generalize_inner(t, generics))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
@@ -439,10 +451,10 @@ impl Inferencer {
                     ans_in: Rc::new(alpha.clone()),
                     ans_out: Rc::new(beta.clone()),
                 };
-                self.unify(&fun_result.ty, &expected_fun)?;
+                self.unify_at(&fun_result.ty, &expected_fun, &func.span)?;
 
                 // Argument must have type σ
-                self.unify(&arg_result.ty, &param_ty)?;
+                self.unify_at(&arg_result.ty, &param_ty, &arg.span)?;
 
                 // CRITICAL THREADING:
                 // 1. arg.ans_out = fun.ans_in (= γ)
@@ -560,13 +572,13 @@ impl Inferencer {
                 else_branch,
             } => {
                 let cond_result = self.infer_expr_full(env, cond)?;
-                self.unify(&cond_result.ty, &Type::Bool)?;
+                self.unify_at(&cond_result.ty, &Type::Bool, &cond.span)?;
 
                 let then_result = self.infer_expr_full(env, then_branch)?;
                 let else_result = self.infer_expr_full(env, else_branch)?;
 
                 // Branches must have same type
-                self.unify(&then_result.ty, &else_result.ty)?;
+                self.unify_at(&then_result.ty, &else_result.ty, &else_branch.span)?;
 
                 // Branches must have same answer type effects (they're alternatives)
                 self.unify(&then_result.answer_before, &else_result.answer_before)?;
@@ -605,7 +617,7 @@ impl Inferencer {
                     };
 
                     let body_result = self.infer_expr_full(&arm_env, &arm.body)?;
-                    self.unify(&result_ty, &body_result.ty)?;
+                    self.unify_at(&result_ty, &body_result.ty, &arm.body.span)?;
 
                     // All arms must have same answer type effects
                     self.unify(&body_result.answer_before, &guard_ans_out)?;
@@ -622,13 +634,15 @@ impl Inferencer {
                 })
             }
 
-            // Tuple: pure
+            // Tuple: pure (empty tuple normalizes to Unit)
             ExprKind::Tuple(exprs) => {
                 let types: Result<Vec<_>, _> = exprs
                     .iter()
                     .map(|e| self.infer_expr(env, e))
                     .collect();
-                Ok(InferResult::pure(Type::Tuple(types?), ans))
+                let types = types?;
+                let ty = if types.is_empty() { Type::Unit } else { Type::Tuple(types) };
+                Ok(InferResult::pure(ty, ans))
             }
 
             // List: pure
@@ -638,7 +652,7 @@ impl Inferencer {
                     let ty = self.infer_expr(env, expr)?;
                     self.unify(&elem_ty, &ty)?;
                 }
-                Ok(InferResult::pure(Type::List(Rc::new(elem_ty)), ans))
+                Ok(InferResult::pure(Type::list(elem_ty), ans))
             }
 
             // Constructor: pure
@@ -723,31 +737,32 @@ impl Inferencer {
 
                 let result_ty = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                        self.unify(&left_result.ty, &Type::Int)?;
-                        self.unify(&right_result.ty, &Type::Int)?;
+                        self.unify_at(&left_result.ty, &Type::Int, &left.span)?;
+                        self.unify_at(&right_result.ty, &Type::Int, &right.span)?;
                         Type::Int
                     }
                     BinOp::Eq | BinOp::Neq => {
-                        self.unify(&left_result.ty, &right_result.ty)?;
+                        self.unify_at(&left_result.ty, &right_result.ty, &right.span)?;
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::Lte | BinOp::Gte => {
-                        self.unify(&left_result.ty, &Type::Int)?;
-                        self.unify(&right_result.ty, &Type::Int)?;
+                        self.unify_at(&left_result.ty, &Type::Int, &left.span)?;
+                        self.unify_at(&right_result.ty, &Type::Int, &right.span)?;
                         Type::Bool
                     }
                     BinOp::And | BinOp::Or => {
-                        self.unify(&left_result.ty, &Type::Bool)?;
-                        self.unify(&right_result.ty, &Type::Bool)?;
+                        self.unify_at(&left_result.ty, &Type::Bool, &left.span)?;
+                        self.unify_at(&right_result.ty, &Type::Bool, &right.span)?;
                         Type::Bool
                     }
                     BinOp::Cons => {
                         let elem_ty = left_result.ty.clone();
-                        self.unify(&right_result.ty, &Type::List(Rc::new(elem_ty.clone())))?;
-                        Type::List(Rc::new(elem_ty))
+                        let list_ty = Type::list(elem_ty);
+                        self.unify_at(&right_result.ty, &list_ty, &right.span)?;
+                        list_ty
                     }
                     BinOp::Concat => {
-                        self.unify(&left_result.ty, &right_result.ty)?;
+                        self.unify_at(&left_result.ty, &right_result.ty, &right.span)?;
                         // Works for lists and strings
                         left_result.ty.clone()
                     }
@@ -763,12 +778,12 @@ impl Inferencer {
 
                         match op {
                             BinOp::Compose => {
-                                self.unify(&left_result.ty, &Type::arrow(a.clone(), b.clone()))?;
-                                self.unify(&right_result.ty, &Type::arrow(b, c.clone()))?;
+                                self.unify_at(&left_result.ty, &Type::arrow(a.clone(), b.clone()), &left.span)?;
+                                self.unify_at(&right_result.ty, &Type::arrow(b, c.clone()), &right.span)?;
                             }
                             BinOp::ComposeBack => {
-                                self.unify(&left_result.ty, &Type::arrow(b.clone(), c.clone()))?;
-                                self.unify(&right_result.ty, &Type::arrow(a.clone(), b))?;
+                                self.unify_at(&left_result.ty, &Type::arrow(b.clone(), c.clone()), &left.span)?;
+                                self.unify_at(&right_result.ty, &Type::arrow(a.clone(), b), &right.span)?;
                             }
                             _ => unreachable!(),
                         }
@@ -789,11 +804,11 @@ impl Inferencer {
                 let operand_ty = self.infer_expr(env, operand)?;
                 let result_ty = match op {
                     UnaryOp::Neg => {
-                        self.unify(&operand_ty, &Type::Int)?;
+                        self.unify_at(&operand_ty, &Type::Int, &operand.span)?;
                         Type::Int
                     }
                     UnaryOp::Not => {
-                        self.unify(&operand_ty, &Type::Bool)?;
+                        self.unify_at(&operand_ty, &Type::Bool, &operand.span)?;
                         Type::Bool
                     }
                 };
@@ -986,7 +1001,8 @@ impl Inferencer {
 
             PatternKind::List(pats) => {
                 let elem_ty = self.fresh_var();
-                self.unify(ty, &Type::List(Rc::new(elem_ty.clone())))?;
+                let list_ty = Type::list(elem_ty.clone());
+                self.unify(ty, &list_ty)?;
                 for pat in pats {
                     self.bind_pattern(env, pat, &elem_ty)?;
                 }
@@ -995,7 +1011,7 @@ impl Inferencer {
 
             PatternKind::Cons { head, tail } => {
                 let elem_ty = self.fresh_var();
-                let list_ty = Type::List(Rc::new(elem_ty.clone()));
+                let list_ty = Type::list(elem_ty.clone());
                 self.unify(ty, &list_ty)?;
                 self.bind_pattern(env, head, &elem_ty)?;
                 self.bind_pattern(env, tail, &list_ty)?;
@@ -1094,10 +1110,17 @@ impl Inferencer {
                     .map(|a| self.type_expr_to_type(a, param_map))
                     .collect();
                 match &constructor.node {
-                    TypeExprKind::Named(name) => Ok(Type::Constructor {
-                        name: name.clone(),
-                        args: arg_types?,
-                    }),
+                    TypeExprKind::Named(name) => {
+                        let arg_types = arg_types?;
+                        // Canonicalize "List a" to Type::list(a)
+                        if name == "List" && arg_types.len() == 1 {
+                            return Ok(Type::list(arg_types.into_iter().next().unwrap()));
+                        }
+                        Ok(Type::Constructor {
+                            name: name.clone(),
+                            args: arg_types,
+                        })
+                    }
                     _ => Err(TypeError::PatternMismatch { span: constructor.span.clone() }),
                 }
             }
@@ -1111,11 +1134,17 @@ impl Inferencer {
                     .iter()
                     .map(|t| self.type_expr_to_type(t, param_map))
                     .collect();
-                Ok(Type::Tuple(tys?))
+                let tys = tys?;
+                // Empty tuple normalizes to Unit (they are the same in type theory)
+                Ok(if tys.is_empty() { Type::Unit } else { Type::Tuple(tys) })
             }
             TypeExprKind::Channel(inner) => {
                 let inner_ty = self.type_expr_to_type(inner, param_map)?;
                 Ok(Type::Channel(Rc::new(inner_ty)))
+            }
+            TypeExprKind::List(inner) => {
+                let elem_ty = self.type_expr_to_type(inner, param_map)?;
+                Ok(Type::list(elem_ty))
             }
         }
     }
@@ -1353,6 +1382,12 @@ impl Inferencer {
                     // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
                     // For now, predicates are collected but not checked
 
+                    // Check against declared type signature if one exists (from `val` declaration)
+                    if let Some(declared_scheme) = env.get(name) {
+                        let declared_ty = self.instantiate(declared_scheme);
+                        self.unify(&func_ty, &declared_ty)?;
+                    }
+
                     let scheme = self.generalize(&func_ty);
                     env.insert(name.clone(), scheme);
                 }
@@ -1361,6 +1396,14 @@ impl Inferencer {
                 }
                 Item::Decl(Decl::Trait { .. } | Decl::Instance { .. }) => {
                     // Already handled in second/third pass
+                }
+                Item::Decl(Decl::Val { name, type_sig }) => {
+                    // Register a type signature for the name
+                    // The subsequent let declaration will be checked against this
+                    let param_map = HashMap::new();
+                    let declared_ty = self.type_expr_to_type(type_sig, &param_map)?;
+                    let scheme = self.generalize(&declared_ty);
+                    env.insert(name.clone(), scheme);
                 }
                 Item::Expr(expr) => {
                     // Type-check top-level expressions

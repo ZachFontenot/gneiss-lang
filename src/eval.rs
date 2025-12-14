@@ -265,7 +265,7 @@ impl Value {
             Value::List(items) => {
                 // Infer element type from first item, or use a fresh var
                 let elem_ty = items.first().map(|v| v.to_type()).unwrap_or(Type::Unit);
-                Type::List(Rc::new(elem_ty))
+                Type::list(elem_ty)
             }
             Value::Tuple(items) => {
                 Type::Tuple(items.iter().map(|v| v.to_type()).collect())
@@ -293,7 +293,7 @@ impl Value {
             Value::Unit => Type::Unit,
             Value::List(items) => {
                 let elem_ty = items.first().map(|v| v.to_type_with_ctx(type_ctx)).unwrap_or(Type::Unit);
-                Type::List(Rc::new(elem_ty))
+                Type::list(elem_ty)
             }
             Value::Tuple(items) => {
                 Type::Tuple(items.iter().map(|v| v.to_type_with_ctx(type_ctx)).collect())
@@ -492,6 +492,11 @@ impl Interpreter {
                         closure,
                     );
                 }
+                Ok(())
+            }
+            Decl::Val { .. } => {
+                // Type signatures are handled during type inference
+                // At runtime, nothing to do
                 Ok(())
             }
         }

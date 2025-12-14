@@ -35,10 +35,7 @@ pub enum Type {
     /// Tuple type: (a, b, c)
     Tuple(Vec<Type>),
 
-    /// List type: [a]
-    List(Rc<Type>),
-
-    /// Named type constructor with arguments: Option a, Result a e
+    /// Named type constructor with arguments: Option a, Result a e, List a
     Constructor {
         name: String,
         args: Vec<Type>,
@@ -73,6 +70,14 @@ impl Type {
         Type::Var(Rc::new(RefCell::new(TypeVar::Generic(id))))
     }
 
+    /// Create a list type: List elem
+    pub fn list(elem: Type) -> Type {
+        Type::Constructor {
+            name: "List".to_string(),
+            args: vec![elem],
+        }
+    }
+
     /// Follow all links to get the actual type
     pub fn resolve(&self) -> Type {
         match self {
@@ -96,7 +101,6 @@ impl Type {
                 arg.occurs(id) || ret.occurs(id) || ans_in.occurs(id) || ans_out.occurs(id)
             }
             Type::Tuple(types) => types.iter().any(|t| t.occurs(id)),
-            Type::List(t) => t.occurs(id),
             Type::Constructor { args, .. } => args.iter().any(|t| t.occurs(id)),
             Type::Channel(t) => t.occurs(id),
             Type::Int | Type::Float | Type::Bool | Type::String | Type::Char | Type::Unit | Type::Pid => false,
@@ -199,8 +203,11 @@ impl fmt::Display for Type {
                 }
                 write!(f, ")")
             }
-            Type::List(t) => write!(f, "[{}]", t),
             Type::Constructor { name, args } => {
+                // Special case: display List as [a] instead of List a
+                if name == "List" && args.len() == 1 {
+                    return write!(f, "[{}]", args[0]);
+                }
                 write!(f, "{}", name)?;
                 for arg in args {
                     write!(f, " {}", arg)?;
@@ -394,7 +401,6 @@ pub fn types_equal(t1: &Type, t2: &Type) -> bool {
         (Type::Tuple(ts1), Type::Tuple(ts2)) => {
             ts1.len() == ts2.len() && ts1.iter().zip(ts2).all(|(x, y)| types_equal(x, y))
         }
-        (Type::List(e1), Type::List(e2)) => types_equal(e1, e2),
         (
             Type::Constructor { name: n1, args: a1 },
             Type::Constructor { name: n2, args: a2 },
@@ -442,7 +448,6 @@ pub fn apply_subst(ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
             ans_out: Rc::new(apply_subst(&ans_out, subst)),
         },
         Type::Tuple(types) => Type::Tuple(types.iter().map(|t| apply_subst(t, subst)).collect()),
-        Type::List(t) => Type::List(Rc::new(apply_subst(&t, subst))),
         Type::Constructor { name, args } => Type::Constructor {
             name,
             args: args.iter().map(|t| apply_subst(t, subst)).collect(),
@@ -609,9 +614,6 @@ fn types_overlap(t1: &Type, t2: &Type) -> bool {
             },
         ) => n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| types_overlap(x, y)),
 
-        // Lists might overlap if their element types might overlap
-        (Type::List(e1), Type::List(e2)) => types_overlap(e1, e2),
-
         // Channels might overlap if their element types might overlap
         (Type::Channel(e1), Type::Channel(e2)) => types_overlap(e1, e2),
 
@@ -709,9 +711,6 @@ fn match_type_inner(pattern: &Type, target: &Type, subst: &mut Substitution) -> 
             // (e.g., pattern `Option a` matches target `Option` from nullary constructor)
             a1.iter().zip(a2).all(|(p, t)| match_type_inner(p, t, subst))
         }
-
-        // Lists
-        (Type::List(p), Type::List(t)) => match_type_inner(p, t, subst),
 
         // Channels
         (Type::Channel(p), Type::Channel(t)) => match_type_inner(p, t, subst),

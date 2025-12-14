@@ -412,6 +412,9 @@ pub enum TypeExprKind {
 
     // Channel type: Channel a
     Channel(Rc<TypeExpr>),
+
+    // List type: [a]
+    List(Rc<TypeExpr>),
 }
 
 // ============================================================================
@@ -456,6 +459,12 @@ pub enum Decl {
         target_type: TypeExpr,
         constraints: Vec<Constraint>,
         methods: Vec<InstanceMethod>,
+    },
+
+    // val xs : [Int]  -- standalone type signature
+    Val {
+        name: Ident,
+        type_sig: TypeExpr,
     },
 }
 

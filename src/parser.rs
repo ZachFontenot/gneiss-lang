@@ -43,7 +43,7 @@ impl Parser {
                 // Parse the common prefix, then check for `in`
                 self.parse_let_item()
             }
-            Token::Type | Token::Trait | Token::Impl => {
+            Token::Type | Token::Trait | Token::Impl | Token::Val => {
                 let decl = self.parse_decl()?;
                 // Optionally consume ;; after declaration
                 self.match_token(&Token::DoubleSemi);
@@ -205,8 +205,18 @@ impl Parser {
             Token::Type => self.parse_type_decl(),
             Token::Trait => self.parse_trait_decl(),
             Token::Impl => self.parse_instance_decl(),
+            Token::Val => self.parse_val_decl(),
             _ => Err(self.unexpected_token("declaration")),
         }
+    }
+
+    /// Parse a standalone type signature: val xs : [Int]
+    fn parse_val_decl(&mut self) -> Result<Decl, ParseError> {
+        self.consume(Token::Val)?;
+        let name = self.parse_ident()?;
+        self.consume(Token::Colon)?;
+        let type_sig = self.parse_type_expr()?;
+        Ok(Decl::Val { name, type_sig })
     }
 
     fn parse_let_decl(&mut self) -> Result<Decl, ParseError> {
@@ -529,6 +539,14 @@ impl Parser {
                     Ok(first)
                 }
             }
+            Token::LBracket => {
+                // List type: [a]
+                self.advance();
+                let elem = self.parse_type_expr()?;
+                self.consume(Token::RBracket)?;
+                let span = start.merge(&self.current_span());
+                Ok(Spanned::new(TypeExprKind::List(Rc::new(elem)), span))
+            }
             _ => Err(self.unexpected_token("type")),
         }
     }
@@ -617,11 +635,13 @@ impl Parser {
             let start = self.current_span();
             self.advance();
 
-            let cond = self.parse_expr()?;
+            // Use parse_expr_let for branches to exclude top-level sequences
+            // (like OCaml: sequences in branches require parentheses)
+            let cond = self.parse_expr_let()?;
             self.consume(Token::Then)?;
-            let then_branch = self.parse_expr()?;
+            let then_branch = self.parse_expr_let()?;
             self.consume(Token::Else)?;
-            let else_branch = self.parse_expr()?;
+            let else_branch = self.parse_expr_let()?;
 
             let span = start.merge(&else_branch.span);
             Ok(Spanned::new(
