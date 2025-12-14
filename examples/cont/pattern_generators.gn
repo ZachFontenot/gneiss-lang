@@ -35,7 +35,7 @@ let example2 n =
 
 -- Example 3: Yield in a loop (manual recursion)
 let count_down n =
-    let rec go i =
+    let go i =
         if i <= 0 then []
         else (
             yield i;
@@ -47,7 +47,7 @@ let count_down n =
 
 -- Example 4: Filter while yielding
 let evens_up_to n =
-    let rec go i =
+    let go i =
         if i > n then []
         else (
             if i mod 2 == 0 then yield i else ();
