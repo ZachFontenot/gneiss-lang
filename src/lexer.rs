@@ -121,7 +121,6 @@ impl LexError {
 }
 
 pub struct Lexer<'a> {
-    input: &'a str, // That's fine
     chars: Peekable<Chars<'a>>,
     pos: usize,
 }
@@ -129,7 +128,6 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
-            input,
             chars: input.chars().peekable(),
             pos: 0,
         }
