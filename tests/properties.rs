@@ -561,6 +561,35 @@ fn test_char_comparison_operators() {
     }
 }
 
+#[test]
+fn test_sequence_in_match_arm() {
+    // Sequences (semicolons) should be allowed in match arm bodies
+    let source = r#"
+fun x ->
+    match x with
+    | 1 -> (); 100
+    | 2 -> 200
+"#;
+    let result = infer_source(source);
+    assert!(result.is_ok(), "Sequence in match arm should type-check: {:?}", result);
+}
+
+#[test]
+fn test_nested_match_with_sequences() {
+    // Nested matches with sequences should parse correctly
+    let source = r#"
+fun x y ->
+    match x with
+    | 1 ->
+        match y with
+        | 10 -> (); 1
+        | 20 -> (); 2
+    | 2 -> 0
+"#;
+    let result = infer_source(source);
+    assert!(result.is_ok(), "Nested match with sequences should type-check: {:?}", result);
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================

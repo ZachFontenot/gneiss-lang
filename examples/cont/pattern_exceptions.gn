@@ -20,6 +20,15 @@ type Result a e =
     | Ok a
     | Err e
 
+-- Helpers (must be defined before use)
+let sqrt x = x  -- stub
+let float x = x  -- stub
+let float_to_string x = "?"  -- stub
+let int_to_string n =
+    if n == 0 then "0" else if n == 1 then "1" else if n == 2 then "2"
+    else if n == 3 then "3" else if n == 4 then "4" else if n == 5 then "5"
+    else if n == 10 then "10" else if n == 25 then "25" else "?"
+
 -- throw: abort computation with an error
 let throw err =
     shift (fun _k -> Err err)  -- Discard continuation, return error
@@ -44,7 +53,7 @@ let division_example () =
             c
         )
         (fun err -> 
-            print ("Caught error: " ^ err);
+            print ("Caught error: " ++err);
             0  -- default value
         )
 
@@ -78,7 +87,7 @@ let math_example () =
         Ok b
     ) in
     match result with
-    | Ok x -> print ("Result: " ^ float_to_string x)
+    | Ok x -> print ("Result: " ++float_to_string x)
     | Err DivByZero -> print "Error: division by zero"
     | Err Overflow -> print "Error: overflow"
     | Err NegativeSqrt -> print "Error: negative square root"
@@ -95,13 +104,13 @@ let nested_example () =
             let b = safe_div 20 0 in     -- throws in inner
             a + b
         ) (fun err ->
-            print ("Inner handler: " ^ err);
+            print ("Inner handler: " ++err);
             100  -- recover with default
         ) in
         let y = safe_div x 0 in  -- throws in outer
         y
     ) (fun err ->
-        print ("Outer handler: " ^ err);
+        print ("Outer handler: " ++err);
         -1
     )
 
@@ -130,10 +139,10 @@ let rec run_with_inputs computation inputs =
     | NeedsInput prompt k ->
         match inputs with
         | [] -> 
-            print ("Missing input for: " ^ prompt);
+            print ("Missing input for: " ++ prompt);
             run_with_inputs (k 0) []  -- default
         | input :: rest ->
-            print ("Providing " ^ int_to_string input ^ " for: " ^ prompt);
+            print ("Providing " ++ int_to_string input ++ " for: " ++ prompt);
             run_with_inputs (k input) rest
 
 let input_example () =
@@ -172,7 +181,7 @@ let finally_example () =
                 print "Cleanup: closing resource"  -- This DOES run
             )
     ) (fun err ->
-        print ("Caught after cleanup: " ^ err);
+        print ("Caught after cleanup: " ++err);
         0
     )
 
@@ -181,7 +190,7 @@ let finally_example () =
 -- =============================================================================
 
 let assert_that condition message =
-    if not condition then throw ("Assertion failed: " ^ message)
+    if not condition then throw ("Assertion failed: " ++message)
     else ()
 
 let validation_example user_age =
@@ -195,15 +204,6 @@ let validation_example user_age =
         print err;
         false
     )
-
--- Helpers
-let sqrt x = x  -- stub
-let float x = x  -- stub  
-let float_to_string x = "?"  -- stub
-let int_to_string n =
-    if n == 0 then "0" else if n == 1 then "1" else if n == 2 then "2"
-    else if n == 3 then "3" else if n == 4 then "4" else if n == 5 then "5"
-    else if n == 10 then "10" else if n == 25 then "25" else "?"
 
 let main () =
     print "=== Simple Exception ===";

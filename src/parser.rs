@@ -1060,7 +1060,7 @@ impl Parser {
             self.consume(Token::LArrow)?;
             let channel = self.parse_expr_app()?; // Parse channel expr (no operators to avoid <- ambiguity)
             self.consume(Token::Arrow)?;
-            let body = self.parse_expr_in(ExprContext::NoSeq)?; // Body allows let/if/fun
+            let body = self.parse_expr_in(ExprContext::Full)?; // Body allows full language including sequences
 
             arms.push(SelectArm {
                 channel,
@@ -1122,7 +1122,7 @@ impl Parser {
             };
 
             self.consume(Token::Arrow)?;
-            let body = self.parse_expr_in(ExprContext::NoSeq)?; // Body allows let/if/fun
+            let body = self.parse_expr_in(ExprContext::Full)?; // Body allows full language including sequences
 
             arms.push(MatchArm {
                 pattern,
