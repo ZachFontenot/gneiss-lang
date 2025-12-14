@@ -55,7 +55,11 @@ pub struct LocatedSpan {
 impl std::fmt::Display for LocatedSpan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.start.line == self.end.line {
-            write!(f, "{}:{}-{}", self.start.line, self.start.column, self.end.column)
+            write!(
+                f,
+                "{}:{}-{}",
+                self.start.line, self.start.column, self.end.column
+            )
         } else {
             write!(f, "{}-{}", self.start, self.end)
         }
@@ -106,8 +110,8 @@ impl SourceMap {
     pub fn position(&self, byte_offset: usize) -> Position {
         // Binary search to find the line containing this offset
         let line_idx = match self.line_starts.binary_search(&byte_offset) {
-            Ok(idx) => idx,     // Exact match - at start of line
-            Err(idx) => idx - 1 // Between line starts - use previous line
+            Ok(idx) => idx,      // Exact match - at start of line
+            Err(idx) => idx - 1, // Between line starts - use previous line
         };
 
         let line_start = self.line_starts[line_idx];
@@ -280,7 +284,6 @@ pub enum ExprKind {
     // ========================================================================
     // Delimited continuations
     // ========================================================================
-
     /// Delimited continuation boundary: reset expr
     Reset(Rc<Expr>),
 
@@ -351,9 +354,9 @@ pub enum BinOp {
     Cons,
     Concat,
     // Function
-    Pipe,     // |>
-    PipeBack, // <|
-    Compose,  // >>
+    Pipe,        // |>
+    PipeBack,    // <|
+    Compose,     // >>
     ComposeBack, // <<
     // User-defined operator (looked up as a function)
     UserDefined(String),

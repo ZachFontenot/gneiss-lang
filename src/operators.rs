@@ -68,61 +68,178 @@ impl OperatorTable {
         // Level 8: >> << (function composition)
 
         // Boolean
-        self.operators
-            .insert("||".into(), OpInfo { precedence: 2, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("&&".into(), OpInfo { precedence: 3, assoc: Left, is_builtin: true });
+        self.operators.insert(
+            "||".into(),
+            OpInfo {
+                precedence: 2,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "&&".into(),
+            OpInfo {
+                precedence: 3,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
 
         // Comparison (non-associative)
-        self.operators
-            .insert("==".into(), OpInfo { precedence: 4, assoc: None, is_builtin: true });
-        self.operators
-            .insert("!=".into(), OpInfo { precedence: 4, assoc: None, is_builtin: true });
-        self.operators
-            .insert("<".into(), OpInfo { precedence: 4, assoc: None, is_builtin: true });
-        self.operators
-            .insert(">".into(), OpInfo { precedence: 4, assoc: None, is_builtin: true });
-        self.operators
-            .insert("<=".into(), OpInfo { precedence: 4, assoc: None, is_builtin: true });
-        self.operators
-            .insert(">=".into(), OpInfo { precedence: 4, assoc: None, is_builtin: true });
+        self.operators.insert(
+            "==".into(),
+            OpInfo {
+                precedence: 4,
+                assoc: None,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "!=".into(),
+            OpInfo {
+                precedence: 4,
+                assoc: None,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "<".into(),
+            OpInfo {
+                precedence: 4,
+                assoc: None,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            ">".into(),
+            OpInfo {
+                precedence: 4,
+                assoc: None,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "<=".into(),
+            OpInfo {
+                precedence: 4,
+                assoc: None,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            ">=".into(),
+            OpInfo {
+                precedence: 4,
+                assoc: None,
+                is_builtin: true,
+            },
+        );
 
         // List (right-associative)
-        self.operators
-            .insert("::".into(), OpInfo { precedence: 5, assoc: Right, is_builtin: true });
-        self.operators
-            .insert("++".into(), OpInfo { precedence: 5, assoc: Right, is_builtin: true });
+        self.operators.insert(
+            "::".into(),
+            OpInfo {
+                precedence: 5,
+                assoc: Right,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "++".into(),
+            OpInfo {
+                precedence: 5,
+                assoc: Right,
+                is_builtin: true,
+            },
+        );
 
         // Arithmetic
-        self.operators
-            .insert("+".into(), OpInfo { precedence: 6, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("-".into(), OpInfo { precedence: 6, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("*".into(), OpInfo { precedence: 7, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("/".into(), OpInfo { precedence: 7, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("%".into(), OpInfo { precedence: 7, assoc: Left, is_builtin: true });
+        self.operators.insert(
+            "+".into(),
+            OpInfo {
+                precedence: 6,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "-".into(),
+            OpInfo {
+                precedence: 6,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "*".into(),
+            OpInfo {
+                precedence: 7,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "/".into(),
+            OpInfo {
+                precedence: 7,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "%".into(),
+            OpInfo {
+                precedence: 7,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
 
         // Function composition
-        self.operators
-            .insert(">>".into(), OpInfo { precedence: 8, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("<<".into(), OpInfo { precedence: 8, assoc: Left, is_builtin: true });
+        self.operators.insert(
+            ">>".into(),
+            OpInfo {
+                precedence: 8,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "<<".into(),
+            OpInfo {
+                precedence: 8,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
 
         // Pipe operators (these desugar to App in parser, but register for completeness)
-        self.operators
-            .insert("|>".into(), OpInfo { precedence: 1, assoc: Left, is_builtin: true });
-        self.operators
-            .insert("<|".into(), OpInfo { precedence: 1, assoc: Right, is_builtin: true });
+        self.operators.insert(
+            "|>".into(),
+            OpInfo {
+                precedence: 1,
+                assoc: Left,
+                is_builtin: true,
+            },
+        );
+        self.operators.insert(
+            "<|".into(),
+            OpInfo {
+                precedence: 1,
+                assoc: Right,
+                is_builtin: true,
+            },
+        );
     }
 
     /// Register a user-defined operator. Returns a warning if shadowing a built-in.
     pub fn register(&mut self, op: String, info: OpInfo, span: Span) -> Option<Warning> {
         let warning = if let Some(existing) = self.operators.get(&op) {
             if existing.is_builtin {
-                Some(Warning::ShadowingBuiltinOperator { op: op.clone(), span })
+                Some(Warning::ShadowingBuiltinOperator {
+                    op: op.clone(),
+                    span,
+                })
             } else {
                 None
             }
@@ -147,7 +264,24 @@ impl OperatorTable {
 
 /// Characters that can appear in operator symbols
 pub fn is_operator_char(c: char) -> bool {
-    matches!(c, '!' | '$' | '%' | '&' | '*' | '+' | '-' | '/' | '<' | '=' | '>' | '?' | '@' | '^' | '|' | '~')
+    matches!(
+        c,
+        '!' | '$'
+            | '%'
+            | '&'
+            | '*'
+            | '+'
+            | '-'
+            | '/'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '^'
+            | '|'
+            | '~'
+    )
 }
 
 #[cfg(test)]

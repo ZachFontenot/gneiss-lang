@@ -35,7 +35,11 @@ impl ExprContext {
 #[derive(Error, Debug)]
 pub enum ParseError {
     #[error("unexpected token: expected {expected}, found {found:?}")]
-    UnexpectedToken { expected: String, found: Token, span: Span },
+    UnexpectedToken {
+        expected: String,
+        found: Token,
+        span: Span,
+    },
     #[error("unexpected end of file")]
     UnexpectedEof { expected: String, last_span: Span },
     #[error("invalid pattern")]
@@ -163,10 +167,7 @@ impl Parser {
             // Desugar function syntax if needed
             let (pattern, value) = if params.is_empty() {
                 // Simple pattern: just the name as a variable pattern
-                let name_pattern = Spanned::new(
-                    PatternKind::Var(first_name),
-                    start.clone(),
-                );
+                let name_pattern = Spanned::new(PatternKind::Var(first_name), start.clone());
                 (name_pattern, value_expr)
             } else {
                 // Function syntax: let f x y = e in body
@@ -179,10 +180,7 @@ impl Parser {
                     },
                     lambda_span,
                 );
-                let name_pattern = Spanned::new(
-                    PatternKind::Var(first_name),
-                    start.clone(),
-                );
+                let name_pattern = Spanned::new(PatternKind::Var(first_name), start.clone());
                 (name_pattern, lambda)
             };
 
@@ -236,7 +234,12 @@ impl Parser {
     /// Parse operator definition (both prefix and infix syntax)
     /// Prefix: let (<|>) a b = body
     /// Infix: let a <|> b = body
-    fn parse_operator_def(&mut self, start: Span, op: String, first_param: Option<(String, Span)>) -> Result<Item, ParseError> {
+    fn parse_operator_def(
+        &mut self,
+        start: Span,
+        op: String,
+        first_param: Option<(String, Span)>,
+    ) -> Result<Item, ParseError> {
         let mut params = Vec::new();
 
         if let Some((name, param_span)) = first_param {
@@ -260,11 +263,7 @@ impl Parser {
 
         self.match_token(&Token::DoubleSemi);
 
-        Ok(Item::Decl(Decl::OperatorDef {
-            op,
-            params,
-            body,
-        }))
+        Ok(Item::Decl(Decl::OperatorDef { op, params, body }))
     }
 
     /// Parse mutually recursive let: let rec f x = ... and g y = ...
@@ -774,10 +773,7 @@ impl Parser {
                     if self.is_type_atom_start() {
                         let inner = self.parse_type_atom()?;
                         let span = start.merge(&inner.span);
-                        return Ok(Spanned::new(
-                            TypeExprKind::Channel(Rc::new(inner)),
-                            span,
-                        ));
+                        return Ok(Spanned::new(TypeExprKind::Channel(Rc::new(inner)), span));
                     }
                 }
                 Ok(Spanned::new(TypeExprKind::Named(name), start))
@@ -885,7 +881,11 @@ impl Parser {
             // But only if first_pattern is a Var (identifier)
             if let PatternKind::Var(ref name) = first_pattern.node {
                 if let Some(op) = self.try_peek_operator() {
-                    return self.parse_operator_let_expr(start, op, Some((name.clone(), first_span)));
+                    return self.parse_operator_let_expr(
+                        start,
+                        op,
+                        Some((name.clone(), first_span)),
+                    );
                 }
             }
 
@@ -936,7 +936,12 @@ impl Parser {
     /// Parse operator let-expression (both prefix and infix syntax)
     /// Prefix: let (<|>) a b = e in body
     /// Infix: let a <|> b = e in body
-    fn parse_operator_let_expr(&mut self, start: Span, op: String, first_param: Option<(String, Span)>) -> Result<Expr, ParseError> {
+    fn parse_operator_let_expr(
+        &mut self,
+        start: Span,
+        op: String,
+        first_param: Option<(String, Span)>,
+    ) -> Result<Expr, ParseError> {
         let mut params = Vec::new();
 
         if let Some((name, param_span)) = first_param {
@@ -1160,7 +1165,11 @@ impl Parser {
 
             // Special case: |> and <| desugar to App, not BinOp
             if op_str == "|>" {
-                let pipe_info = self.op_table.get("|>").cloned().unwrap_or_else(OpInfo::default);
+                let pipe_info = self
+                    .op_table
+                    .get("|>")
+                    .cloned()
+                    .unwrap_or_else(OpInfo::default);
                 if pipe_info.precedence < min_prec {
                     break;
                 }
@@ -1180,7 +1189,11 @@ impl Parser {
             }
 
             if op_str == "<|" {
-                let pipe_info = self.op_table.get("<|").cloned().unwrap_or_else(OpInfo::default);
+                let pipe_info = self
+                    .op_table
+                    .get("<|")
+                    .cloned()
+                    .unwrap_or_else(OpInfo::default);
                 if pipe_info.precedence < min_prec {
                     break;
                 }
@@ -1200,7 +1213,11 @@ impl Parser {
             }
 
             // Look up precedence in table
-            let info = self.op_table.get(&op_str).cloned().unwrap_or_else(OpInfo::default);
+            let info = self
+                .op_table
+                .get(&op_str)
+                .cloned()
+                .unwrap_or_else(OpInfo::default);
 
             if info.precedence < min_prec {
                 break;
@@ -1442,10 +1459,7 @@ impl Parser {
                 } else {
                     // Just a constructor
                     Ok(Spanned::new(
-                        ExprKind::Constructor {
-                            name,
-                            args: vec![],
-                        },
+                        ExprKind::Constructor { name, args: vec![] },
                         start,
                     ))
                 }
@@ -1469,12 +1483,15 @@ impl Parser {
                 match &func.node {
                     ExprKind::Lambda { params, body } if params.len() == 1 => {
                         let span = start.merge(&func.span);
-                        Ok(Spanned::new(ExprKind::Shift {
-                            param: params[0].clone(),
-                            body: body.clone(),
-                        }, span))
+                        Ok(Spanned::new(
+                            ExprKind::Shift {
+                                param: params[0].clone(),
+                                body: body.clone(),
+                            },
+                            span,
+                        ))
                     }
-                    _ => Err(self.unexpected_token("function (fun k -> ...)"))
+                    _ => Err(self.unexpected_token("function (fun k -> ...)")),
                 }
             }
             Token::LParen => {
@@ -1604,7 +1621,10 @@ impl Parser {
 
     /// Unified pattern parsing - the allow_constructor_args parameter controls whether
     /// constructors can take arguments (true for simple patterns, false for atoms)
-    fn parse_pattern_primary(&mut self, allow_constructor_args: bool) -> Result<Pattern, ParseError> {
+    fn parse_pattern_primary(
+        &mut self,
+        allow_constructor_args: bool,
+    ) -> Result<Pattern, ParseError> {
         let start = self.current_span();
 
         match self.peek().clone() {
@@ -1833,9 +1853,7 @@ mod tests {
 
     #[test]
     fn test_parse_trait_multiple_methods() {
-        let prog = parse(
-            "trait Eq a = val eq : a -> a -> Bool val neq : a -> a -> Bool end",
-        );
+        let prog = parse("trait Eq a = val eq : a -> a -> Bool val neq : a -> a -> Bool end");
         match &prog.items[0] {
             Item::Decl(Decl::Trait { methods, .. }) => {
                 assert_eq!(methods.len(), 2);
@@ -1852,14 +1870,12 @@ mod tests {
         let prog = parse("let x = 5 in x + 1");
         assert_eq!(prog.items.len(), 1);
         match &prog.items[0] {
-            Item::Expr(expr) => {
-                match &expr.node {
-                    ExprKind::Let { body, .. } => {
-                        assert!(body.is_some(), "let-expression should have a body");
-                    }
-                    _ => panic!("expected let expression"),
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::Let { body, .. } => {
+                    assert!(body.is_some(), "let-expression should have a body");
                 }
-            }
+                _ => panic!("expected let expression"),
+            },
             _ => panic!("expected Item::Expr, got Item::Decl"),
         }
     }

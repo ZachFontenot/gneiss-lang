@@ -41,13 +41,25 @@ pub enum Frame {
     AppArg { func: Value },
 
     /// After evaluating the value in let, bind pattern and maybe eval body
-    Let { pattern: Pattern, body: Option<Rc<Expr>>, env: Env },
+    Let {
+        pattern: Pattern,
+        body: Option<Rc<Expr>>,
+        env: Env,
+    },
 
     /// After evaluating condition, pick a branch
-    If { then_branch: Rc<Expr>, else_branch: Rc<Expr>, env: Env },
+    If {
+        then_branch: Rc<Expr>,
+        else_branch: Rc<Expr>,
+        env: Env,
+    },
 
     /// After evaluating left operand, evaluate right
-    BinOpLeft { op: BinOp, right: Rc<Expr>, env: Env },
+    BinOpLeft {
+        op: BinOp,
+        right: Rc<Expr>,
+        env: Env,
+    },
     /// After evaluating right operand, compute the result
     /// env is needed to look up user-defined operators
     BinOpRight { op: BinOp, left: Value, env: Env },
@@ -76,8 +88,8 @@ pub enum Frame {
         body: Rc<Expr>,
         remaining_arms: Vec<MatchArm>,
         scrutinee: Value,
-        bound_env: Env,   // env with pattern bindings for this arm
-        outer_env: Env,   // original env for trying next arm
+        bound_env: Env, // env with pattern bindings for this arm
+        outer_env: Env, // original env for trying next arm
     },
 
     // === Concurrency frames ===
@@ -162,7 +174,11 @@ impl Default for Cont {
 #[derive(Debug, Clone)]
 pub enum State {
     /// Evaluate an expression in an environment
-    Eval { expr: Rc<Expr>, env: Env, cont: Cont },
+    Eval {
+        expr: Rc<Expr>,
+        env: Env,
+        cont: Cont,
+    },
     /// Return a value to the continuation
     Apply { value: Value, cont: Cont },
 }
@@ -213,7 +229,10 @@ pub enum Value {
     },
 
     /// A constructor value (e.g., Some 42)
-    Constructor { name: String, fields: Vec<Value> },
+    Constructor {
+        name: String,
+        fields: Vec<Value>,
+    },
 
     /// A process ID
     Pid(Pid),
@@ -271,15 +290,11 @@ impl Value {
                 let elem_ty = items.first().map(|v| v.to_type()).unwrap_or(Type::Unit);
                 Type::list(elem_ty)
             }
-            Value::Tuple(items) => {
-                Type::Tuple(items.iter().map(|v| v.to_type()).collect())
-            }
-            Value::Constructor { name, fields } => {
-                Type::Constructor {
-                    name: name.clone(),
-                    args: fields.iter().map(|v| v.to_type()).collect(),
-                }
-            }
+            Value::Tuple(items) => Type::Tuple(items.iter().map(|v| v.to_type()).collect()),
+            Value::Constructor { name, fields } => Type::Constructor {
+                name: name.clone(),
+                args: fields.iter().map(|v| v.to_type()).collect(),
+            },
             Value::Pid(_) => Type::Pid,
             Value::Channel(_) => Type::Channel(Rc::new(Type::Unit)), // Simplified
             _ => Type::Unit, // Fallback for closures, continuations, etc.
@@ -296,7 +311,10 @@ impl Value {
             Value::Char(_) => Type::Char,
             Value::Unit => Type::Unit,
             Value::List(items) => {
-                let elem_ty = items.first().map(|v| v.to_type_with_ctx(type_ctx)).unwrap_or(Type::Unit);
+                let elem_ty = items
+                    .first()
+                    .map(|v| v.to_type_with_ctx(type_ctx))
+                    .unwrap_or(Type::Unit);
                 Type::list(elem_ty)
             }
             Value::Tuple(items) => {
@@ -304,12 +322,16 @@ impl Value {
             }
             Value::Constructor { name, fields } => {
                 // Look up the constructor to find the actual type name
-                let type_name = type_ctx.get_constructor(name)
+                let type_name = type_ctx
+                    .get_constructor(name)
                     .map(|info| info.type_name.clone())
                     .unwrap_or_else(|| name.clone());
                 Type::Constructor {
                     name: type_name,
-                    args: fields.iter().map(|v| v.to_type_with_ctx(type_ctx)).collect(),
+                    args: fields
+                        .iter()
+                        .map(|v| v.to_type_with_ctx(type_ctx))
+                        .collect(),
                 }
             }
             Value::Pid(_) => Type::Pid,
@@ -387,11 +409,26 @@ impl Interpreter {
         {
             let mut env = global_env.borrow_mut();
             env.define("print".into(), Value::Builtin("print".into()));
-            env.define("int_to_string".into(), Value::Builtin("int_to_string".into()));
-            env.define("string_length".into(), Value::Builtin("string_length".into()));
-            env.define("string_to_chars".into(), Value::Builtin("string_to_chars".into()));
-            env.define("chars_to_string".into(), Value::Builtin("chars_to_string".into()));
-            env.define("char_to_string".into(), Value::Builtin("char_to_string".into()));
+            env.define(
+                "int_to_string".into(),
+                Value::Builtin("int_to_string".into()),
+            );
+            env.define(
+                "string_length".into(),
+                Value::Builtin("string_length".into()),
+            );
+            env.define(
+                "string_to_chars".into(),
+                Value::Builtin("string_to_chars".into()),
+            );
+            env.define(
+                "chars_to_string".into(),
+                Value::Builtin("chars_to_string".into()),
+            );
+            env.define(
+                "char_to_string".into(),
+                Value::Builtin("char_to_string".into()),
+            );
             env.define("char_to_int".into(), Value::Builtin("char_to_int".into()));
         }
 
@@ -450,10 +487,7 @@ impl Interpreter {
     fn eval_decl(&mut self, decl: &Decl) -> Result<(), EvalError> {
         match decl {
             Decl::Let {
-                name,
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
                 if params.is_empty() {
                     let env = self.global_env.clone();
@@ -496,7 +530,11 @@ impl Interpreter {
                     // In a production system, we'd mangle the name or use a dictionary structure
                     // The method lookup will happen dynamically based on the argument type
                     self.global_env.borrow_mut().define(
-                        format!("__method_{}_{}", method.name, self.class_env.instances.len()),
+                        format!(
+                            "__method_{}_{}",
+                            method.name,
+                            self.class_env.instances.len()
+                        ),
                         closure,
                     );
                 }
@@ -532,7 +570,9 @@ impl Interpreter {
                         body: Rc::new(binding.body.clone()),
                         env: self.global_env.clone(),
                     };
-                    self.global_env.borrow_mut().define(binding.name.node.clone(), closure);
+                    self.global_env
+                        .borrow_mut()
+                        .define(binding.name.node.clone(), closure);
                 }
                 Ok(())
             }
@@ -569,7 +609,12 @@ impl Interpreter {
     }
 
     /// Look up a method from a dictionary and apply it
-    pub fn call_method(&mut self, dict: &Value, method_name: &str, arg: Value) -> Result<Value, EvalError> {
+    pub fn call_method(
+        &mut self,
+        dict: &Value,
+        method_name: &str,
+        arg: Value,
+    ) -> Result<Value, EvalError> {
         match dict {
             Value::Dict { methods, .. } => {
                 if let Some(method_impl) = methods.get(method_name) {
@@ -615,9 +660,7 @@ impl Interpreter {
                 StepResult::Done(value) => return Ok(value),
                 StepResult::Error(e) => return Err(e),
                 StepResult::Blocked { .. } => {
-                    return Err(EvalError::RuntimeError(
-                        "main thread cannot block".into(),
-                    ));
+                    return Err(EvalError::RuntimeError("main thread cannot block".into()));
                 }
             }
         }
@@ -648,7 +691,8 @@ impl Interpreter {
                         if let Some((trait_name, _)) = self.class_env.lookup_method(name) {
                             // Return a special "method reference" that will be resolved
                             // when we know the argument type
-                            let value = Value::Builtin(format!("__method__{}_{}", trait_name, name));
+                            let value =
+                                Value::Builtin(format!("__method__{}_{}", trait_name, name));
                             StepResult::Continue(State::Apply { value, cont })
                         } else {
                             StepResult::Error(EvalError::UnboundVariable(name.clone()))
@@ -668,17 +712,32 @@ impl Interpreter {
 
             // === Compound expressions - push frames and evaluate sub-expressions ===
             ExprKind::App { func, arg } => {
-                cont.push(Frame::AppFunc { arg: arg.clone(), env: env.clone() });
-                StepResult::Continue(State::Eval { expr: func.clone(), env, cont })
+                cont.push(Frame::AppFunc {
+                    arg: arg.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval {
+                    expr: func.clone(),
+                    env,
+                    cont,
+                })
             }
 
-            ExprKind::Let { pattern, value, body } => {
+            ExprKind::Let {
+                pattern,
+                value,
+                body,
+            } => {
                 cont.push(Frame::Let {
                     pattern: pattern.clone(),
                     body: body.clone(),
                     env: env.clone(),
                 });
-                StepResult::Continue(State::Eval { expr: value.clone(), env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: value.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::LetRec { bindings, body } => {
@@ -692,23 +751,40 @@ impl Interpreter {
                         body: Rc::new(binding.body.clone()),
                         env: rec_env.clone(),
                     };
-                    rec_env.borrow_mut().define(binding.name.node.clone(), closure);
+                    rec_env
+                        .borrow_mut()
+                        .define(binding.name.node.clone(), closure);
                 }
 
                 // Evaluate body with the recursive environment
                 match body {
-                    Some(b) => StepResult::Continue(State::Eval { expr: b.clone(), env: rec_env, cont }),
-                    None => StepResult::Continue(State::Apply { value: Value::Unit, cont }),
+                    Some(b) => StepResult::Continue(State::Eval {
+                        expr: b.clone(),
+                        env: rec_env,
+                        cont,
+                    }),
+                    None => StepResult::Continue(State::Apply {
+                        value: Value::Unit,
+                        cont,
+                    }),
                 }
             }
 
-            ExprKind::If { cond, then_branch, else_branch } => {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 cont.push(Frame::If {
                     then_branch: then_branch.clone(),
                     else_branch: else_branch.clone(),
                     env: env.clone(),
                 });
-                StepResult::Continue(State::Eval { expr: cond.clone(), env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: cond.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::BinOp { op, left, right } => {
@@ -717,22 +793,44 @@ impl Interpreter {
                     right: right.clone(),
                     env: env.clone(),
                 });
-                StepResult::Continue(State::Eval { expr: left.clone(), env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: left.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::UnaryOp { op, operand } => {
                 cont.push(Frame::UnaryOp { op: *op });
-                StepResult::Continue(State::Eval { expr: operand.clone(), env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: operand.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::Seq { first, second } => {
-                cont.push(Frame::Seq { second: second.clone(), env: env.clone() });
-                StepResult::Continue(State::Eval { expr: first.clone(), env, cont })
+                cont.push(Frame::Seq {
+                    second: second.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval {
+                    expr: first.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::Match { scrutinee, arms } => {
-                cont.push(Frame::Match { arms: arms.clone(), env: env.clone() });
-                StepResult::Continue(State::Eval { expr: scrutinee.clone(), env, cont })
+                cont.push(Frame::Match {
+                    arms: arms.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval {
+                    expr: scrutinee.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::Tuple(exprs) => {
@@ -743,34 +841,50 @@ impl Interpreter {
                 self.start_collect(CollectKind::List, exprs.clone(), env, cont)
             }
 
-            ExprKind::Constructor { name, args } => {
-                self.start_collect(
-                    CollectKind::Constructor { name: name.clone() },
-                    args.clone(),
-                    env,
-                    cont,
-                )
-            }
+            ExprKind::Constructor { name, args } => self.start_collect(
+                CollectKind::Constructor { name: name.clone() },
+                args.clone(),
+                env,
+                cont,
+            ),
 
             // === Concurrency primitives (basic implementation for now) ===
             ExprKind::Spawn(body) => {
                 cont.push(Frame::Spawn);
-                StepResult::Continue(State::Eval { expr: body.clone(), env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: body.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::NewChannel => {
                 let id = self.runtime.new_channel();
-                StepResult::Continue(State::Apply { value: Value::Channel(id), cont })
+                StepResult::Continue(State::Apply {
+                    value: Value::Channel(id),
+                    cont,
+                })
             }
 
             ExprKind::ChanSend { channel, value } => {
-                cont.push(Frame::SendChan { value_expr: value.clone(), env: env.clone() });
-                StepResult::Continue(State::Eval { expr: channel.clone(), env, cont })
+                cont.push(Frame::SendChan {
+                    value_expr: value.clone(),
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval {
+                    expr: channel.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::ChanRecv(channel) => {
                 cont.push(Frame::Recv);
-                StepResult::Continue(State::Eval { expr: channel.clone(), env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: channel.clone(),
+                    env,
+                    cont,
+                })
             }
 
             // === Delimited continuations ===
@@ -791,7 +905,7 @@ impl Interpreter {
                     match cont.pop() {
                         None => {
                             return StepResult::Error(EvalError::RuntimeError(
-                                "shift without enclosing reset".into()
+                                "shift without enclosing reset".into(),
                             ));
                         }
                         Some(Frame::Prompt) => {
@@ -868,15 +982,27 @@ impl Interpreter {
             let value = match kind {
                 CollectKind::List => Value::List(vec![]),
                 CollectKind::Tuple => Value::Tuple(vec![]),
-                CollectKind::Constructor { name } => Value::Constructor { name, fields: vec![] },
+                CollectKind::Constructor { name } => Value::Constructor {
+                    name,
+                    fields: vec![],
+                },
             };
             StepResult::Continue(State::Apply { value, cont })
         } else {
             // Evaluate first element, queue the rest
             let first = Rc::new(exprs[0].clone());
             let remaining = exprs[1..].to_vec();
-            cont.push(Frame::Collect { kind, remaining, acc: vec![], env: env.clone() });
-            StepResult::Continue(State::Eval { expr: first, env, cont })
+            cont.push(Frame::Collect {
+                kind,
+                remaining,
+                acc: vec![],
+                env: env.clone(),
+            });
+            StepResult::Continue(State::Eval {
+                expr: first,
+                env,
+                cont,
+            })
         }
     }
 
@@ -891,7 +1017,11 @@ impl Interpreter {
             Some(Frame::AppFunc { arg, env }) => {
                 // Got the function, now evaluate the argument
                 cont.push(Frame::AppArg { func: value });
-                StepResult::Continue(State::Eval { expr: arg, env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: arg,
+                    env,
+                    cont,
+                })
             }
 
             Some(Frame::AppArg { func }) => {
@@ -906,7 +1036,14 @@ impl Interpreter {
                 // For recursive functions: if binding a variable to a closure,
                 // patch the closure's environment to include itself
                 let value = match (&pattern.node, value) {
-                    (PatternKind::Var(name), Value::Closure { params, body: closure_body, env: closure_env }) => {
+                    (
+                        PatternKind::Var(name),
+                        Value::Closure {
+                            params,
+                            body: closure_body,
+                            env: closure_env,
+                        },
+                    ) => {
                         // Create a recursive closure by making a new environment
                         // that includes the binding to itself
                         let recursive_env = EnvInner::with_parent(&closure_env);
@@ -916,7 +1053,9 @@ impl Interpreter {
                             env: recursive_env.clone(),
                         };
                         // Add the binding to the recursive environment
-                        recursive_env.borrow_mut().define(name.clone(), recursive_closure.clone());
+                        recursive_env
+                            .borrow_mut()
+                            .define(name.clone(), recursive_closure.clone());
                         recursive_closure
                     }
                     (_, value) => value,
@@ -926,26 +1065,47 @@ impl Interpreter {
                     return StepResult::Error(EvalError::MatchFailed);
                 }
                 match body {
-                    Some(body) => StepResult::Continue(State::Eval { expr: body, env: new_env, cont }),
-                    None => StepResult::Continue(State::Apply { value: Value::Unit, cont }),
+                    Some(body) => StepResult::Continue(State::Eval {
+                        expr: body,
+                        env: new_env,
+                        cont,
+                    }),
+                    None => StepResult::Continue(State::Apply {
+                        value: Value::Unit,
+                        cont,
+                    }),
                 }
             }
 
-            Some(Frame::If { then_branch, else_branch, env }) => {
-                match value {
-                    Value::Bool(true) => {
-                        StepResult::Continue(State::Eval { expr: then_branch, env, cont })
-                    }
-                    Value::Bool(false) => {
-                        StepResult::Continue(State::Eval { expr: else_branch, env, cont })
-                    }
-                    _ => StepResult::Error(EvalError::TypeError("expected bool in condition".into())),
-                }
-            }
+            Some(Frame::If {
+                then_branch,
+                else_branch,
+                env,
+            }) => match value {
+                Value::Bool(true) => StepResult::Continue(State::Eval {
+                    expr: then_branch,
+                    env,
+                    cont,
+                }),
+                Value::Bool(false) => StepResult::Continue(State::Eval {
+                    expr: else_branch,
+                    env,
+                    cont,
+                }),
+                _ => StepResult::Error(EvalError::TypeError("expected bool in condition".into())),
+            },
 
             Some(Frame::BinOpLeft { op, right, env }) => {
-                cont.push(Frame::BinOpRight { op, left: value, env: env.clone() });
-                StepResult::Continue(State::Eval { expr: right, env, cont })
+                cont.push(Frame::BinOpRight {
+                    op,
+                    left: value,
+                    env: env.clone(),
+                });
+                StepResult::Continue(State::Eval {
+                    expr: right,
+                    env,
+                    cont,
+                })
             }
 
             Some(Frame::BinOpRight { op, left, env }) => {
@@ -960,17 +1120,21 @@ impl Interpreter {
                             // 2. Apply the result (partial app) to right
                             // Push frame to apply result to right
                             cont.push(Frame::ApplyTo { arg: right }); // step 2
-                            // step 1: apply op to left
+                                                                      // step 1: apply op to left
                             self.do_apply(func, left, cont)
                         }
-                        None => StepResult::Error(EvalError::RuntimeError(
-                            format!("undefined operator: {}", name)
-                        )),
+                        None => StepResult::Error(EvalError::RuntimeError(format!(
+                            "undefined operator: {}",
+                            name
+                        ))),
                     }
                 } else {
                     // Built-in operator
                     match self.eval_binop(&op, left, value) {
-                        Ok(result) => StepResult::Continue(State::Apply { value: result, cont }),
+                        Ok(result) => StepResult::Continue(State::Apply {
+                            value: result,
+                            cont,
+                        }),
                         Err(e) => StepResult::Error(e),
                     }
                 }
@@ -981,46 +1145,78 @@ impl Interpreter {
                 self.do_apply(value, arg, cont)
             }
 
-            Some(Frame::UnaryOp { op }) => {
-                match self.eval_unaryop(op, value) {
-                    Ok(result) => StepResult::Continue(State::Apply { value: result, cont }),
-                    Err(e) => StepResult::Error(e),
-                }
-            }
+            Some(Frame::UnaryOp { op }) => match self.eval_unaryop(op, value) {
+                Ok(result) => StepResult::Continue(State::Apply {
+                    value: result,
+                    cont,
+                }),
+                Err(e) => StepResult::Error(e),
+            },
 
             Some(Frame::Seq { second, env }) => {
                 // Discard value, evaluate second
-                StepResult::Continue(State::Eval { expr: second, env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: second,
+                    env,
+                    cont,
+                })
             }
 
-            Some(Frame::Collect { kind, remaining, mut acc, env }) => {
+            Some(Frame::Collect {
+                kind,
+                remaining,
+                mut acc,
+                env,
+            }) => {
                 acc.push(value);
                 if remaining.is_empty() {
                     // All collected, produce the value
                     let result = match kind {
                         CollectKind::List => Value::List(acc),
                         CollectKind::Tuple => Value::Tuple(acc),
-                        CollectKind::Constructor { name } => Value::Constructor { name, fields: acc },
+                        CollectKind::Constructor { name } => {
+                            Value::Constructor { name, fields: acc }
+                        }
                     };
-                    StepResult::Continue(State::Apply { value: result, cont })
+                    StepResult::Continue(State::Apply {
+                        value: result,
+                        cont,
+                    })
                 } else {
                     // More to collect
                     let next = Rc::new(remaining[0].clone());
                     let rest = remaining[1..].to_vec();
-                    cont.push(Frame::Collect { kind, remaining: rest, acc, env: env.clone() });
-                    StepResult::Continue(State::Eval { expr: next, env, cont })
+                    cont.push(Frame::Collect {
+                        kind,
+                        remaining: rest,
+                        acc,
+                        env: env.clone(),
+                    });
+                    StepResult::Continue(State::Eval {
+                        expr: next,
+                        env,
+                        cont,
+                    })
                 }
             }
 
-            Some(Frame::Match { arms, env }) => {
-                self.try_match_arms(value, arms, env, cont)
-            }
+            Some(Frame::Match { arms, env }) => self.try_match_arms(value, arms, env, cont),
 
-            Some(Frame::MatchGuard { body, remaining_arms, scrutinee, bound_env, outer_env }) => {
+            Some(Frame::MatchGuard {
+                body,
+                remaining_arms,
+                scrutinee,
+                bound_env,
+                outer_env,
+            }) => {
                 match value {
                     Value::Bool(true) => {
                         // Guard passed, evaluate body
-                        StepResult::Continue(State::Eval { expr: body, env: bound_env, cont })
+                        StepResult::Continue(State::Eval {
+                            expr: body,
+                            env: bound_env,
+                            cont,
+                        })
                     }
                     Value::Bool(false) => {
                         // Guard failed, try remaining arms
@@ -1039,7 +1235,10 @@ impl Interpreter {
             // === Concurrency frames ===
             Some(Frame::Spawn) => {
                 let pid = self.runtime.spawn(value);
-                StepResult::Continue(State::Apply { value: Value::Pid(pid), cont })
+                StepResult::Continue(State::Apply {
+                    value: Value::Pid(pid),
+                    cont,
+                })
             }
 
             Some(Frame::SendChan { value_expr, env }) => {
@@ -1048,7 +1247,11 @@ impl Interpreter {
                     _ => return StepResult::Error(EvalError::TypeError("expected channel".into())),
                 };
                 cont.push(Frame::SendVal { channel });
-                StepResult::Continue(State::Eval { expr: value_expr, env, cont })
+                StepResult::Continue(State::Eval {
+                    expr: value_expr,
+                    env,
+                    cont,
+                })
             }
 
             Some(Frame::SendVal { channel }) => {
@@ -1056,19 +1259,28 @@ impl Interpreter {
                 // Check we're in a process context (requires main function)
                 if self.runtime.current_pid().is_none() {
                     return StepResult::Error(EvalError::RuntimeError(
-                        "Channel.send requires a process context (define a main function)".into()
+                        "Channel.send requires a process context (define a main function)".into(),
                     ));
                 }
                 // Check if there's a waiting receiver (rendezvous)
                 if self.runtime.send(channel, value) {
                     // Immediate rendezvous - sender continues with Unit
-                    StepResult::Continue(State::Apply { value: Value::Unit, cont })
+                    StepResult::Continue(State::Apply {
+                        value: Value::Unit,
+                        cont,
+                    })
                 } else {
                     // No receiver ready - block this process
                     // The continuation expects Unit when we resume
                     StepResult::Blocked {
-                        reason: BlockReason::Send { channel, value: Value::Unit },
-                        state: State::Apply { value: Value::Unit, cont },
+                        reason: BlockReason::Send {
+                            channel,
+                            value: Value::Unit,
+                        },
+                        state: State::Apply {
+                            value: Value::Unit,
+                            cont,
+                        },
                     }
                 }
             }
@@ -1081,19 +1293,25 @@ impl Interpreter {
                 // Check we're in a process context (requires main function)
                 if self.runtime.current_pid().is_none() {
                     return StepResult::Error(EvalError::RuntimeError(
-                        "Channel.recv requires a process context (define a main function)".into()
+                        "Channel.recv requires a process context (define a main function)".into(),
                     ));
                 }
                 // Check if there's a waiting sender (rendezvous)
                 if let Some(received) = self.runtime.recv(channel) {
                     // Immediate rendezvous - got value from sender
-                    StepResult::Continue(State::Apply { value: received, cont })
+                    StepResult::Continue(State::Apply {
+                        value: received,
+                        cont,
+                    })
                 } else {
                     // No sender ready - block this process
                     // When we resume, we'll have a received value
                     StepResult::Blocked {
                         reason: BlockReason::Recv { channel },
-                        state: State::Apply { value: Value::Unit, cont }, // placeholder, will be replaced
+                        state: State::Apply {
+                            value: Value::Unit,
+                            cont,
+                        }, // placeholder, will be replaced
                     }
                 }
             }
@@ -1109,9 +1327,11 @@ impl Interpreter {
                 // Value should be a channel
                 let channel_id = match value {
                     Value::Channel(id) => id,
-                    _ => return StepResult::Error(EvalError::TypeError(
-                        "select arm must be a channel".into()
-                    )),
+                    _ => {
+                        return StepResult::Error(EvalError::TypeError(
+                            "select arm must be a channel".into(),
+                        ))
+                    }
                 };
 
                 collected_chans.push(channel_id);
@@ -1162,8 +1382,8 @@ impl Interpreter {
                         // Find which arm this channel corresponds to
                         if let Some(i) = channels.iter().position(|&ch| ch == fired_channel) {
                             // Get the received value
-                            let recv_value = self.runtime.take_received_value(pid)
-                                .unwrap_or(Value::Unit);
+                            let recv_value =
+                                self.runtime.take_received_value(pid).unwrap_or(Value::Unit);
 
                             // Bind pattern and evaluate body
                             let new_env = EnvInner::with_parent(&env);
@@ -1201,13 +1421,15 @@ impl Interpreter {
                 // Check we're in a process context (requires main function)
                 if self.runtime.current_pid().is_none() {
                     return StepResult::Error(EvalError::RuntimeError(
-                        "select requires a process context (define a main function)".into()
+                        "select requires a process context (define a main function)".into(),
                     ));
                 }
                 self.runtime.block_on_select(&channels);
 
                 StepResult::Blocked {
-                    reason: BlockReason::Select { channels: channels.clone() },
+                    reason: BlockReason::Select {
+                        channels: channels.clone(),
+                    },
                     state: State::Apply {
                         value: Value::Unit,
                         cont: {
@@ -1283,7 +1505,11 @@ impl Interpreter {
 
                 if params.len() == 1 {
                     // All parameters bound, evaluate body
-                    StepResult::Continue(State::Eval { expr: body, env: new_env, cont })
+                    StepResult::Continue(State::Eval {
+                        expr: body,
+                        env: new_env,
+                        cont,
+                    })
                 } else {
                     // Partial application - return closure with remaining params
                     let remaining = Value::Closure {
@@ -1291,7 +1517,10 @@ impl Interpreter {
                         body,
                         env: new_env,
                     };
-                    StepResult::Continue(State::Apply { value: remaining, cont })
+                    StepResult::Continue(State::Apply {
+                        value: remaining,
+                        cont,
+                    })
                 }
             }
 
@@ -1320,9 +1549,10 @@ impl Interpreter {
                             Err(e) => StepResult::Error(e),
                         }
                     } else {
-                        StepResult::Error(EvalError::RuntimeError(
-                            format!("malformed method reference: {}", name)
-                        ))
+                        StepResult::Error(EvalError::RuntimeError(format!(
+                            "malformed method reference: {}",
+                            name
+                        )))
                     }
                 } else {
                     match self.apply_builtin(name, arg) {
@@ -1336,7 +1566,10 @@ impl Interpreter {
                 // Constructor application adds to fields
                 let mut new_fields = fields;
                 new_fields.push(arg);
-                let value = Value::Constructor { name, fields: new_fields };
+                let value = Value::Constructor {
+                    name,
+                    fields: new_fields,
+                };
                 StepResult::Continue(State::Apply { value, cont })
             }
 
@@ -1353,10 +1586,7 @@ impl Interpreter {
                 }
 
                 // The argument becomes the "return value" to those frames
-                StepResult::Continue(State::Apply {
-                    value: arg,
-                    cont,
-                })
+                StepResult::Continue(State::Apply { value: arg, cont })
             }
 
             _ => StepResult::Error(EvalError::TypeError(format!(
@@ -1434,11 +1664,9 @@ impl Interpreter {
             }
 
             // Compose - create a new closure
-            (BinOp::Compose, _, _) | (BinOp::ComposeBack, _, _) => {
-                Err(EvalError::RuntimeError(
-                    "function composition not yet implemented".into(),
-                ))
-            }
+            (BinOp::Compose, _, _) | (BinOp::ComposeBack, _, _) => Err(EvalError::RuntimeError(
+                "function composition not yet implemented".into(),
+            )),
 
             // Pipe should be desugared
             (BinOp::Pipe, _, _) | (BinOp::PipeBack, _, _) => {
@@ -1583,17 +1811,15 @@ impl Interpreter {
             (PatternKind::Lit(Literal::Char(a)), Value::Char(b)) => a == b,
             (PatternKind::Lit(Literal::Unit), Value::Unit) => true,
 
-            (PatternKind::Tuple(pats), Value::Tuple(vals)) if pats.len() == vals.len() => {
-                pats.iter()
-                    .zip(vals.iter())
-                    .all(|(p, v)| self.try_bind_pattern(env, p, v))
-            }
+            (PatternKind::Tuple(pats), Value::Tuple(vals)) if pats.len() == vals.len() => pats
+                .iter()
+                .zip(vals.iter())
+                .all(|(p, v)| self.try_bind_pattern(env, p, v)),
 
-            (PatternKind::List(pats), Value::List(vals)) if pats.len() == vals.len() => {
-                pats.iter()
-                    .zip(vals.iter())
-                    .all(|(p, v)| self.try_bind_pattern(env, p, v))
-            }
+            (PatternKind::List(pats), Value::List(vals)) if pats.len() == vals.len() => pats
+                .iter()
+                .zip(vals.iter())
+                .all(|(p, v)| self.try_bind_pattern(env, p, v)),
 
             (PatternKind::Cons { head, tail }, Value::List(vals)) if !vals.is_empty() => {
                 self.try_bind_pattern(env, head, &vals[0])
@@ -1609,11 +1835,10 @@ impl Interpreter {
                 .all(|(p, v)| self.try_bind_pattern(env, p, v)),
 
             // Constructor with no args matching
-            (PatternKind::Constructor { name: pn, args }, Value::Constructor { name: vn, fields })
-                if pn == vn && args.is_empty() && fields.is_empty() =>
-            {
-                true
-            }
+            (
+                PatternKind::Constructor { name: pn, args },
+                Value::Constructor { name: vn, fields },
+            ) if pn == vn && args.is_empty() && fields.is_empty() => true,
 
             _ => false,
         }
@@ -1621,7 +1846,6 @@ impl Interpreter {
 
     /// Run the scheduler until all processes complete or deadlock
     fn run_scheduler(&mut self) -> Result<(), EvalError> {
-
         // Simple round-robin scheduler
         while let Some(pid) = self.runtime.next_ready() {
             self.runtime.set_current(Some(pid));
@@ -1635,10 +1859,13 @@ impl Interpreter {
                     ProcessContinuation::ResumeAfterRecv => {
                         // Process was waiting to receive - resume with received value
                         if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
-                            let value = self.runtime.take_received_value(pid)
-                                .unwrap_or(Value::Unit);
+                            let value =
+                                self.runtime.take_received_value(pid).unwrap_or(Value::Unit);
                             // Resume by applying the received value to the saved continuation
-                            let state = State::Apply { value, cont: saved_cont };
+                            let state = State::Apply {
+                                value,
+                                cont: saved_cont,
+                            };
                             self.run_state(pid, state)?;
                         } else {
                             // No saved continuation - shouldn't happen
@@ -1649,7 +1876,10 @@ impl Interpreter {
                         // Process was blocked on select - SelectReady frame handles the value
                         if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
                             // Don't take the received value here - SelectReady frame will get it
-                            let state = State::Apply { value: Value::Unit, cont: saved_cont };
+                            let state = State::Apply {
+                                value: Value::Unit,
+                                cont: saved_cont,
+                            };
                             self.run_state(pid, state)?;
                         } else {
                             self.runtime.mark_done(pid);
@@ -1658,7 +1888,10 @@ impl Interpreter {
                     ProcessContinuation::ResumeAfterSend => {
                         // Process was waiting to send - resume with Unit
                         if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
-                            let state = State::Apply { value: Value::Unit, cont: saved_cont };
+                            let state = State::Apply {
+                                value: Value::Unit,
+                                cont: saved_cont,
+                            };
                             self.run_state(pid, state)?;
                         } else {
                             self.runtime.mark_done(pid);
@@ -1682,7 +1915,10 @@ impl Interpreter {
         // Build initial state: apply thunk to Unit
         let mut cont = Cont::new();
         cont.push(Frame::AppArg { func: thunk });
-        let state = State::Apply { value: Value::Unit, cont };
+        let state = State::Apply {
+            value: Value::Unit,
+            cont,
+        };
         self.run_state(pid, state)
     }
 
@@ -1697,7 +1933,10 @@ impl Interpreter {
                     self.runtime.mark_done(pid);
                     return Ok(());
                 }
-                StepResult::Blocked { state: blocked_state, .. } => {
+                StepResult::Blocked {
+                    state: blocked_state,
+                    ..
+                } => {
                     // Save the continuation for later resumption
                     // The blocked_state contains the continuation to resume with
                     if let State::Apply { cont, .. } = blocked_state {
@@ -2165,21 +2404,27 @@ let main () =
 
     #[test]
     fn test_continuation_called_later() {
-        let val = eval("
+        let val = eval(
+            "
             let k = reset (1 + shift (fun k -> k)) in
             k 10
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(11)));
     }
 
     #[test]
     fn test_shift_with_multiple_invocations() {
-        let val = eval("
+        let val = eval(
+            "
             reset (
                 let x = shift (fun k -> k 1 + k 2) in
                 x * 10
             )
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // k 1 = 10, k 2 = 20, sum = 30
         assert!(matches!(val, Value::Int(30)));
     }
@@ -2200,11 +2445,13 @@ let main () =
         // In strict CBV, the argument to a continuation is evaluated BEFORE the continuation
         // is invoked. So `k (shift ...)` evaluates the shift in the current context, not inside k.
         // Since the outer reset was consumed by the outer shift, this is "shift without reset".
-        let result = eval("
+        let result = eval(
+            "
             reset (
                 shift (fun k1 -> k1 (shift (fun k2 -> k2 100))) + 1
             )
-        ");
+        ",
+        );
         // In CBV: outer shift consumes the reset, inner shift has no enclosing reset
         assert!(result.is_err());
     }
@@ -2214,10 +2461,13 @@ let main () =
         // This tests the core fix: when a continuation IS invoked with a value,
         // the body executes inside a fresh reset boundary.
         // k 10 should work because the continuation execution is wrapped in reset.
-        let val = eval("
+        let val = eval(
+            "
             let k = reset (shift (fun k -> k)) in
             k (1 + k 10)
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // k = continuation that returns its argument (identity for this context)
         // k 10 = reset (10) = 10
         // 1 + k 10 = 11
@@ -2227,13 +2477,16 @@ let main () =
 
     #[test]
     fn test_nested_resets() {
-        let val = eval("
+        let val = eval(
+            "
             reset (
                 1 + reset (
                     2 + shift (fun k -> k (k 10))
                 )
             )
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // Inner shift captures [2 + □] only (stopped at inner reset)
         // k 10 = reset (2 + 10) = 12
         // k 12 = reset (2 + 12) = 14
@@ -2243,11 +2496,14 @@ let main () =
 
     #[test]
     fn test_discarded_continuation() {
-        let val = eval("
+        let val = eval(
+            "
             reset (
                 1 + shift (fun k -> 42)
             )
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // k is never called, result is just 42
         assert!(matches!(val, Value::Int(42)));
     }
@@ -2259,20 +2515,26 @@ let main () =
     #[test]
     fn test_local_recursive_function() {
         // Local let with function syntax and recursion
-        let val = eval("
+        let val = eval(
+            "
             let f x = if x == 0 then 0 else x + f (x - 1) in
             f 5
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // 5 + 4 + 3 + 2 + 1 + 0 = 15
         assert!(matches!(val, Value::Int(15)));
     }
 
     #[test]
     fn test_local_recursive_function_factorial() {
-        let val = eval("
+        let val = eval(
+            "
             let fact n = if n == 0 then 1 else n * fact (n - 1) in
             fact 5
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // 5! = 120
         assert!(matches!(val, Value::Int(120)));
     }
@@ -2280,41 +2542,53 @@ let main () =
     #[test]
     fn test_local_recursive_function_lambda_form() {
         // Using explicit lambda syntax
-        let val = eval("
+        let val = eval(
+            "
             let f = fun x -> if x == 0 then 0 else x + f (x - 1) in
             f 5
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(15)));
     }
 
     #[test]
     fn test_local_function_non_recursive() {
         // Non-recursive local function should still work
-        let val = eval("
+        let val = eval(
+            "
             let double x = x * 2 in
             double 21
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(42)));
     }
 
     #[test]
     fn test_local_function_multiple_params() {
-        let val = eval("
+        let val = eval(
+            "
             let add x y = x + y in
             add 10 32
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(42)));
     }
 
     #[test]
     fn test_nested_local_functions() {
-        let val = eval("
+        let val = eval(
+            "
             let outer x =
                 let inner y = x + y in
                 inner 10
             in
             outer 5
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(15)));
     }
 
@@ -2322,8 +2596,8 @@ let main () =
     // Phase 6: Typeclass Runtime Tests
     // ========================================================================
 
-    use crate::types::{TraitInfo, InstanceInfo, Type as InferType};
     use crate::infer::Inferencer;
+    use crate::types::{InstanceInfo, TraitInfo, Type as InferType};
 
     /// Helper to run a program with type inference, copying ClassEnv to interpreter
     fn run_typed_program(input: &str) -> Result<Value, String> {
@@ -2333,7 +2607,9 @@ let main () =
 
         // Run type inference to build ClassEnv
         let mut inferencer = Inferencer::new();
-        let _env = inferencer.infer_program(&program).map_err(|e| e.to_string())?;
+        let _env = inferencer
+            .infer_program(&program)
+            .map_err(|e| e.to_string())?;
 
         // Run the program with the class env
         let mut interp = Interpreter::new();
@@ -2346,7 +2622,10 @@ let main () =
     fn test_value_to_type() {
         // Test that Value::to_type works correctly
         assert!(matches!(Value::Int(42).to_type(), InferType::Int));
-        assert!(matches!(Value::String("hello".into()).to_type(), InferType::String));
+        assert!(matches!(
+            Value::String("hello".into()).to_type(),
+            InferType::String
+        ));
         assert!(matches!(Value::Bool(true).to_type(), InferType::Bool));
     }
 
@@ -2380,7 +2659,7 @@ let main () =
         });
 
         // Add Show Int instance with method implementation
-        use crate::ast::{InstanceMethod, ExprKind, Literal, Spanned, Span};
+        use crate::ast::{ExprKind, InstanceMethod, Literal, Span, Spanned};
         let show_impl = InstanceMethod {
             name: "show".to_string(),
             params: vec![Pattern {
@@ -2392,19 +2671,25 @@ let main () =
                 span: Span::default(),
             },
         };
-        interp.class_env.add_instance(InstanceInfo {
-            trait_name: "Show".to_string(),
-            head: InferType::Int,
-            constraints: vec![],
-            method_impls: vec![show_impl],
-        }).unwrap();
+        interp
+            .class_env
+            .add_instance(InstanceInfo {
+                trait_name: "Show".to_string(),
+                head: InferType::Int,
+                constraints: vec![],
+                method_impls: vec![show_impl],
+            })
+            .unwrap();
 
         // Now build a dictionary for Show Int
         let pred = Pred::new("Show", InferType::Int);
         let dict = interp.build_dict(&pred).unwrap();
 
         match dict {
-            Value::Dict { trait_name, methods } => {
+            Value::Dict {
+                trait_name,
+                methods,
+            } => {
                 assert_eq!(trait_name, "Show");
                 assert!(methods.contains_key("show"));
             }
@@ -2417,7 +2702,7 @@ let main () =
         let mut interp = Interpreter::new();
 
         // Create a simple dict with a show method that returns a constant
-        use crate::ast::{ExprKind, Literal, Spanned, Span};
+        use crate::ast::{ExprKind, Literal, Span, Spanned};
         let show_closure = Value::Closure {
             params: vec![Pattern {
                 node: PatternKind::Var("x".into()),
@@ -2462,7 +2747,8 @@ let main () = ()
     #[test]
     fn test_show_int_end_to_end() {
         // Full end-to-end test: define Show trait, Show Int instance, call show 42
-        let tokens = Lexer::new(r#"
+        let tokens = Lexer::new(
+            r#"
 trait Show a =
     val show : a -> String
 end
@@ -2472,7 +2758,10 @@ impl Show for Int =
 end
 
 let result = show 42
-"#).tokenize().unwrap();
+"#,
+        )
+        .tokenize()
+        .unwrap();
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
 
@@ -2484,7 +2773,7 @@ let result = show 42
         let mut interp = Interpreter::new();
         // We need to expose the class_env from the inferencer
         // For now, manually set up the class_env in the interpreter
-        use crate::ast::{InstanceMethod, ExprKind, Literal, Spanned, Span};
+        use crate::ast::{ExprKind, InstanceMethod, Literal, Span, Spanned};
 
         let mut methods = HashMap::new();
         methods.insert(
@@ -2519,17 +2808,23 @@ let result = show 42
                 span: Span::default(),
             },
         };
-        interp.class_env.add_instance(InstanceInfo {
-            trait_name: "Show".to_string(),
-            head: InferType::Int,
-            constraints: vec![],
-            method_impls: vec![show_impl],
-        }).unwrap();
+        interp
+            .class_env
+            .add_instance(InstanceInfo {
+                trait_name: "Show".to_string(),
+                head: InferType::Int,
+                constraints: vec![],
+                method_impls: vec![show_impl],
+            })
+            .unwrap();
 
         // Evaluate "show 42" directly
         let env = EnvInner::new();
         {
-            env.borrow_mut().define("int_to_string".into(), Value::Builtin("int_to_string".into()));
+            env.borrow_mut().define(
+                "int_to_string".into(),
+                Value::Builtin("int_to_string".into()),
+            );
         }
 
         // Create the expression: show 42
@@ -2558,10 +2853,13 @@ let result = show 42
     #[test]
     fn test_user_defined_operator_basic() {
         // Define and use a simple user-defined operator using let-in
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let (<|>) a b = a + b in
             3 <|> 5
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // result should be 8
         assert!(matches!(val, Value::Int(8)));
     }
@@ -2569,20 +2867,26 @@ let result = show 42
     #[test]
     fn test_user_defined_operator_prefix_syntax() {
         // Define operator with prefix syntax
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let (<+>) a b = a * b in
             4 <+> 5
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(20)));
     }
 
     #[test]
     fn test_user_defined_operator_complex() {
         // More complex operator definition
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let (<?>) a b = if a > b then a else b in
             10 <?> 5
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(10)));
     }
 
@@ -2593,55 +2897,70 @@ let result = show 42
     #[test]
     fn test_let_rec_simple() {
         // Simple recursive function using let rec
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let rec factorial n = if n == 0 then 1 else n * factorial (n - 1) in
             factorial 5
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(val, Value::Int(120)));
     }
 
     #[test]
     fn test_let_rec_mutual_even_odd() {
         // Classic mutual recursion: is_even and is_odd
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let rec is_even n = if n == 0 then true else is_odd (n - 1)
             and is_odd n = if n == 0 then false else is_even (n - 1)
             in is_even 10
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(val, Value::Bool(true)));
     }
 
     #[test]
     fn test_let_rec_mutual_even_odd_false() {
         // Test the other branch
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let rec is_even n = if n == 0 then true else is_odd (n - 1)
             and is_odd n = if n == 0 then false else is_even (n - 1)
             in is_even 7
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(val, Value::Bool(false)));
     }
 
     #[test]
     fn test_let_rec_mutual_is_odd() {
         // Test is_odd function
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let rec is_even n = if n == 0 then true else is_odd (n - 1)
             and is_odd n = if n == 0 then false else is_even (n - 1)
             in is_odd 7
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(val, Value::Bool(true)));
     }
 
     #[test]
     fn test_let_rec_three_functions() {
         // Three mutually recursive functions
-        let val = eval(r#"
+        let val = eval(
+            r#"
             let rec f n = if n == 0 then 0 else g (n - 1)
             and g n = if n == 0 then 1 else h (n - 1)
             and h n = if n == 0 then 2 else f (n - 1)
             in f 6
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // f(6) -> g(5) -> h(4) -> f(3) -> g(2) -> h(1) -> f(0) = 0
         assert!(matches!(val, Value::Int(0)));
     }

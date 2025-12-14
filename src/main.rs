@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 
-use gneiss::errors::{Colors, format_header, format_snippet, format_suggestions};
+use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
 use gneiss::parser::ParseError;
@@ -48,7 +48,10 @@ fn run_file(path: &str) {
     let program = match Parser::new(tokens).parse_program() {
         Ok(p) => p,
         Err(e) => {
-            eprint!("{}", format_parse_error(&e, &source_map, Some(path), &colors));
+            eprint!(
+                "{}",
+                format_parse_error(&e, &source_map, Some(path), &colors)
+            );
             return;
         }
     };
@@ -69,7 +72,10 @@ fn run_file(path: &str) {
             println!();
         }
         Err(e) => {
-            eprint!("{}", format_type_error(&e, &source_map, Some(path), &colors));
+            eprint!(
+                "{}",
+                format_type_error(&e, &source_map, Some(path), &colors)
+            );
             return;
         }
     }
@@ -216,14 +222,8 @@ fn repl() {
     println!("Goodbye!");
 }
 
-fn eval_type(
-    expr_str: &str,
-    env: &TypeEnv,
-    inferencer: &mut Inferencer,
-) -> Result<String, String> {
-    let tokens = Lexer::new(expr_str)
-        .tokenize()
-        .map_err(|e| e.to_string())?;
+fn eval_type(expr_str: &str, env: &TypeEnv, inferencer: &mut Inferencer) -> Result<String, String> {
+    let tokens = Lexer::new(expr_str).tokenize().map_err(|e| e.to_string())?;
     let mut parser = Parser::new(tokens);
     let expr = parser.parse_expr().map_err(|e| e.to_string())?;
     let ty = inferencer
@@ -292,47 +292,137 @@ impl TypeEnvExt for TypeEnv {
 // Elm-style Error Formatting
 // ============================================================================
 
-fn format_type_error(err: &TypeError, source_map: &SourceMap, filename: Option<&str>, colors: &Colors) -> String {
+fn format_type_error(
+    err: &TypeError,
+    source_map: &SourceMap,
+    filename: Option<&str>,
+    colors: &Colors,
+) -> String {
     let mut out = String::new();
 
     // Header
     let (header, msg, span, suggestions) = match err {
-        TypeError::UnboundVariable { name, span, suggestions } => {
-            ("NAME ERROR", format!("I cannot find a variable named `{}`.", name), Some(span), suggestions.clone())
+        TypeError::UnboundVariable {
+            name,
+            span,
+            suggestions,
+        } => (
+            "NAME ERROR",
+            format!("I cannot find a variable named `{}`.", name),
+            Some(span),
+            suggestions.clone(),
+        ),
+        TypeError::TypeMismatch {
+            expected,
+            found,
+            span,
+            context,
+        } => {
+            // Use user-friendly display with normalized variable names and hidden answer types
+            let expected_str = expected.display_user_friendly();
+            let found_str = found.display_user_friendly();
+
+            let msg = match context {
+                Some(ctx) => {
+                    // Context-aware message that explains what's happening
+                    format!(
+                        "Type mismatch {}.\n\n\
+                         The context expects:  {}{}{}\n\
+                         But this has type:    {}{}{}",
+                        ctx,
+                        colors.cyan(),
+                        expected_str,
+                        colors.reset(),
+                        colors.red(),
+                        found_str,
+                        colors.reset()
+                    )
+                }
+                None => {
+                    // Generic message when no context available
+                    format!(
+                        "I found a type mismatch.\n\n\
+                         One part has type:    {}{}{}\n\
+                         Another part has:     {}{}{}\n\n\
+                         These types are not compatible.",
+                        colors.cyan(),
+                        expected_str,
+                        colors.reset(),
+                        colors.red(),
+                        found_str,
+                        colors.reset()
+                    )
+                }
+            };
+            ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
-        TypeError::TypeMismatch { expected, found, span } => {
+        TypeError::OccursCheck {
+            var_id: _,
+            ty,
+            span,
+        } => {
+            // Use normalized display for occurs check too
+            let ty_str = ty.display_user_friendly();
             let msg = format!(
-                "I found a type mismatch.\n\n  I expected:  {}{}{}\n  But found:   {}{}{}",
-                colors.cyan(), expected, colors.reset(),
-                colors.red(), found, colors.reset()
+                "I detected an infinite type.\n\n\
+                 The type `{}` refers to itself, which would create an infinitely nested type.\n\n\
+                 This often happens when:\n\
+                 - A function is applied to itself\n\
+                 - A recursive function uses `shift` (which requires answer-type polymorphism)",
+                ty_str
             );
             ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
-        TypeError::OccursCheck { var_id, ty, span } => {
-            let msg = format!("I detected an infinite type: type variable {} occurs in {}.", var_id, ty);
-            ("TYPE ERROR", msg, span.as_ref(), vec![])
-        }
-        TypeError::UnknownConstructor { name, span, suggestions } => {
-            ("NAME ERROR", format!("I cannot find a constructor named `{}`.", name), Some(span), suggestions.clone())
-        }
-        TypeError::PatternMismatch { span } => {
-            ("PATTERN ERROR", "I found a pattern that doesn't make sense here.".to_string(), Some(span), vec![])
-        }
-        TypeError::NonExhaustivePatterns { span } => {
-            ("PATTERN ERROR", "This match expression doesn't cover all possible cases.".to_string(), Some(span), vec![])
-        }
-        TypeError::UnknownTrait { name, span } => {
-            ("NAME ERROR", format!("I cannot find a trait named `{}`.", name), span.as_ref(), vec![])
-        }
-        TypeError::OverlappingInstance { trait_name, existing, new, span } => {
+        TypeError::UnknownConstructor {
+            name,
+            span,
+            suggestions,
+        } => (
+            "NAME ERROR",
+            format!("I cannot find a constructor named `{}`.", name),
+            Some(span),
+            suggestions.clone(),
+        ),
+        TypeError::PatternMismatch { span } => (
+            "PATTERN ERROR",
+            "I found a pattern that doesn't make sense here.".to_string(),
+            Some(span),
+            vec![],
+        ),
+        TypeError::NonExhaustivePatterns { span } => (
+            "PATTERN ERROR",
+            "This match expression doesn't cover all possible cases.".to_string(),
+            Some(span),
+            vec![],
+        ),
+        TypeError::UnknownTrait { name, span } => (
+            "NAME ERROR",
+            format!("I cannot find a trait named `{}`.", name),
+            span.as_ref(),
+            vec![],
+        ),
+        TypeError::OverlappingInstance {
+            trait_name,
+            existing,
+            new,
+            span,
+        } => {
             let msg = format!(
                 "I found overlapping instances for trait `{}`.\n\n  Existing instance: {}\n  Conflicting:      {}",
-                trait_name, existing, new
+                trait_name, existing.display_user_friendly(), new.display_user_friendly()
             );
             ("INSTANCE ERROR", msg, span.as_ref(), vec![])
         }
-        TypeError::NoInstance { trait_name, ty, span } => {
-            let msg = format!("I cannot find an instance of `{}` for type `{}`.", trait_name, ty);
+        TypeError::NoInstance {
+            trait_name,
+            ty,
+            span,
+        } => {
+            let msg = format!(
+                "I cannot find an instance of `{}` for type `{}`.",
+                trait_name,
+                ty.display_user_friendly()
+            );
             ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
     };
@@ -345,7 +435,13 @@ fn format_type_error(err: &TypeError, source_map: &SourceMap, filename: Option<&
     if let Some(span) = span {
         let pos = source_map.position(span.start);
         let file = filename.unwrap_or("<input>");
-        out.push_str(&format!("{}{}:{}{}\n\n", colors.bold(), file, pos, colors.reset()));
+        out.push_str(&format!(
+            "{}{}:{}{}\n\n",
+            colors.bold(),
+            file,
+            pos,
+            colors.reset()
+        ));
     }
 
     // Message
@@ -368,7 +464,12 @@ fn format_type_error(err: &TypeError, source_map: &SourceMap, filename: Option<&
     out
 }
 
-fn format_parse_error(err: &ParseError, source_map: &SourceMap, filename: Option<&str>, colors: &Colors) -> String {
+fn format_parse_error(
+    err: &ParseError,
+    source_map: &SourceMap,
+    filename: Option<&str>,
+    colors: &Colors,
+) -> String {
     let mut out = String::new();
 
     out.push_str(&format_header("PARSE ERROR", colors));
@@ -376,12 +477,27 @@ fn format_parse_error(err: &ParseError, source_map: &SourceMap, filename: Option
     out.push('\n');
 
     let (msg, span) = match err {
-        ParseError::UnexpectedToken { expected, found, span } => {
-            (format!("I was expecting {} but found {:?} instead.", expected, found), Some(span))
-        }
-        ParseError::UnexpectedEof { expected, last_span } => {
-            (format!("I reached the end of the file but was expecting {}.", expected), Some(last_span))
-        }
+        ParseError::UnexpectedToken {
+            expected,
+            found,
+            span,
+        } => (
+            format!(
+                "I was expecting {} but found {:?} instead.",
+                expected, found
+            ),
+            Some(span),
+        ),
+        ParseError::UnexpectedEof {
+            expected,
+            last_span,
+        } => (
+            format!(
+                "I reached the end of the file but was expecting {}.",
+                expected
+            ),
+            Some(last_span),
+        ),
         ParseError::InvalidPattern { span } => {
             ("I found an invalid pattern here.".to_string(), Some(span))
         }
@@ -391,7 +507,13 @@ fn format_parse_error(err: &ParseError, source_map: &SourceMap, filename: Option
     if let Some(span) = span {
         let pos = source_map.position(span.start);
         let file = filename.unwrap_or("<input>");
-        out.push_str(&format!("{}{}:{}{}\n\n", colors.bold(), file, pos, colors.reset()));
+        out.push_str(&format!(
+            "{}{}:{}{}\n\n",
+            colors.bold(),
+            file,
+            pos,
+            colors.reset()
+        ));
     }
 
     // Message
@@ -408,7 +530,12 @@ fn format_parse_error(err: &ParseError, source_map: &SourceMap, filename: Option
     out
 }
 
-fn format_lex_error(err: &LexError, source_map: &SourceMap, filename: Option<&str>, colors: &Colors) -> String {
+fn format_lex_error(
+    err: &LexError,
+    source_map: &SourceMap,
+    filename: Option<&str>,
+    colors: &Colors,
+) -> String {
     let mut out = String::new();
 
     out.push_str(&format_header("SYNTAX ERROR", colors));
@@ -422,9 +549,10 @@ fn format_lex_error(err: &LexError, source_map: &SourceMap, filename: Option<&st
         LexError::UnterminatedString(span) => {
             ("I found a string that was never closed.".to_string(), span)
         }
-        LexError::UnterminatedChar(span) => {
-            ("I found a character literal that was never closed.".to_string(), span)
-        }
+        LexError::UnterminatedChar(span) => (
+            "I found a character literal that was never closed.".to_string(),
+            span,
+        ),
         LexError::InvalidEscape(c, span) => {
             (format!("I found an invalid escape sequence: \\{}", c), span)
         }
@@ -436,7 +564,13 @@ fn format_lex_error(err: &LexError, source_map: &SourceMap, filename: Option<&st
     // Location
     let pos = source_map.position(span.start);
     let file = filename.unwrap_or("<input>");
-    out.push_str(&format!("{}{}:{}{}\n\n", colors.bold(), file, pos, colors.reset()));
+    out.push_str(&format!(
+        "{}{}:{}{}\n\n",
+        colors.bold(),
+        file,
+        pos,
+        colors.reset()
+    ));
 
     // Message
     out.push_str(&msg);

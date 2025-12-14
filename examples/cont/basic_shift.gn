@@ -1,0 +1,35 @@
+-- Option type for optional parsing
+type Option a = | Some a | None
+
+-- Parser state: remaining input
+type ParseState = List Char
+
+-- Parse result: either parsed value + remaining input, or failure
+type ParseResult a =
+    | Parsed a (List Char)
+    | ParseFail String
+
+let run_parser parser input =
+    let k = reset (
+        let result = parser () in
+        fun remaining -> Parsed result remaining
+    ) in
+    k input
+
+let (<|>) p1 p2 =
+  fun () -> 
+      shift (fun k ->
+        fun input ->
+            match run_parser p1 input with
+            | Parsed v rest -> k v rest
+            | ParseFail _ -> run_parser p2 input
+    )
+
+
+--let test_simple = run_parser simple_alt ['a', 'b']
+
+let simple () = shift (fun k -> 42)
+let wrapped () = reset (shift (fun k -> 42))
+let test = (fun () -> 1) <|> (fun () -> 2)
+let test_wrapped = run_parser test
+--let test2 () = reset ((fun () -> 1) <|> (fun () -> 2) ())

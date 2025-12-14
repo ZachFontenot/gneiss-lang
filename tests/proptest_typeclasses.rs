@@ -4,9 +4,9 @@
 //! especially for constructor types where the constructor name (e.g., "Some")
 //! must be mapped to the type name (e.g., "Option") at runtime.
 
-use proptest::prelude::*;
-use gneiss::{Lexer, Parser, Inferencer, Interpreter};
 use gneiss::eval::Value;
+use gneiss::{Inferencer, Interpreter, Lexer, Parser};
+use proptest::prelude::*;
 
 /// Run a complete program and return the final expression's value
 fn run_program(source: &str) -> Result<Value, String> {
@@ -15,7 +15,9 @@ fn run_program(source: &str) -> Result<Value, String> {
     let program = parser.parse_program().map_err(|e| e.to_string())?;
 
     let mut inferencer = Inferencer::new();
-    let _env = inferencer.infer_program(&program).map_err(|e| e.to_string())?;
+    let _env = inferencer
+        .infer_program(&program)
+        .map_err(|e| e.to_string())?;
 
     let mut interpreter = Interpreter::new();
     interpreter.set_class_env(inferencer.take_class_env());
@@ -31,7 +33,11 @@ fn small_int() -> impl Strategy<Value = i64> {
 
 /// Format an integer for Gneiss source (wrap negatives in parens)
 fn format_int(n: i64) -> String {
-    if n < 0 { format!("({})", n) } else { n.to_string() }
+    if n < 0 {
+        format!("({})", n)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Generate a valid uppercase identifier for types/constructors
@@ -447,8 +453,11 @@ end
 show (Some 42)
 "#;
         let result = run_program(source).expect("Constructor name vs type name bug");
-        assert!(matches!(result, Value::String(ref s) if s == "option"),
-            "Expected String(\"option\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "option"),
+            "Expected String(\"option\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -475,8 +484,11 @@ end
 show None
 "#;
         let result = run_program(source).expect("Multiple constructors same type");
-        assert!(matches!(result, Value::String(ref s) if s == "none"),
-            "Expected String(\"none\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "none"),
+            "Expected String(\"none\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -502,8 +514,11 @@ end
 show (Some 42)
 "#;
         let result = run_program(source).expect("Recursive show call");
-        assert!(matches!(result, Value::String(ref s) if s == "Some(42)"),
-            "Expected String(\"Some(42)\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "Some(42)"),
+            "Expected String(\"Some(42)\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -539,8 +554,11 @@ end
 show (Pending true)
 "#;
         let result = run_program(source).expect("Three constructors same type");
-        assert!(matches!(result, Value::String(ref s) if s == "Pending"),
-            "Expected String(\"Pending\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "Pending"),
+            "Expected String(\"Pending\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -566,8 +584,11 @@ end
 show None
 "#;
         let result = run_program(source).expect("Nullary constructor");
-        assert!(matches!(result, Value::String(ref s) if s == "none"),
-            "Expected String(\"none\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "none"),
+            "Expected String(\"none\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -598,8 +619,11 @@ end
 show (Some (Cons 1 (Cons 2 Nil)))
 "#;
         let result = run_program(source).expect("Nested different parameterized types");
-        assert!(matches!(result, Value::String(ref s) if s == "Some"),
-            "Expected String(\"Some\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "Some"),
+            "Expected String(\"Some\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -625,8 +649,11 @@ end
 show (Some (Some (Some 42)))
 "#;
         let result = run_program(source).expect("Constraint chain");
-        assert!(matches!(result, Value::String(ref s) if s == "Some(Some(Some(42)))"),
-            "Expected String(\"Some(Some(Some(42)))\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "Some(Some(Some(42)))"),
+            "Expected String(\"Some(Some(Some(42)))\"), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -655,7 +682,10 @@ end
 show (MkPair 42 true)
 "#;
         let result = run_program(source).expect("Multiple type params");
-        assert!(matches!(result, Value::String(ref s) if s == "pair"),
-            "Expected String(\"pair\"), got {:?}", result);
+        assert!(
+            matches!(result, Value::String(ref s) if s == "pair"),
+            "Expected String(\"pair\"), got {:?}",
+            result
+        );
     }
 }

@@ -149,14 +149,36 @@ let nondet_handle_choose interpret xs k =
     | [] -> []
     | x :: _ -> interpret (k x)
 
+let map f lst =
+  match lst with
+  | [] -> []
+  | hd :: rest -> f hd :: map f rest
+
+let concat xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> x ++ concat rest
+
+let concat_map f xs =
+    concat (map f xs)
+
 let handle_nondet comp =
     let interpret eff =
         match eff with
         | NondetReturn x -> [x]
         | NondetFail -> []
-        | NondetChoose xs k -> nondet_handle_choose interpret xs k
+        | NondetChoose xs k -> concat_map (fun x -> interpret (k x)) xs
     in
     interpret (reset (NondetReturn (comp ())))
+
+--let handle_nondet comp =
+--    let interpret eff =
+--        match eff with
+--        | NondetReturn x -> [x]
+--        | NondetFail -> []
+--        | NondetChoose xs k -> nondet_handle_choose interpret xs k
+--    in
+--    interpret (reset (NondetReturn (comp ())))
 
 -- Example: Pythagorean triples
 let nondet_example () =

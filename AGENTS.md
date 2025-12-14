@@ -58,7 +58,16 @@ bd close bd-42 --reason "Completed" --json
 4. **Discover new work?** Create linked issue:
    - `bd create "Found bug" -p 1 --deps discovered-from:<parent-id>`
 5. **Complete**: `bd close <id> --reason "Done"`
-6. **Commit together**: Always commit the `.beads/issues.jsonl` file together with the code changes so issue state stays in sync with code state
+6. **Pre-commit**: Run `cargo fmt` to format code before committing
+7. **Commit together**: Always commit the `.beads/issues.jsonl` file together with the code changes so issue state stays in sync with code state
+
+### Pre-Commit Checklist
+
+Before committing changes:
+```bash
+cargo fmt          # Format all Rust code
+cargo test         # Run tests to catch regressions
+```
 
 ### Auto-Sync
 

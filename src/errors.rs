@@ -22,7 +22,12 @@ pub enum Warning {
 
 impl Warning {
     /// Format the warning for display
-    pub fn format(&self, source_map: &SourceMap, filename: Option<&str>, colors: &Colors) -> String {
+    pub fn format(
+        &self,
+        source_map: &SourceMap,
+        filename: Option<&str>,
+        colors: &Colors,
+    ) -> String {
         match self {
             Warning::ShadowingBuiltinOperator { op, span } => {
                 let mut out = String::new();
@@ -38,7 +43,13 @@ impl Warning {
 
                 let pos = source_map.position(span.start);
                 let file = filename.unwrap_or("<input>");
-                out.push_str(&format!("{}{}:{}{}\n\n", colors.bold(), file, pos, colors.reset()));
+                out.push_str(&format!(
+                    "{}{}:{}{}\n\n",
+                    colors.bold(),
+                    file,
+                    pos,
+                    colors.reset()
+                ));
 
                 out.push_str(&format!(
                     "You are shadowing the built-in operator `{}{}{}`.\n\
@@ -71,27 +82,51 @@ impl Colors {
     }
 
     pub fn red(&self) -> &'static str {
-        if self.enabled { "\x1b[31m" } else { "" }
+        if self.enabled {
+            "\x1b[31m"
+        } else {
+            ""
+        }
     }
 
     pub fn cyan(&self) -> &'static str {
-        if self.enabled { "\x1b[36m" } else { "" }
+        if self.enabled {
+            "\x1b[36m"
+        } else {
+            ""
+        }
     }
 
     pub fn yellow(&self) -> &'static str {
-        if self.enabled { "\x1b[33m" } else { "" }
+        if self.enabled {
+            "\x1b[33m"
+        } else {
+            ""
+        }
     }
 
     pub fn bold(&self) -> &'static str {
-        if self.enabled { "\x1b[1m" } else { "" }
+        if self.enabled {
+            "\x1b[1m"
+        } else {
+            ""
+        }
     }
 
     pub fn dim(&self) -> &'static str {
-        if self.enabled { "\x1b[2m" } else { "" }
+        if self.enabled {
+            "\x1b[2m"
+        } else {
+            ""
+        }
     }
 
     pub fn reset(&self) -> &'static str {
-        if self.enabled { "\x1b[0m" } else { "" }
+        if self.enabled {
+            "\x1b[0m"
+        } else {
+            ""
+        }
     }
 }
 
@@ -169,7 +204,11 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
 ///
 /// Returns up to 3 suggestions within the given max edit distance,
 /// sorted by distance (closest first).
-pub fn find_similar<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>, max_distance: usize) -> Vec<String> {
+pub fn find_similar<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+    max_distance: usize,
+) -> Vec<String> {
     let mut suggestions: Vec<(String, usize)> = candidates
         .into_iter()
         .filter_map(|c| {
@@ -242,7 +281,11 @@ pub fn format_snippet(source_map: &SourceMap, span: &Span, colors: &Colors) -> S
         if line_num == loc.start.line {
             // First line: caret at start column, underline to end of line content
             let spaces = " ".repeat(loc.start.column.saturating_sub(1));
-            let underline_len = line_text.chars().count().saturating_sub(loc.start.column.saturating_sub(1)).max(1);
+            let underline_len = line_text
+                .chars()
+                .count()
+                .saturating_sub(loc.start.column.saturating_sub(1))
+                .max(1);
             let marks = "^".repeat(underline_len);
             out.push_str(&format!(
                 "{}{}{}{}{}\n",
@@ -354,16 +397,15 @@ pub fn format_header(error_kind: &str, colors: &Colors) -> String {
 /// Format the location line.
 ///
 /// Example: "examples/test.gn:12:15"
-pub fn format_location(filename: Option<&str>, span: &Span, source_map: &SourceMap, colors: &Colors) -> String {
+pub fn format_location(
+    filename: Option<&str>,
+    span: &Span,
+    source_map: &SourceMap,
+    colors: &Colors,
+) -> String {
     let pos = source_map.position(span.start);
     let file = filename.unwrap_or("<input>");
-    format!(
-        "{}{}:{}{}",
-        colors.bold(),
-        file,
-        pos,
-        colors.reset()
-    )
+    format!("{}{}:{}{}", colors.bold(), file, pos, colors.reset())
 }
 
 // ============================================================================
@@ -381,10 +423,10 @@ mod tests {
 
     #[test]
     fn test_levenshtein_one_char_diff() {
-        assert_eq!(levenshtein_distance("hello", "hallo"), 1);  // substitution
-        assert_eq!(levenshtein_distance("print", "prit"), 1);   // deletion of 'n'
+        assert_eq!(levenshtein_distance("hello", "hallo"), 1); // substitution
+        assert_eq!(levenshtein_distance("print", "prit"), 1); // deletion of 'n'
         assert_eq!(levenshtein_distance("print", "priint"), 1); // insertion of 'i'
-        assert_eq!(levenshtein_distance("print", "prnt"), 1);   // deletion of 'i'
+        assert_eq!(levenshtein_distance("print", "prnt"), 1); // deletion of 'i'
     }
 
     #[test]

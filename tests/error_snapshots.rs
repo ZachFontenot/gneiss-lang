@@ -10,7 +10,7 @@
 use std::fs;
 
 use gneiss::ast::SourceMap;
-use gneiss::errors::{Colors, format_header, format_snippet, format_suggestions};
+use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
 use gneiss::parser::ParseError;
@@ -84,7 +84,7 @@ fn snapshot_type_error_unbound_variable() {
 #[test]
 fn snapshot_type_error_with_suggestion() {
     // First define 'print' in a program, then try to use 'prnt'
-    let source = "let prnt = print";  // This will use the built-in print
+    let source = "let prnt = print"; // This will use the built-in print
     let tokens = Lexer::new(source).tokenize().unwrap();
     let mut parser = Parser::new(tokens);
     let _ = parser.parse_program();
@@ -176,41 +176,96 @@ fn format_type_error_for_test(
     let mut out = String::new();
 
     let (header, msg, span, suggestions) = match err {
-        TypeError::UnboundVariable { name, span, suggestions } => {
-            ("NAME ERROR", format!("I cannot find a variable named `{}`.", name), Some(span), suggestions.clone())
-        }
-        TypeError::TypeMismatch { expected, found, span } => {
-            let msg = format!(
-                "I found a type mismatch.\n\n  I expected:  {}\n  But found:   {}",
-                expected, found
-            );
+        TypeError::UnboundVariable {
+            name,
+            span,
+            suggestions,
+        } => (
+            "NAME ERROR",
+            format!("I cannot find a variable named `{}`.", name),
+            Some(span),
+            suggestions.clone(),
+        ),
+        TypeError::TypeMismatch {
+            expected,
+            found,
+            span,
+            context,
+        } => {
+            let expected_str = expected.display_user_friendly();
+            let found_str = found.display_user_friendly();
+            let msg = match context {
+                Some(ctx) => {
+                    format!(
+                        "Type mismatch {}.\n\n  The context expects:  {}\n  But this has type:    {}",
+                        ctx, expected_str, found_str
+                    )
+                }
+                None => {
+                    format!(
+                        "I found a type mismatch.\n\n  One part has type:    {}\n  Another part has:     {}\n\n  These types are not compatible.",
+                        expected_str, found_str
+                    )
+                }
+            };
             ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
         TypeError::OccursCheck { var_id, ty, span } => {
-            let msg = format!("I detected an infinite type: type variable {} occurs in {}.", var_id, ty);
+            let msg = format!(
+                "I detected an infinite type: type variable {} occurs in {}.",
+                var_id, ty
+            );
             ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
-        TypeError::UnknownConstructor { name, span, suggestions } => {
-            ("NAME ERROR", format!("I cannot find a constructor named `{}`.", name), Some(span), suggestions.clone())
-        }
-        TypeError::PatternMismatch { span } => {
-            ("PATTERN ERROR", "I found a pattern that doesn't make sense here.".to_string(), Some(span), vec![])
-        }
-        TypeError::NonExhaustivePatterns { span } => {
-            ("PATTERN ERROR", "This match expression doesn't cover all possible cases.".to_string(), Some(span), vec![])
-        }
-        TypeError::UnknownTrait { name, span } => {
-            ("NAME ERROR", format!("I cannot find a trait named `{}`.", name), span.as_ref(), vec![])
-        }
-        TypeError::OverlappingInstance { trait_name, existing, new, span } => {
+        TypeError::UnknownConstructor {
+            name,
+            span,
+            suggestions,
+        } => (
+            "NAME ERROR",
+            format!("I cannot find a constructor named `{}`.", name),
+            Some(span),
+            suggestions.clone(),
+        ),
+        TypeError::PatternMismatch { span } => (
+            "PATTERN ERROR",
+            "I found a pattern that doesn't make sense here.".to_string(),
+            Some(span),
+            vec![],
+        ),
+        TypeError::NonExhaustivePatterns { span } => (
+            "PATTERN ERROR",
+            "This match expression doesn't cover all possible cases.".to_string(),
+            Some(span),
+            vec![],
+        ),
+        TypeError::UnknownTrait { name, span } => (
+            "NAME ERROR",
+            format!("I cannot find a trait named `{}`.", name),
+            span.as_ref(),
+            vec![],
+        ),
+        TypeError::OverlappingInstance {
+            trait_name,
+            existing,
+            new,
+            span,
+        } => {
             let msg = format!(
                 "I found overlapping instances for trait `{}`.\n\n  Existing instance: {}\n  Conflicting:      {}",
                 trait_name, existing, new
             );
             ("INSTANCE ERROR", msg, span.as_ref(), vec![])
         }
-        TypeError::NoInstance { trait_name, ty, span } => {
-            let msg = format!("I cannot find an instance of `{}` for type `{}`.", trait_name, ty);
+        TypeError::NoInstance {
+            trait_name,
+            ty,
+            span,
+        } => {
+            let msg = format!(
+                "I cannot find an instance of `{}` for type `{}`.",
+                trait_name, ty
+            );
             ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
     };
@@ -255,12 +310,27 @@ fn format_parse_error_for_test(
     out.push('\n');
 
     let (msg, span) = match err {
-        ParseError::UnexpectedToken { expected, found, span } => {
-            (format!("I was expecting {} but found {:?} instead.", expected, found), Some(span))
-        }
-        ParseError::UnexpectedEof { expected, last_span } => {
-            (format!("I reached the end of the file but was expecting {}.", expected), Some(last_span))
-        }
+        ParseError::UnexpectedToken {
+            expected,
+            found,
+            span,
+        } => (
+            format!(
+                "I was expecting {} but found {:?} instead.",
+                expected, found
+            ),
+            Some(span),
+        ),
+        ParseError::UnexpectedEof {
+            expected,
+            last_span,
+        } => (
+            format!(
+                "I reached the end of the file but was expecting {}.",
+                expected
+            ),
+            Some(last_span),
+        ),
         ParseError::InvalidPattern { span } => {
             ("I found an invalid pattern here.".to_string(), Some(span))
         }
@@ -303,9 +373,10 @@ fn format_lex_error_for_test(
         LexError::UnterminatedString(span) => {
             ("I found a string that was never closed.".to_string(), span)
         }
-        LexError::UnterminatedChar(span) => {
-            ("I found a character literal that was never closed.".to_string(), span)
-        }
+        LexError::UnterminatedChar(span) => (
+            "I found a character literal that was never closed.".to_string(),
+            span,
+        ),
         LexError::InvalidEscape(c, span) => {
             (format!("I found an invalid escape sequence: \\{}", c), span)
         }

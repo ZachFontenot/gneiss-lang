@@ -26,10 +26,10 @@ pub enum Type {
     /// "Function from σ to τ that changes answer type from α to β"
     /// For pure functions, ans_in == ans_out (same type variable)
     Arrow {
-        arg: Rc<Type>,      // σ: argument type
-        ret: Rc<Type>,      // τ: return type
-        ans_in: Rc<Type>,   // α: answer type before application
-        ans_out: Rc<Type>,  // β: answer type after application
+        arg: Rc<Type>,     // σ: argument type
+        ret: Rc<Type>,     // τ: return type
+        ans_in: Rc<Type>,  // α: answer type before application
+        ans_out: Rc<Type>, // β: answer type after application
     },
 
     /// Tuple type: (a, b, c)
@@ -97,13 +97,22 @@ impl Type {
                 TypeVar::Generic(vid) => *vid == id,
                 TypeVar::Link(_) => unreachable!("resolve should have followed links"),
             },
-            Type::Arrow { arg, ret, ans_in, ans_out } => {
-                arg.occurs(id) || ret.occurs(id) || ans_in.occurs(id) || ans_out.occurs(id)
-            }
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => arg.occurs(id) || ret.occurs(id) || ans_in.occurs(id) || ans_out.occurs(id),
             Type::Tuple(types) => types.iter().any(|t| t.occurs(id)),
             Type::Constructor { args, .. } => args.iter().any(|t| t.occurs(id)),
             Type::Channel(t) => t.occurs(id),
-            Type::Int | Type::Float | Type::Bool | Type::String | Type::Char | Type::Unit | Type::Pid => false,
+            Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::String
+            | Type::Char
+            | Type::Unit
+            | Type::Pid => false,
         }
     }
 
@@ -149,6 +158,160 @@ impl Type {
             .rev()
             .fold(ret, |acc, arg| Type::arrow(arg, acc))
     }
+
+    // ========================================================================
+    // User-Friendly Type Display
+    // ========================================================================
+
+    /// Display the type with normalized variable names (a, b, c instead of t732).
+    /// Also hides answer types for user-friendly output.
+    pub fn display_user_friendly(&self) -> String {
+        let mut var_map: HashMap<TypeVarId, char> = HashMap::new();
+        let mut next_var = 'a';
+        self.display_with_map(&mut var_map, &mut next_var, true)
+    }
+
+    /// Display with normalized variables but showing answer types (for debugging)
+    pub fn display_normalized(&self) -> String {
+        let mut var_map: HashMap<TypeVarId, char> = HashMap::new();
+        let mut next_var = 'a';
+        self.display_with_map(&mut var_map, &mut next_var, false)
+    }
+
+    /// Internal helper for display with variable normalization
+    fn display_with_map(
+        &self,
+        var_map: &mut HashMap<TypeVarId, char>,
+        next_var: &mut char,
+        hide_answer_types: bool,
+    ) -> String {
+        match self.resolve() {
+            Type::Var(var) => match &*var.borrow() {
+                TypeVar::Unbound { id, .. } => {
+                    let c = *var_map.entry(*id).or_insert_with(|| {
+                        let c = *next_var;
+                        *next_var = if *next_var == 'z' {
+                            'a'
+                        } else {
+                            (*next_var as u8 + 1) as char
+                        };
+                        c
+                    });
+                    c.to_string()
+                }
+                TypeVar::Generic(id) => {
+                    let c = *var_map.entry(*id).or_insert_with(|| {
+                        let c = *next_var;
+                        *next_var = if *next_var == 'z' {
+                            'a'
+                        } else {
+                            (*next_var as u8 + 1) as char
+                        };
+                        c
+                    });
+                    format!("'{}", c)
+                }
+                TypeVar::Link(_) => unreachable!("resolve should follow links"),
+            },
+            Type::Int => "Int".to_string(),
+            Type::Float => "Float".to_string(),
+            Type::Bool => "Bool".to_string(),
+            Type::String => "String".to_string(),
+            Type::Char => "Char".to_string(),
+            Type::Unit => "()".to_string(),
+            Type::Pid => "Pid".to_string(),
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => {
+                let arg_str = match arg.resolve() {
+                    Type::Arrow { .. } => format!(
+                        "({})",
+                        arg.display_with_map(var_map, next_var, hide_answer_types)
+                    ),
+                    _ => arg.display_with_map(var_map, next_var, hide_answer_types),
+                };
+                let ret_str = ret.display_with_map(var_map, next_var, hide_answer_types);
+
+                if hide_answer_types {
+                    // Always hide answer types for user-friendly display
+                    format!("{} -> {}", arg_str, ret_str)
+                } else {
+                    // Check if pure
+                    let ans_in_resolved = ans_in.resolve();
+                    let ans_out_resolved = ans_out.resolve();
+                    let is_pure = match (&ans_in_resolved, &ans_out_resolved) {
+                        (Type::Var(v1), Type::Var(v2)) => match (&*v1.borrow(), &*v2.borrow()) {
+                            (
+                                TypeVar::Unbound { id: id1, .. },
+                                TypeVar::Unbound { id: id2, .. },
+                            ) => id1 == id2,
+                            (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if is_pure {
+                        format!("{} -> {}", arg_str, ret_str)
+                    } else {
+                        let ans_in_str =
+                            ans_in.display_with_map(var_map, next_var, hide_answer_types);
+                        let ans_out_str =
+                            ans_out.display_with_map(var_map, next_var, hide_answer_types);
+                        format!("{}/{} -> {}/{}", arg_str, ans_in_str, ret_str, ans_out_str)
+                    }
+                }
+            }
+            Type::Tuple(types) => {
+                let parts: Vec<String> = types
+                    .iter()
+                    .map(|t| t.display_with_map(var_map, next_var, hide_answer_types))
+                    .collect();
+                format!("({})", parts.join(", "))
+            }
+            Type::Constructor { name, args } => {
+                // Special case: display List as [a] instead of List a
+                if name == "List" && args.len() == 1 {
+                    return format!(
+                        "[{}]",
+                        args[0].display_with_map(var_map, next_var, hide_answer_types)
+                    );
+                }
+                if args.is_empty() {
+                    name
+                } else {
+                    let arg_strs: Vec<String> = args
+                        .iter()
+                        .map(|a| {
+                            // Wrap complex types in parens
+                            let s = a.display_with_map(var_map, next_var, hide_answer_types);
+                            let needs_parens = match a.resolve() {
+                                Type::Arrow { .. } => true,
+                                Type::Constructor {
+                                    args: inner_args, ..
+                                } => !inner_args.is_empty(),
+                                _ => false,
+                            };
+                            if needs_parens {
+                                format!("({})", s)
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
+                    format!("{} {}", name, arg_strs.join(" "))
+                }
+            }
+            Type::Channel(t) => {
+                format!(
+                    "Channel {}",
+                    t.display_with_map(var_map, next_var, hide_answer_types)
+                )
+            }
+        }
+    }
 }
 
 impl fmt::Display for Type {
@@ -166,7 +329,12 @@ impl fmt::Display for Type {
             Type::Char => write!(f, "Char"),
             Type::Unit => write!(f, "()"),
             Type::Pid => write!(f, "Pid"),
-            Type::Arrow { arg, ret, ans_in, ans_out } => {
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => {
                 let arg_str = match arg.resolve() {
                     Type::Arrow { .. } => format!("({})", arg),
                     _ => format!("{}", arg),
@@ -178,7 +346,10 @@ impl fmt::Display for Type {
                     (Type::Var(v1), Type::Var(v2)) => {
                         // Check if same variable by comparing IDs
                         match (&*v1.borrow(), &*v2.borrow()) {
-                            (TypeVar::Unbound { id: id1, .. }, TypeVar::Unbound { id: id2, .. }) => id1 == id2,
+                            (
+                                TypeVar::Unbound { id: id1, .. },
+                                TypeVar::Unbound { id: id2, .. },
+                            ) => id1 == id2,
                             (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
                             _ => false,
                         }
@@ -284,6 +455,28 @@ impl InferResult {
             ty,
             answer_before: answer.clone(),
             answer_after: answer,
+        }
+    }
+
+    /// Check if this result represents a pure expression (no effect on answer type)
+    pub fn is_pure(&self) -> bool {
+        let before = self.answer_before.resolve();
+        let after = self.answer_after.resolve();
+        match (&before, &after) {
+            (Type::Var(v1), Type::Var(v2)) => {
+                // Check if same variable by comparing IDs or Rc pointer
+                if Rc::ptr_eq(v1, v2) {
+                    return true;
+                }
+                match (&*v1.borrow(), &*v2.borrow()) {
+                    (TypeVar::Unbound { id: id1, .. }, TypeVar::Unbound { id: id2, .. }) => {
+                        id1 == id2
+                    }
+                    (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
+                    _ => false,
+                }
+            }
+            _ => types_equal(&before, &after),
         }
     }
 }
@@ -392,19 +585,30 @@ pub fn types_equal(t1: &Type, t2: &Type) -> bool {
             _ => false,
         },
         (
-            Type::Arrow { arg: a1, ret: r1, ans_in: ai1, ans_out: ao1 },
-            Type::Arrow { arg: a2, ret: r2, ans_in: ai2, ans_out: ao2 },
+            Type::Arrow {
+                arg: a1,
+                ret: r1,
+                ans_in: ai1,
+                ans_out: ao1,
+            },
+            Type::Arrow {
+                arg: a2,
+                ret: r2,
+                ans_in: ai2,
+                ans_out: ao2,
+            },
         ) => {
-            types_equal(a1, a2) && types_equal(r1, r2)
-                && types_equal(ai1, ai2) && types_equal(ao1, ao2)
+            types_equal(a1, a2)
+                && types_equal(r1, r2)
+                && types_equal(ai1, ai2)
+                && types_equal(ao1, ao2)
         }
         (Type::Tuple(ts1), Type::Tuple(ts2)) => {
             ts1.len() == ts2.len() && ts1.iter().zip(ts2).all(|(x, y)| types_equal(x, y))
         }
-        (
-            Type::Constructor { name: n1, args: a1 },
-            Type::Constructor { name: n2, args: a2 },
-        ) => n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| types_equal(x, y)),
+        (Type::Constructor { name: n1, args: a1 }, Type::Constructor { name: n2, args: a2 }) => {
+            n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| types_equal(x, y))
+        }
         (Type::Channel(e1), Type::Channel(e2)) => types_equal(e1, e2),
         _ => false,
     }
@@ -441,7 +645,12 @@ pub fn apply_subst(ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
             TypeVar::Unbound { id, .. } => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
             TypeVar::Link(_) => unreachable!("resolve should follow links"),
         },
-        Type::Arrow { arg, ret, ans_in, ans_out } => Type::Arrow {
+        Type::Arrow {
+            arg,
+            ret,
+            ans_in,
+            ans_out,
+        } => Type::Arrow {
             arg: Rc::new(apply_subst(&arg, subst)),
             ret: Rc::new(apply_subst(&ret, subst)),
             ans_in: Rc::new(apply_subst(&ans_in, subst)),
@@ -557,7 +766,10 @@ impl ClassEnv {
     }
 
     /// Find instances for a given trait
-    pub fn instances_for<'a>(&'a self, trait_name: &'a str) -> impl Iterator<Item = &'a InstanceInfo> + 'a {
+    pub fn instances_for<'a>(
+        &'a self,
+        trait_name: &'a str,
+    ) -> impl Iterator<Item = &'a InstanceInfo> + 'a {
         self.instances
             .iter()
             .filter(move |i| i.trait_name == trait_name)
@@ -603,16 +815,9 @@ fn types_overlap(t1: &Type, t2: &Type) -> bool {
         | (Type::Pid, _) => false,
 
         // Constructors with same name and arity might overlap
-        (
-            Type::Constructor {
-                name: n1,
-                args: a1,
-            },
-            Type::Constructor {
-                name: n2,
-                args: a2,
-            },
-        ) => n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| types_overlap(x, y)),
+        (Type::Constructor { name: n1, args: a1 }, Type::Constructor { name: n2, args: a2 }) => {
+            n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| types_overlap(x, y))
+        }
 
         // Channels might overlap if their element types might overlap
         (Type::Channel(e1), Type::Channel(e2)) => types_overlap(e1, e2),
@@ -624,11 +829,23 @@ fn types_overlap(t1: &Type, t2: &Type) -> bool {
 
         // Arrows might overlap (check all 4 components)
         (
-            Type::Arrow { arg: a1, ret: r1, ans_in: ai1, ans_out: ao1 },
-            Type::Arrow { arg: a2, ret: r2, ans_in: ai2, ans_out: ao2 },
+            Type::Arrow {
+                arg: a1,
+                ret: r1,
+                ans_in: ai1,
+                ans_out: ao1,
+            },
+            Type::Arrow {
+                arg: a2,
+                ret: r2,
+                ans_in: ai2,
+                ans_out: ao2,
+            },
         ) => {
-            types_overlap(a1, a2) && types_overlap(r1, r2)
-                && types_overlap(ai1, ai2) && types_overlap(ao1, ao2)
+            types_overlap(a1, a2)
+                && types_overlap(r1, r2)
+                && types_overlap(ai1, ai2)
+                && types_overlap(ao1, ao2)
         }
 
         // Different type constructors don't overlap
@@ -703,27 +920,39 @@ fn match_type_inner(pattern: &Type, target: &Type, subst: &mut Substitution) -> 
         (Type::Pid, Type::Pid) => true,
 
         // Constructors with same name (nominal matching - name is sufficient)
-        (
-            Type::Constructor { name: n1, args: a1 },
-            Type::Constructor { name: n2, args: a2 },
-        ) if n1 == n2 => {
+        (Type::Constructor { name: n1, args: a1 }, Type::Constructor { name: n2, args: a2 })
+            if n1 == n2 =>
+        {
             // Match available args positionally; missing args in target are OK
             // (e.g., pattern `Option a` matches target `Option` from nullary constructor)
-            a1.iter().zip(a2).all(|(p, t)| match_type_inner(p, t, subst))
+            a1.iter()
+                .zip(a2)
+                .all(|(p, t)| match_type_inner(p, t, subst))
         }
 
         // Channels
         (Type::Channel(p), Type::Channel(t)) => match_type_inner(p, t, subst),
 
         // Tuples with same arity
-        (Type::Tuple(ps), Type::Tuple(ts)) if ps.len() == ts.len() => {
-            ps.iter().zip(ts).all(|(p, t)| match_type_inner(p, t, subst))
-        }
+        (Type::Tuple(ps), Type::Tuple(ts)) if ps.len() == ts.len() => ps
+            .iter()
+            .zip(ts)
+            .all(|(p, t)| match_type_inner(p, t, subst)),
 
         // Arrows (match all 4 components)
         (
-            Type::Arrow { arg: pa, ret: pr, ans_in: pai, ans_out: pao },
-            Type::Arrow { arg: ta, ret: tr, ans_in: tai, ans_out: tao },
+            Type::Arrow {
+                arg: pa,
+                ret: pr,
+                ans_in: pai,
+                ans_out: pao,
+            },
+            Type::Arrow {
+                arg: ta,
+                ret: tr,
+                ans_in: tai,
+                ans_out: tao,
+            },
         ) => {
             match_type_inner(pa, ta, subst)
                 && match_type_inner(pr, tr, subst)
@@ -748,10 +977,8 @@ impl ClassEnv {
             // Try to match the instance head against the predicate's type
             if let Some(subst) = match_type(&inst.head, &pred.ty) {
                 // Apply substitution to instance constraints to get sub-predicates
-                let sub_preds: Vec<Pred> = inst.constraints
-                    .iter()
-                    .map(|p| p.apply(&subst))
-                    .collect();
+                let sub_preds: Vec<Pred> =
+                    inst.constraints.iter().map(|p| p.apply(&subst)).collect();
 
                 return Some(Resolution {
                     instance_idx: idx,
@@ -792,7 +1019,10 @@ impl ClassEnv {
                         // This is a deferred constraint - not an error yet
                         continue;
                     }
-                    return Err(format!("No instance of {} for type {}", pred.trait_name, pred.ty));
+                    return Err(format!(
+                        "No instance of {} for type {}",
+                        pred.trait_name, pred.ty
+                    ));
                 }
             }
         }
@@ -813,7 +1043,10 @@ impl ClassEnv {
         // Try to resolve the goal via instances
         if let Some(resolution) = self.resolve_pred(goal) {
             // All sub-predicates must be entailed by given
-            resolution.sub_preds.iter().all(|sub| self.entail(given, sub))
+            resolution
+                .sub_preds
+                .iter()
+                .all(|sub| self.entail(given, sub))
         } else {
             false
         }
@@ -943,7 +1176,10 @@ mod tests {
             constraints: vec![],
             method_impls: vec![],
         });
-        assert!(matches!(result, Err(ClassError::OverlappingInstance { .. })));
+        assert!(matches!(
+            result,
+            Err(ClassError::OverlappingInstance { .. })
+        ));
     }
 
     #[test]
@@ -1053,7 +1289,8 @@ mod tests {
             head: Type::Int,
             constraints: vec![],
             method_impls: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Resolve Show Int
         let pred = Pred::new("Show", Type::Int);
@@ -1087,7 +1324,8 @@ mod tests {
             head: Type::Int,
             constraints: vec![],
             method_impls: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Add Show (List a) where a : Show
         env.add_instance(InstanceInfo {
@@ -1098,18 +1336,22 @@ mod tests {
             },
             constraints: vec![Pred::new("Show", Type::new_generic(0))],
             method_impls: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Resolve Show (List Int) -> needs Show Int
-        let pred = Pred::new("Show", Type::Constructor {
-            name: "List".to_string(),
-            args: vec![Type::Int],
-        });
+        let pred = Pred::new(
+            "Show",
+            Type::Constructor {
+                name: "List".to_string(),
+                args: vec![Type::Int],
+            },
+        );
         let resolution = env.resolve_pred(&pred);
         assert!(resolution.is_some());
         let res = resolution.unwrap();
-        assert_eq!(res.instance_idx, 1);  // The List instance is index 1
-        assert_eq!(res.sub_preds.len(), 1);  // Show Int
+        assert_eq!(res.instance_idx, 1); // The List instance is index 1
+        assert_eq!(res.sub_preds.len(), 1); // Show Int
         assert_eq!(res.sub_preds[0].trait_name, "Show");
         assert!(matches!(res.sub_preds[0].ty.resolve(), Type::Int));
     }
@@ -1120,7 +1362,10 @@ mod tests {
 
         // Add Show trait
         let mut methods = HashMap::new();
-        methods.insert("show".to_string(), Type::arrow(Type::new_generic(0), Type::String));
+        methods.insert(
+            "show".to_string(),
+            Type::arrow(Type::new_generic(0), Type::String),
+        );
         env.add_trait(TraitInfo {
             name: "Show".to_string(),
             type_param: "a".to_string(),
@@ -1134,7 +1379,8 @@ mod tests {
             head: Type::Int,
             constraints: vec![],
             method_impls: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Add Show (List a) where a : Show
         env.add_instance(InstanceInfo {
@@ -1145,17 +1391,21 @@ mod tests {
             },
             constraints: vec![Pred::new("Show", Type::new_generic(0))],
             method_impls: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Resolve Show (List Int) - should resolve both List and Int
-        let pred = Pred::new("Show", Type::Constructor {
-            name: "List".to_string(),
-            args: vec![Type::Int],
-        });
+        let pred = Pred::new(
+            "Show",
+            Type::Constructor {
+                name: "List".to_string(),
+                args: vec![Type::Int],
+            },
+        );
         let result = env.resolve_all(&[pred]);
         assert!(result.is_ok());
         let resolutions = result.unwrap();
-        assert_eq!(resolutions.len(), 2);  // Show (List Int) and Show Int
+        assert_eq!(resolutions.len(), 2); // Show (List Int) and Show Int
     }
 
     #[test]
@@ -1164,7 +1414,10 @@ mod tests {
 
         // Add Show trait but no instances
         let mut methods = HashMap::new();
-        methods.insert("show".to_string(), Type::arrow(Type::new_generic(0), Type::String));
+        methods.insert(
+            "show".to_string(),
+            Type::arrow(Type::new_generic(0), Type::String),
+        );
         env.add_trait(TraitInfo {
             name: "Show".to_string(),
             type_param: "a".to_string(),
@@ -1194,7 +1447,10 @@ mod tests {
 
         // Add Show trait
         let mut methods = HashMap::new();
-        methods.insert("show".to_string(), Type::arrow(Type::new_generic(0), Type::String));
+        methods.insert(
+            "show".to_string(),
+            Type::arrow(Type::new_generic(0), Type::String),
+        );
         env.add_trait(TraitInfo {
             name: "Show".to_string(),
             type_param: "a".to_string(),
@@ -1211,14 +1467,18 @@ mod tests {
             },
             constraints: vec![Pred::new("Show", Type::new_generic(0))],
             method_impls: vec![],
-        }).unwrap();
+        })
+        .unwrap();
 
         // Given [Show Int], entails Show (List Int) via instance
         let given = vec![Pred::new("Show", Type::Int)];
-        let goal = Pred::new("Show", Type::Constructor {
-            name: "List".to_string(),
-            args: vec![Type::Int],
-        });
+        let goal = Pred::new(
+            "Show",
+            Type::Constructor {
+                name: "List".to_string(),
+                args: vec![Type::Int],
+            },
+        );
         assert!(env.entail(&given, &goal));
     }
 }

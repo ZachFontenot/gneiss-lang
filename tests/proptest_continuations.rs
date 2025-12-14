@@ -7,9 +7,9 @@
 //! literature assume call-by-name semantics (e.g., the "critical" test where
 //! shift appears in a continuation argument). These are adapted for CBV.
 
-use proptest::prelude::*;
-use gneiss::{Lexer, Parser, Inferencer, Interpreter};
 use gneiss::eval::Value;
+use gneiss::{Inferencer, Interpreter, Lexer, Parser};
+use proptest::prelude::*;
 
 /// Run a Gneiss expression and return the result
 fn eval(source: &str) -> Result<Value, String> {
@@ -18,7 +18,9 @@ fn eval(source: &str) -> Result<Value, String> {
     let program = parser.parse_program().map_err(|e| e.to_string())?;
 
     let mut inferencer = Inferencer::new();
-    let _env = inferencer.infer_program(&program).map_err(|e| e.to_string())?;
+    let _env = inferencer
+        .infer_program(&program)
+        .map_err(|e| e.to_string())?;
 
     let mut interpreter = Interpreter::new();
     interpreter.set_class_env(inferencer.take_class_env());
@@ -39,7 +41,11 @@ fn small_positive() -> impl Strategy<Value = i64> {
 
 /// Format an integer for Gneiss source (wrap negatives in parens)
 fn format_int(n: i64) -> String {
-    if n < 0 { format!("({})", n) } else { n.to_string() }
+    if n < 0 {
+        format!("({})", n)
+    } else {
+        n.to_string()
+    }
 }
 
 // =============================================================================
@@ -376,7 +382,10 @@ mod cbv_semantics {
         // At that point, there's no enclosing reset (outer was consumed by outer shift)
         let source = "reset (shift (fun k1 -> k1 (shift (fun k2 -> k2 100))) + 1)";
         let result = eval(source);
-        assert!(result.is_err(), "Expected error for shift without enclosing reset in CBV");
+        assert!(
+            result.is_err(),
+            "Expected error for shift without enclosing reset in CBV"
+        );
     }
 
     // Note: cbv_stored_continuation_works is skipped because `reset (shift k -> k)`

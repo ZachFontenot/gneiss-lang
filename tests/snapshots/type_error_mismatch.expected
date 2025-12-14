@@ -4,8 +4,10 @@ test.gn:1:13
 
 I found a type mismatch.
 
-  I expected:  String
-  But found:   Int
+  One part has type:    String
+  Another part has:     Int
+
+  These types are not compatible.
 
 1 | let x = 1 + "hello"
                 ^^^^^^^

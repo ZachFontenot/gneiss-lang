@@ -4,9 +4,9 @@
 //! specifically testing that answer-type threading through expressions is correct.
 //! The runtime tests are in proptest_continuations.rs; these test the TYPE SYSTEM.
 
+use gneiss::types::{InferResult, Type, TypeEnv, TypeVar};
+use gneiss::{Inferencer, Lexer, Parser};
 use proptest::prelude::*;
-use gneiss::{Lexer, Parser, Inferencer};
-use gneiss::types::{Type, InferResult, TypeEnv, TypeVar};
 use std::rc::Rc;
 
 // ============================================================================
@@ -21,7 +21,9 @@ fn infer_full(source: &str) -> Result<InferResult, String> {
 
     let mut inferencer = Inferencer::new();
     let env = TypeEnv::new();
-    inferencer.infer_expr_full(&env, &expr).map_err(|e| e.to_string())
+    inferencer
+        .infer_expr_full(&env, &expr)
+        .map_err(|e| e.to_string())
 }
 
 /// Parse and infer, returning just the type
@@ -70,7 +72,11 @@ fn small_positive() -> impl Strategy<Value = i64> {
 
 /// Format an integer for Gneiss source (wrap negatives in parens)
 fn format_int(n: i64) -> String {
-    if n < 0 { format!("({})", n) } else { n.to_string() }
+    if n < 0 {
+        format!("({})", n)
+    } else {
+        n.to_string()
+    }
 }
 
 // ============================================================================
@@ -379,7 +385,8 @@ mod regression {
         let ty = result.unwrap().ty.resolve();
         assert!(
             matches!(ty, Type::String),
-            "CRITICAL: Answer type modification through BinOp must produce String, got {:?}", ty
+            "CRITICAL: Answer type modification through BinOp must produce String, got {:?}",
+            ty
         );
     }
 

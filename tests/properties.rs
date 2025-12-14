@@ -11,9 +11,9 @@ use proptest::prelude::*;
 use std::rc::Rc;
 
 use gneiss::ast::*;
-use gneiss::types::*;
 use gneiss::infer::Inferencer;
-use gneiss::{Lexer, Parser, Interpreter, Value};
+use gneiss::types::*;
+use gneiss::{Interpreter, Lexer, Parser, Value};
 
 // ============================================================================
 // Type Generators
@@ -133,8 +133,7 @@ fn arb_expr(env: Vec<String>, depth: usize) -> BoxedStrategy<Expr> {
         } else {
             prop_oneof![
                 arb_literal().prop_map(|lit| spanned(ExprKind::Lit(lit))),
-                proptest::sample::select(env.clone())
-                    .prop_map(|name| spanned(ExprKind::Var(name))),
+                proptest::sample::select(env.clone()).prop_map(|name| spanned(ExprKind::Var(name))),
             ]
             .boxed()
         }
@@ -240,71 +239,116 @@ fn small_int() -> BoxedStrategy<i64> {
 fn arb_well_typed_source() -> BoxedStrategy<String> {
     prop_oneof![
         // Simple literals (use small ints to avoid overflow)
-        small_int().prop_map(|n| if n < 0 { format!("({})", n) } else { n.to_string() }),
+        small_int().prop_map(|n| if n < 0 {
+            format!("({})", n)
+        } else {
+            n.to_string()
+        }),
         any::<bool>().prop_map(|b| b.to_string()),
         Just("()".to_string()),
-
         // Arithmetic (use small ints to avoid overflow)
         (small_int(), small_int()).prop_map(|(a, b)| {
-            let a_str = if a < 0 { format!("({})", a) } else { a.to_string() };
-            let b_str = if b < 0 { format!("({})", b) } else { b.to_string() };
+            let a_str = if a < 0 {
+                format!("({})", a)
+            } else {
+                a.to_string()
+            };
+            let b_str = if b < 0 {
+                format!("({})", b)
+            } else {
+                b.to_string()
+            };
             format!("{} + {}", a_str, b_str)
         }),
         (small_int(), small_int()).prop_map(|(a, b)| {
-            let a_str = if a < 0 { format!("({})", a) } else { a.to_string() };
-            let b_str = if b < 0 { format!("({})", b) } else { b.to_string() };
+            let a_str = if a < 0 {
+                format!("({})", a)
+            } else {
+                a.to_string()
+            };
+            let b_str = if b < 0 {
+                format!("({})", b)
+            } else {
+                b.to_string()
+            };
             format!("{} * {}", a_str, b_str)
         }),
-
         // Comparisons
         (small_int(), small_int()).prop_map(|(a, b)| {
-            let a_str = if a < 0 { format!("({})", a) } else { a.to_string() };
-            let b_str = if b < 0 { format!("({})", b) } else { b.to_string() };
+            let a_str = if a < 0 {
+                format!("({})", a)
+            } else {
+                a.to_string()
+            };
+            let b_str = if b < 0 {
+                format!("({})", b)
+            } else {
+                b.to_string()
+            };
             format!("{} == {}", a_str, b_str)
         }),
         (small_int(), small_int()).prop_map(|(a, b)| {
-            let a_str = if a < 0 { format!("({})", a) } else { a.to_string() };
-            let b_str = if b < 0 { format!("({})", b) } else { b.to_string() };
+            let a_str = if a < 0 {
+                format!("({})", a)
+            } else {
+                a.to_string()
+            };
+            let b_str = if b < 0 {
+                format!("({})", b)
+            } else {
+                b.to_string()
+            };
             format!("{} < {}", a_str, b_str)
         }),
-
         // Boolean operations
         (any::<bool>(), any::<bool>()).prop_map(|(a, b)| format!("{} && {}", a, b)),
         (any::<bool>(), any::<bool>()).prop_map(|(a, b)| format!("{} || {}", a, b)),
-
         // If expressions with matching branches
-        (any::<bool>(), small_int(), small_int())
-            .prop_map(|(c, t, e)| {
-                let t_str = if t < 0 { format!("({})", t) } else { t.to_string() };
-                let e_str = if e < 0 { format!("({})", e) } else { e.to_string() };
-                format!("if {} then {} else {}", c, t_str, e_str)
-            }),
-
+        (any::<bool>(), small_int(), small_int()).prop_map(|(c, t, e)| {
+            let t_str = if t < 0 {
+                format!("({})", t)
+            } else {
+                t.to_string()
+            };
+            let e_str = if e < 0 {
+                format!("({})", e)
+            } else {
+                e.to_string()
+            };
+            format!("if {} then {} else {}", c, t_str, e_str)
+        }),
         // Lambda and application (use non-negative for simplicity)
         (0i64..100).prop_map(|n| format!("(fun x -> x + 1) {}", n)),
         (0i64..100).prop_map(|n| format!("(fun x -> x) {}", n)),
-
         // Let bindings
         (small_int(), small_int()).prop_map(|(a, b)| {
-            let a_str = if a < 0 { format!("({})", a) } else { a.to_string() };
-            let b_str = if b < 0 { format!("({})", b) } else { b.to_string() };
+            let a_str = if a < 0 {
+                format!("({})", a)
+            } else {
+                a.to_string()
+            };
+            let b_str = if b < 0 {
+                format!("({})", b)
+            } else {
+                b.to_string()
+            };
             format!("let x = {} in x + {}", a_str, b_str)
         }),
-
         // Tuples
         (small_int(), any::<bool>()).prop_map(|(a, b)| {
-            let a_str = if a < 0 { format!("({})", a) } else { a.to_string() };
+            let a_str = if a < 0 {
+                format!("({})", a)
+            } else {
+                a.to_string()
+            };
             format!("({}, {})", a_str, b)
         }),
-
         // Lists
         Just("[]".to_string()),
         (0i64..100).prop_map(|n| format!("[{}]", n)),
         (0i64..100, 0i64..100).prop_map(|(a, b)| format!("[{}, {}]", a, b)),
-
         // Nested let with polymorphism
         Just("let id = fun x -> x in (id 42, id true)".to_string()),
-
         // Function composition via let
         Just("let f = fun x -> x + 1 in let g = fun x -> x * 2 in f (g 3)".to_string()),
     ]
@@ -526,7 +570,10 @@ fn test_occurs_check_prevents_infinite_type() {
 fn test_let_polymorphism_basic() {
     let source = "let id = fun x -> x in (id 1, id true)";
     let result = infer_source(source);
-    assert!(result.is_ok(), "Let-polymorphism should allow id to be used at multiple types");
+    assert!(
+        result.is_ok(),
+        "Let-polymorphism should allow id to be used at multiple types"
+    );
 }
 
 #[test]
@@ -543,7 +590,11 @@ fn test_value_restriction() {
 fn test_nested_let_polymorphism() {
     let source = "let id = fun x -> x in let apply = fun f -> fun x -> f x in apply id 42";
     let result = infer_source(source);
-    assert!(result.is_ok(), "Nested let-polymorphism should work: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Nested let-polymorphism should work: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -551,13 +602,20 @@ fn test_char_comparison_operators() {
     // Comparison operators should work on Char, not just Int
     let source = "fun c -> c >= '0' && c <= '9'";
     let result = infer_source(source);
-    assert!(result.is_ok(), "Char comparison should type-check: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Char comparison should type-check: {:?}",
+        result
+    );
 
     // The result should be Char -> Bool
     if let Ok(ty) = result {
         let ty_str = format!("{}", ty);
-        assert!(ty_str.contains("Char") && ty_str.contains("Bool"),
-            "Expected Char -> Bool, got {}", ty_str);
+        assert!(
+            ty_str.contains("Char") && ty_str.contains("Bool"),
+            "Expected Char -> Bool, got {}",
+            ty_str
+        );
     }
 }
 
@@ -571,7 +629,11 @@ fun x ->
     | 2 -> 200
 "#;
     let result = infer_source(source);
-    assert!(result.is_ok(), "Sequence in match arm should type-check: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Sequence in match arm should type-check: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -587,7 +649,11 @@ fun x y ->
     | 2 -> 0
 "#;
     let result = infer_source(source);
-    assert!(result.is_ok(), "Nested match with sequences should type-check: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Nested match with sequences should type-check: {:?}",
+        result
+    );
 }
 
 // ============================================================================
@@ -640,14 +706,25 @@ fn value_matches_type(val: &Value, ty: &Type) -> bool {
         (Value::Char(_), Type::Char) => true,
         (Value::Unit, Type::Unit) => true,
         (Value::Closure { .. }, Type::Arrow { .. }) => true,
-        (Value::List(items), Type::Constructor { name, args }) if name == "List" && args.len() == 1 => {
+        (Value::List(items), Type::Constructor { name, args })
+            if name == "List" && args.len() == 1 =>
+        {
             items.iter().all(|item| value_matches_type(item, &args[0]))
         }
         (Value::Tuple(items), Type::Tuple(types)) => {
             items.len() == types.len()
-                && items.iter().zip(types.iter()).all(|(v, t)| value_matches_type(v, t))
+                && items
+                    .iter()
+                    .zip(types.iter())
+                    .all(|(v, t)| value_matches_type(v, t))
         }
-        (Value::Constructor { name, fields }, Type::Constructor { name: ty_name, args: _ }) => {
+        (
+            Value::Constructor { name, fields },
+            Type::Constructor {
+                name: ty_name,
+                args: _,
+            },
+        ) => {
             // For now, just check constructor names match
             // Full check would require looking up constructor info
             name == &ty_name || fields.is_empty() // Simple heuristic

@@ -236,10 +236,7 @@ impl Runtime {
     /// Non-blocking receive: check if sender waiting, don't block if not.
     /// Does NOT register as a waiter. Used for select.
     pub fn try_recv(&mut self, channel_id: ChannelId) -> Option<Value> {
-        let mut channel = self
-            .channels
-            .get(&channel_id)?
-            .borrow_mut();
+        let mut channel = self.channels.get(&channel_id)?.borrow_mut();
 
         if let Some((sender_pid, value)) = channel.senders.pop_front() {
             drop(channel);
@@ -259,7 +256,9 @@ impl Runtime {
 
     /// Block current process waiting on any of the given channels (for select)
     pub fn block_on_select(&mut self, channels: &[ChannelId]) {
-        let pid = self.current_pid.expect("block_on_select called outside process");
+        let pid = self
+            .current_pid
+            .expect("block_on_select called outside process");
 
         // Register as receiver on all channels
         for &channel_id in channels {
@@ -404,7 +403,12 @@ impl Runtime {
     }
 
     /// Unregister a process from channels' receiver lists (used when select completes)
-    pub fn unregister_from_channels(&mut self, pid: Pid, channels: &[ChannelId], except: ChannelId) {
+    pub fn unregister_from_channels(
+        &mut self,
+        pid: Pid,
+        channels: &[ChannelId],
+        except: ChannelId,
+    ) {
         for &channel_id in channels {
             if channel_id != except {
                 if let Some(ch) = self.channels.get(&channel_id) {

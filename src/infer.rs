@@ -7,16 +7,129 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use thiserror::Error;
 
+/// Context for where a unification error occurred
+#[derive(Debug, Clone)]
+pub enum UnifyContext {
+    /// Unifying function argument with parameter type
+    FunctionArgument {
+        func_name: Option<String>,
+        param_num: usize,
+    },
+    /// Unifying function body with declared return type
+    FunctionReturn { func_name: Option<String> },
+    /// Unifying let binding value with pattern type
+    LetBinding { name: String },
+    /// Unifying if condition with Bool
+    IfCondition,
+    /// Unifying if branches (then and else must match)
+    IfBranches,
+    /// Unifying match arms (all arms must return same type)
+    MatchArms,
+    /// Unifying match scrutinee with pattern type
+    MatchScrutinee,
+    /// Unifying operands of a binary operator
+    BinOp { op: String, side: &'static str },
+    /// Unifying list elements (all must have same type)
+    ListElement { index: usize },
+    /// Unifying tuple elements
+    TupleElement { index: usize },
+    /// Unifying constructor argument
+    ConstructorArg { ctor_name: String, param_num: usize },
+    /// Recursive binding type
+    RecursiveBinding { name: String },
+}
+
+impl std::fmt::Display for UnifyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnifyContext::FunctionArgument {
+                func_name: Some(name),
+                param_num,
+            } => {
+                write!(f, "in argument {} of `{}`", param_num, name)
+            }
+            UnifyContext::FunctionArgument {
+                func_name: None,
+                param_num,
+            } => {
+                write!(f, "in argument {}", param_num)
+            }
+            UnifyContext::FunctionReturn {
+                func_name: Some(name),
+            } => {
+                write!(f, "in return type of `{}`", name)
+            }
+            UnifyContext::FunctionReturn { func_name: None } => {
+                write!(f, "in return type")
+            }
+            UnifyContext::LetBinding { name } => {
+                write!(f, "in binding for `{}`", name)
+            }
+            UnifyContext::IfCondition => {
+                write!(f, "in if condition (expected Bool)")
+            }
+            UnifyContext::IfBranches => {
+                write!(f, "in if branches (then and else must have same type)")
+            }
+            UnifyContext::MatchArms => {
+                write!(f, "in match arms (all arms must have same type)")
+            }
+            UnifyContext::MatchScrutinee => {
+                write!(f, "in match scrutinee")
+            }
+            UnifyContext::BinOp { op, side } => {
+                write!(f, "in {} operand of `{}`", side, op)
+            }
+            UnifyContext::ListElement { index } => {
+                write!(f, "in list element {}", index)
+            }
+            UnifyContext::TupleElement { index } => {
+                write!(f, "in tuple element {}", index)
+            }
+            UnifyContext::ConstructorArg {
+                ctor_name,
+                param_num,
+            } => {
+                write!(
+                    f,
+                    "in argument {} of constructor `{}`",
+                    param_num, ctor_name
+                )
+            }
+            UnifyContext::RecursiveBinding { name } => {
+                write!(f, "in recursive binding `{}`", name)
+            }
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum TypeError {
     #[error("unbound variable: {name}")]
-    UnboundVariable { name: String, span: Span, suggestions: Vec<String> },
+    UnboundVariable {
+        name: String,
+        span: Span,
+        suggestions: Vec<String>,
+    },
     #[error("type mismatch: expected {expected}, found {found}")]
-    TypeMismatch { expected: Type, found: Type, span: Option<Span> },
+    TypeMismatch {
+        expected: Type,
+        found: Type,
+        span: Option<Span>,
+        context: Option<UnifyContext>,
+    },
     #[error("occurs check failed: {var_id} occurs in {ty}")]
-    OccursCheck { var_id: TypeVarId, ty: Type, span: Option<Span> },
+    OccursCheck {
+        var_id: TypeVarId,
+        ty: Type,
+        span: Option<Span>,
+    },
     #[error("unknown constructor: {name}")]
-    UnknownConstructor { name: String, span: Span, suggestions: Vec<String> },
+    UnknownConstructor {
+        name: String,
+        span: Span,
+        suggestions: Vec<String>,
+    },
     #[error("pattern type mismatch")]
     PatternMismatch { span: Span },
     #[error("non-exhaustive patterns")]
@@ -24,9 +137,38 @@ pub enum TypeError {
     #[error("unknown trait: {name}")]
     UnknownTrait { name: String, span: Option<Span> },
     #[error("overlapping instances for trait {trait_name}: {existing} and {new}")]
-    OverlappingInstance { trait_name: String, existing: Type, new: Type, span: Option<Span> },
+    OverlappingInstance {
+        trait_name: String,
+        existing: Type,
+        new: Type,
+        span: Option<Span>,
+    },
     #[error("no instance of {trait_name} for type {ty}")]
-    NoInstance { trait_name: String, ty: Type, span: Option<Span> },
+    NoInstance {
+        trait_name: String,
+        ty: Type,
+        span: Option<Span>,
+    },
+}
+
+impl TypeError {
+    /// Add context to a type mismatch error
+    pub fn with_context(self, ctx: UnifyContext) -> TypeError {
+        match self {
+            TypeError::TypeMismatch {
+                expected,
+                found,
+                span,
+                context: _,
+            } => TypeError::TypeMismatch {
+                expected,
+                found,
+                span,
+                context: Some(ctx),
+            },
+            other => other,
+        }
+    }
 }
 
 pub struct Inferencer {
@@ -70,6 +212,18 @@ impl Inferencer {
         self.unify_inner(t1, t2, None)
     }
 
+    /// Unify with context for better error messages
+    fn unify_with_context(
+        &mut self,
+        t1: &Type,
+        t2: &Type,
+        span: &Span,
+        context: UnifyContext,
+    ) -> Result<(), TypeError> {
+        self.unify_inner(t1, t2, Some(span))
+            .map_err(|e| e.with_context(context))
+    }
+
     /// Core unification logic with optional span for error reporting
     fn unify_inner(&mut self, t1: &Type, t2: &Type, span: Option<&Span>) -> Result<(), TypeError> {
         let t1 = t1.resolve();
@@ -94,7 +248,11 @@ impl Inferencer {
                     TypeVar::Unbound { id, level } => {
                         // Occurs check
                         if other.occurs(id) {
-                            return Err(TypeError::OccursCheck { var_id: id, ty: other.clone(), span: span.cloned() });
+                            return Err(TypeError::OccursCheck {
+                                var_id: id,
+                                ty: other.clone(),
+                                span: span.cloned(),
+                            });
                         }
                         // Update levels for let-polymorphism
                         self.update_levels(&other, level);
@@ -106,14 +264,25 @@ impl Inferencer {
                         expected: t1.clone(),
                         found: t2.clone(),
                         span: span.cloned(),
+                        context: None,
                     }),
                 }
             }
 
             // Function types (all 4 components must unify)
             (
-                Type::Arrow { arg: a1, ret: r1, ans_in: ai1, ans_out: ao1 },
-                Type::Arrow { arg: a2, ret: r2, ans_in: ai2, ans_out: ao2 },
+                Type::Arrow {
+                    arg: a1,
+                    ret: r1,
+                    ans_in: ai1,
+                    ans_out: ao1,
+                },
+                Type::Arrow {
+                    arg: a2,
+                    ret: r2,
+                    ans_in: ai2,
+                    ans_out: ao2,
+                },
             ) => {
                 self.unify_inner(a1, a2, span)?;
                 self.unify_inner(r1, r2, span)?;
@@ -135,14 +304,8 @@ impl Inferencer {
 
             // Named constructors
             (
-                Type::Constructor {
-                    name: n1,
-                    args: a1,
-                },
-                Type::Constructor {
-                    name: n2,
-                    args: a2,
-                },
+                Type::Constructor { name: n1, args: a1 },
+                Type::Constructor { name: n2, args: a2 },
             ) if n1 == n2 && a1.len() == a2.len() => {
                 for (t1, t2) in a1.iter().zip(a2.iter()) {
                     self.unify_inner(t1, t2, span)?;
@@ -154,6 +317,7 @@ impl Inferencer {
                 expected: t1,
                 found: t2,
                 span: span.cloned(),
+                context: None,
             }),
         }
     }
@@ -170,7 +334,12 @@ impl Inferencer {
                     *var_level = (*var_level).min(level);
                 }
             }
-            Type::Arrow { arg, ret, ans_in, ans_out } => {
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => {
                 self.update_levels(&arg, level);
                 self.update_levels(&ret, level);
                 self.update_levels(&ans_in, level);
@@ -213,7 +382,12 @@ impl Inferencer {
                 TypeVar::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| resolved.clone()),
                 _ => resolved.clone(),
             },
-            Type::Arrow { arg, ret, ans_in, ans_out } => Type::Arrow {
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => Type::Arrow {
                 arg: Rc::new(self.substitute(arg, subst)),
                 ret: Rc::new(self.substitute(ret, subst)),
                 ans_in: Rc::new(self.substitute(ans_in, subst)),
@@ -233,17 +407,14 @@ impl Inferencer {
     fn generalize(&self, ty: &Type) -> Scheme {
         let mut generics: HashMap<TypeVarId, TypeVarId> = HashMap::new();
         let generalized = self.generalize_inner(ty, &mut generics);
+
         Scheme {
             num_generics: generics.len() as u32,
             ty: generalized,
         }
     }
 
-    fn generalize_inner(
-        &self,
-        ty: &Type,
-        generics: &mut HashMap<TypeVarId, TypeVarId>,
-    ) -> Type {
+    fn generalize_inner(&self, ty: &Type, generics: &mut HashMap<TypeVarId, TypeVarId>) -> Type {
         let resolved = ty.resolve();
         match &resolved {
             Type::Var(var) => match &*var.borrow() {
@@ -259,7 +430,12 @@ impl Inferencer {
                 }
                 _ => resolved.clone(),
             },
-            Type::Arrow { arg, ret, ans_in, ans_out } => Type::Arrow {
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => Type::Arrow {
                 arg: Rc::new(self.generalize_inner(arg, generics)),
                 ret: Rc::new(self.generalize_inner(ret, generics)),
                 ans_in: Rc::new(self.generalize_inner(ans_in, generics)),
@@ -323,7 +499,11 @@ impl Inferencer {
     /// Pure expressions (most expressions) have α = β.
     /// Infer a single expression with full answer-type tracking.
     /// Returns InferResult with ty, answer_before, and answer_after.
-    pub fn infer_expr_full(&mut self, env: &TypeEnv, expr: &Expr) -> Result<InferResult, TypeError> {
+    pub fn infer_expr_full(
+        &mut self,
+        env: &TypeEnv,
+        expr: &Expr,
+    ) -> Result<InferResult, TypeError> {
         // Fresh answer type for pure expressions
         let ans = self.fresh_var();
 
@@ -431,10 +611,10 @@ impl Inferencer {
                 let arg_result = self.infer_expr_full(env, arg)?;
 
                 // Fresh variables for function type components
-                let param_ty = self.fresh_var();  // σ
-                let ret_ty = self.fresh_var();    // τ
-                let alpha = self.fresh_var();     // α: function's latent ans_in
-                let beta = self.fresh_var();      // β: function's latent ans_out
+                let param_ty = self.fresh_var(); // σ
+                let ret_ty = self.fresh_var(); // τ
+                let alpha = self.fresh_var(); // α: function's latent ans_in
+                let beta = self.fresh_var(); // β: function's latent ans_out
 
                 // Function must have type (σ/α → τ/β)
                 let expected_fun = Type::Arrow {
@@ -451,7 +631,11 @@ impl Inferencer {
                 // CRITICAL THREADING:
                 // 1. arg.ans_out = fun.ans_in (= γ)
                 //    "arg's output answer type = fun's input answer type"
-                self.unify_at(&arg_result.answer_after, &fun_result.answer_before, &arg.span)?;
+                self.unify_at(
+                    &arg_result.answer_after,
+                    &fun_result.answer_before,
+                    &arg.span,
+                )?;
 
                 // 2. arg.ans_in = β (function's latent ans_out)
                 //    "arg starts where function body will end"
@@ -459,7 +643,7 @@ impl Inferencer {
 
                 Ok(InferResult {
                     ty: ret_ty,
-                    answer_before: alpha,               // α: overall input
+                    answer_before: alpha, // α: overall input
                     answer_after: fun_result.answer_after.clone(), // δ: overall output
                 })
             }
@@ -537,7 +721,11 @@ impl Inferencer {
 
                     // CRITICAL: Thread answer types (sequential)
                     // value.ans_out = body.ans_in
-                    self.unify_at(&value_result.answer_after, &body_result.answer_before, &body.span)?;
+                    self.unify_at(
+                        &value_result.answer_after,
+                        &body_result.answer_before,
+                        &body.span,
+                    )?;
 
                     Ok(InferResult {
                         ty: body_result.ty,
@@ -617,8 +805,16 @@ impl Inferencer {
                 }
 
                 // Step 3: Unify preliminary types with inferred types
-                for (i, (binding, result)) in bindings.iter().zip(value_results.iter()).enumerate() {
-                    self.unify_at(&preliminary_types[i], &result.ty, &binding.name.span)?;
+                for (i, (binding, result)) in bindings.iter().zip(value_results.iter()).enumerate()
+                {
+                    self.unify_with_context(
+                        &preliminary_types[i],
+                        &result.ty,
+                        &binding.name.span,
+                        UnifyContext::RecursiveBinding {
+                            name: binding.name.node.clone(),
+                        },
+                    )?;
                 }
 
                 self.level -= 1;
@@ -653,25 +849,47 @@ impl Inferencer {
                 else_branch,
             } => {
                 let cond_result = self.infer_expr_full(env, cond)?;
-                self.unify_at(&cond_result.ty, &Type::Bool, &cond.span)?;
+                self.unify_with_context(
+                    &cond_result.ty,
+                    &Type::Bool,
+                    &cond.span,
+                    UnifyContext::IfCondition,
+                )?;
 
                 let then_result = self.infer_expr_full(env, then_branch)?;
                 let else_result = self.infer_expr_full(env, else_branch)?;
 
                 // Branches must have same type
-                self.unify_at(&then_result.ty, &else_result.ty, &else_branch.span)?;
+                self.unify_with_context(
+                    &then_result.ty,
+                    &else_result.ty,
+                    &else_branch.span,
+                    UnifyContext::IfBranches,
+                )?;
 
                 // Branches must have same answer type effects (they're alternatives)
-                self.unify_at(&then_result.answer_before, &else_result.answer_before, &else_branch.span)?;
-                self.unify_at(&then_result.answer_after, &else_result.answer_after, &else_branch.span)?;
+                self.unify_at(
+                    &then_result.answer_before,
+                    &else_result.answer_before,
+                    &else_branch.span,
+                )?;
+                self.unify_at(
+                    &then_result.answer_after,
+                    &else_result.answer_after,
+                    &else_branch.span,
+                )?;
 
                 // Thread: condition feeds into branches
-                self.unify_at(&cond_result.answer_after, &then_result.answer_before, &then_branch.span)?;
+                self.unify_at(
+                    &cond_result.answer_after,
+                    &then_result.answer_before,
+                    &then_branch.span,
+                )?;
 
                 Ok(InferResult {
                     ty: then_result.ty,
-                    answer_before: cond_result.answer_before,  // Start at condition
-                    answer_after: then_result.answer_after,    // End at branch (both same)
+                    answer_before: cond_result.answer_before, // Start at condition
+                    answer_after: then_result.answer_after,   // End at branch (both same)
                 })
             }
 
@@ -698,7 +916,12 @@ impl Inferencer {
                     };
 
                     let body_result = self.infer_expr_full(&arm_env, &arm.body)?;
-                    self.unify_at(&result_ty, &body_result.ty, &arm.body.span)?;
+                    self.unify_with_context(
+                        &result_ty,
+                        &body_result.ty,
+                        &arm.body.span,
+                        UnifyContext::MatchArms,
+                    )?;
 
                     // All arms must have same answer type effects
                     self.unify_at(&body_result.answer_before, &guard_ans_out, &arm.body.span)?;
@@ -706,7 +929,11 @@ impl Inferencer {
                 }
 
                 // Thread: scrutinee feeds into arms
-                self.unify_at(&scrutinee_result.answer_after, &arms_ans_in, &scrutinee.span)?;
+                self.unify_at(
+                    &scrutinee_result.answer_after,
+                    &arms_ans_in,
+                    &scrutinee.span,
+                )?;
 
                 Ok(InferResult {
                     ty: result_ty,
@@ -717,12 +944,14 @@ impl Inferencer {
 
             // Tuple: pure (empty tuple normalizes to Unit)
             ExprKind::Tuple(exprs) => {
-                let types: Result<Vec<_>, _> = exprs
-                    .iter()
-                    .map(|e| self.infer_expr(env, e))
-                    .collect();
+                let types: Result<Vec<_>, _> =
+                    exprs.iter().map(|e| self.infer_expr(env, e)).collect();
                 let types = types?;
-                let ty = if types.is_empty() { Type::Unit } else { Type::Tuple(types) };
+                let ty = if types.is_empty() {
+                    Type::Unit
+                } else {
+                    Type::Tuple(types)
+                };
                 Ok(InferResult::pure(ty, ans))
             }
 
@@ -782,6 +1011,7 @@ impl Inferencer {
                             expected: result_ty,
                             found: Type::Unit,
                             span: Some(expr.span.clone()),
+                            context: None,
                         });
                     }
 
@@ -814,7 +1044,11 @@ impl Inferencer {
 
                 // CRITICAL: Thread answer types left-to-right
                 // Left's output becomes right's input
-                self.unify_at(&left_result.answer_after, &right_result.answer_before, &right.span)?;
+                self.unify_at(
+                    &left_result.answer_after,
+                    &right_result.answer_before,
+                    &right.span,
+                )?;
 
                 let result_ty = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
@@ -859,12 +1093,28 @@ impl Inferencer {
 
                         match op {
                             BinOp::Compose => {
-                                self.unify_at(&left_result.ty, &Type::arrow(a.clone(), b.clone()), &left.span)?;
-                                self.unify_at(&right_result.ty, &Type::arrow(b, c.clone()), &right.span)?;
+                                self.unify_at(
+                                    &left_result.ty,
+                                    &Type::arrow(a.clone(), b.clone()),
+                                    &left.span,
+                                )?;
+                                self.unify_at(
+                                    &right_result.ty,
+                                    &Type::arrow(b, c.clone()),
+                                    &right.span,
+                                )?;
                             }
                             BinOp::ComposeBack => {
-                                self.unify_at(&left_result.ty, &Type::arrow(b.clone(), c.clone()), &left.span)?;
-                                self.unify_at(&right_result.ty, &Type::arrow(a.clone(), b), &right.span)?;
+                                self.unify_at(
+                                    &left_result.ty,
+                                    &Type::arrow(b.clone(), c.clone()),
+                                    &left.span,
+                                )?;
+                                self.unify_at(
+                                    &right_result.ty,
+                                    &Type::arrow(a.clone(), b),
+                                    &right.span,
+                                )?;
                             }
                             _ => unreachable!(),
                         }
@@ -888,7 +1138,7 @@ impl Inferencer {
                                 return Err(TypeError::UnboundVariable {
                                     name: op_name.clone(),
                                     span: expr.span.clone(),
-                                    suggestions: vec![],  // No suggestions for operators
+                                    suggestions: vec![], // No suggestions for operators
                                 });
                             }
                         }
@@ -926,7 +1176,11 @@ impl Inferencer {
                 let second_result = self.infer_expr_full(env, second)?;
 
                 // Thread: first's answer_out becomes second's answer_in
-                self.unify_at(&first_result.answer_after, &second_result.answer_before, &second.span)?;
+                self.unify_at(
+                    &first_result.answer_after,
+                    &second_result.answer_before,
+                    &second.span,
+                )?;
 
                 Ok(InferResult {
                     ty: second_result.ty,
@@ -959,7 +1213,11 @@ impl Inferencer {
             ExprKind::ChanRecv(channel) => {
                 let chan_ty = self.infer_expr(env, channel)?;
                 let elem_ty = self.fresh_var();
-                self.unify_at(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())), &channel.span)?;
+                self.unify_at(
+                    &chan_ty,
+                    &Type::Channel(Rc::new(elem_ty.clone())),
+                    &channel.span,
+                )?;
                 Ok(InferResult::pure(elem_ty, ans))
             }
 
@@ -972,7 +1230,11 @@ impl Inferencer {
                     // Infer channel type
                     let chan_ty = self.infer_expr(env, &arm.channel)?;
                     let elem_ty = self.fresh_var();
-                    self.unify_at(&chan_ty, &Type::Channel(Rc::new(elem_ty.clone())), &arm.channel.span)?;
+                    self.unify_at(
+                        &chan_ty,
+                        &Type::Channel(Rc::new(elem_ty.clone())),
+                        &arm.channel.span,
+                    )?;
 
                     // Bind pattern in arm's environment
                     let mut arm_env = env.clone();
@@ -992,7 +1254,12 @@ impl Inferencer {
 
             // Reset: makes inner expression pure from outside
             // Rule: Γ; σ ⊢ e : σ; τ  ⟹  Γ ⊢ₚ ⟨e⟩ : τ
+            //
+            // The body starts with answer type = its own type (σ).
+            // Shift can modify the answer type to τ (possibly different).
+            // Reset returns τ (the final answer type after modifications).
             ExprKind::Reset(body) => {
+                self.level += 1;
                 // Infer the body with full answer type tracking
                 let body_result = self.infer_expr_full(env, body)?;
 
@@ -1000,7 +1267,12 @@ impl Inferencer {
                 // This is the key constraint: inside reset, the "expected answer" is the body's type
                 self.unify_at(&body_result.answer_before, &body_result.ty, &body.span)?;
 
-                // Reset produces the body's final answer type as its result
+                // NOTE: Do NOT unify answer_after with answer_before!
+                // Shift can modify the answer type, so answer_after may differ.
+
+                self.level -= 1;
+                // Reset produces the body's FINAL answer type (answer_after) as its result
+                // This is what allows shift to change the return type of reset
                 // Reset itself is PURE from the outside - it delimits all effects
                 Ok(InferResult::pure(body_result.answer_after, ans))
             }
@@ -1023,7 +1295,7 @@ impl Inferencer {
                 let k_type = Type::Arrow {
                     arg: Rc::new(tau.clone()),
                     ret: Rc::new(alpha.clone()),
-                    ans_in: Rc::new(Type::new_generic(0)),  // Generic 't'
+                    ans_in: Rc::new(Type::new_generic(0)), // Generic 't'
                     ans_out: Rc::new(Type::new_generic(0)), // Same 't' (pure)
                 };
                 let k_scheme = Scheme {
@@ -1040,7 +1312,9 @@ impl Inferencer {
                     PatternKind::Wildcard => { /* k unused */ }
                     _ => {
                         // shift parameter should be a variable or wildcard
-                        return Err(TypeError::PatternMismatch { span: param.span.clone() });
+                        return Err(TypeError::PatternMismatch {
+                            span: param.span.clone(),
+                        });
                     }
                 }
 
@@ -1049,7 +1323,8 @@ impl Inferencer {
 
                 // Body type must equal body's initial answer type
                 // This ensures the shift body produces a value compatible with the reset
-                self.unify_at(&body_result.ty, &body_result.answer_before, &body.span)?;
+                self.unify_at(&body_result.answer_before, &body_result.ty, &body.span)?;
+                self.unify_at(&body_result.answer_after, &body_result.ty, &body.span)?;
 
                 // Shift returns τ (the hole type) with answer type α → β
                 // α = original answer type (before shift)
@@ -1057,7 +1332,7 @@ impl Inferencer {
                 Ok(InferResult {
                     ty: tau,
                     answer_before: alpha,
-                    answer_after: body_result.answer_after,
+                    answer_after: body_result.ty,
                 })
             }
         }
@@ -1193,7 +1468,7 @@ impl Inferencer {
                     Err(TypeError::UnboundVariable {
                         name: name.clone(),
                         span: expr.span.clone(),
-                        suggestions: vec![],  // No suggestions for type variables
+                        suggestions: vec![], // No suggestions for type variables
                     })
                 }
             }
@@ -1226,7 +1501,9 @@ impl Inferencer {
                             args: arg_types,
                         })
                     }
-                    _ => Err(TypeError::PatternMismatch { span: constructor.span.clone() }),
+                    _ => Err(TypeError::PatternMismatch {
+                        span: constructor.span.clone(),
+                    }),
                 }
             }
             TypeExprKind::Arrow { from, to } => {
@@ -1241,7 +1518,11 @@ impl Inferencer {
                     .collect();
                 let tys = tys?;
                 // Empty tuple normalizes to Unit (they are the same in type theory)
-                Ok(if tys.is_empty() { Type::Unit } else { Type::Tuple(tys) })
+                Ok(if tys.is_empty() {
+                    Type::Unit
+                } else {
+                    Type::Tuple(tys)
+                })
             }
             TypeExprKind::Channel(inner) => {
                 let inner_ty = self.type_expr_to_type(inner, param_map)?;
@@ -1331,7 +1612,10 @@ impl Inferencer {
         {
             // Check that the trait exists
             if self.class_env.get_trait(trait_name).is_none() {
-                return Err(TypeError::UnknownTrait { name: trait_name.clone(), span: None });
+                return Err(TypeError::UnknownTrait {
+                    name: trait_name.clone(),
+                    span: None,
+                });
             }
 
             // Build a param_map for type variables that might appear in the instance head
@@ -1366,9 +1650,16 @@ impl Inferencer {
             // Add instance with overlap checking
             self.class_env.add_instance(info).map_err(|e| match e {
                 ClassError::UnknownTrait(name) => TypeError::UnknownTrait { name, span: None },
-                ClassError::OverlappingInstance { trait_name, existing, new } => {
-                    TypeError::OverlappingInstance { trait_name, existing, new, span: None }
-                }
+                ClassError::OverlappingInstance {
+                    trait_name,
+                    existing,
+                    new,
+                } => TypeError::OverlappingInstance {
+                    trait_name,
+                    existing,
+                    new,
+                    span: None,
+                },
             })?;
         }
         Ok(())
@@ -1383,7 +1674,7 @@ impl Inferencer {
         let print_scheme = Scheme {
             num_generics: 2,
             ty: Type::Arrow {
-                arg: Rc::new(Type::new_generic(0)),    // Generic arg type
+                arg: Rc::new(Type::new_generic(0)), // Generic arg type
                 ret: Rc::new(Type::Unit),
                 ans_in: Rc::new(Type::new_generic(1)), // Generic answer type
                 ans_out: Rc::new(Type::new_generic(1)), // Same (pure)
@@ -1392,22 +1683,40 @@ impl Inferencer {
         env.insert("print".into(), print_scheme);
 
         // int_to_string : Int -> String
-        env.insert("int_to_string".into(), Scheme::mono(Type::arrow(Type::Int, Type::String)));
+        env.insert(
+            "int_to_string".into(),
+            Scheme::mono(Type::arrow(Type::Int, Type::String)),
+        );
 
         // string_length : String -> Int
-        env.insert("string_length".into(), Scheme::mono(Type::arrow(Type::String, Type::Int)));
+        env.insert(
+            "string_length".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::Int)),
+        );
 
         // string_to_chars : String -> List Char
-        env.insert("string_to_chars".into(), Scheme::mono(Type::arrow(Type::String, Type::list(Type::Char))));
+        env.insert(
+            "string_to_chars".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::list(Type::Char))),
+        );
 
         // chars_to_string : List Char -> String
-        env.insert("chars_to_string".into(), Scheme::mono(Type::arrow(Type::list(Type::Char), Type::String)));
+        env.insert(
+            "chars_to_string".into(),
+            Scheme::mono(Type::arrow(Type::list(Type::Char), Type::String)),
+        );
 
         // char_to_string : Char -> String
-        env.insert("char_to_string".into(), Scheme::mono(Type::arrow(Type::Char, Type::String)));
+        env.insert(
+            "char_to_string".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::String)),
+        );
 
         // char_to_int : Char -> Int
-        env.insert("char_to_int".into(), Scheme::mono(Type::arrow(Type::Char, Type::Int)));
+        env.insert(
+            "char_to_int".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Int)),
+        );
 
         // First pass: register all type declarations
         for item in &program.items {
@@ -1434,10 +1743,7 @@ impl Inferencer {
         for item in &program.items {
             match item {
                 Item::Decl(Decl::Let {
-                    name,
-                    params,
-                    body,
-                    ..
+                    name, params, body, ..
                 }) => {
                     self.level += 1;
 
@@ -1616,7 +1922,14 @@ impl Inferencer {
                             result
                         };
 
-                        self.unify_at(&preliminary_types[i], &func_ty, &binding.name.span)?;
+                        self.unify_with_context(
+                            &preliminary_types[i],
+                            &func_ty,
+                            &binding.name.span,
+                            UnifyContext::RecursiveBinding {
+                                name: binding.name.node.clone(),
+                            },
+                        )?;
                     }
 
                     self.level -= 1;
@@ -1991,7 +2304,10 @@ end
         assert_eq!(inferencer.class_env.instances.len(), 2);
 
         // Check that the List instance has constraints
-        let list_instance = inferencer.class_env.instances.iter()
+        let list_instance = inferencer
+            .class_env
+            .instances
+            .iter()
             .find(|i| !i.constraints.is_empty())
             .expect("Should have constrained instance");
         assert_eq!(list_instance.constraints.len(), 1);

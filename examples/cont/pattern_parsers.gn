@@ -27,7 +27,7 @@ type ParseState = List Char
 
 -- Parse result: either parsed value + remaining input, or failure
 type ParseResult a =
-    | Parsed a ParseState
+    | Parsed a (List Char)
     | ParseFail String
 
 -- Get current input position (for error messages)
@@ -95,7 +95,8 @@ let eof () =
 
 -- Alternative: try first, if fails try second
 let (<|>) p1 p2 =
-    shift (fun k ->
+    fun () ->
+      shift (fun k ->
         fun input ->
             match run_parser p1 input with
             | Parsed v rest -> k v rest
@@ -122,28 +123,64 @@ let map f p =
 -- Optional: parse or return None
 let optional p =
     (fun () -> Some (p ())) <|> (fun () -> None)
-
+let list_reverse xs =
+  let rec go acc ys =
+    match ys with
+    | [] -> acc
+    | y :: rest -> go (y :: acc) rest
+  in
+  go [] xs
+  
 -- Many: zero or more
-let rec many p =
-    (fun () ->
-        let x = p () in
-        let xs = many p () in
-        x :: xs
-    ) <|> (fun () -> [])
+let many p =
+  fun () ->
+        shift (fun k ->
+            let rec loop acc input =
+                match run_parser p input with
+                | Parsed v rest -> loop (v :: acc) rest
+                | ParseFail _ -> k (list_reverse acc) input
+            in
+            fun input -> loop [] input
+        )
+--    (fun () ->
+--        let x = p () in
+--        let xs = many p () in
+--        x :: xs
+--     )<|> (fun () -> [])
 
 -- Many1: one or more
 let many1 p =
-    let x = p () in
-    let xs = many p () in
-    x :: xs
+   fun () ->
+        let x = p () in
+        let xs = many p () in
+        x :: xs
 
 -- Sep_by: separated list
+--let sep_by p sep =
+--    (fun () ->
+--        let x = p () in
+--        let xs = many (fun () -> let _ = sep () in p ()) () in
+--        x :: xs
+--    ) <|> (fun () -> [])
+
 let sep_by p sep =
-    (fun () ->
-        let x = p () in
-        let xs = many (fun () -> let _ = sep () in p ()) () in
-        x :: xs
-    ) <|> (fun () -> [])
+    fun () ->
+        shift (fun k ->
+            let rec loop first acc input =
+                if first then
+                    match run_parser p input with
+                    | Parsed v rest -> loop false (v :: acc) rest  
+                    | ParseFail _ -> k (list_reverse acc) input
+                else
+                    match run_parser sep input with
+                    | Parsed _ rest2 ->
+                        (match run_parser p rest2 with
+                        | Parsed v rest3 -> loop false (v :: acc) rest3
+                        | ParseFail _ -> k (list_reverse acc) input)
+                    | ParseFail _ -> k (list_reverse acc) input
+            in
+            fun input -> loop true [] input
+        )
 
 -- =============================================================================
 -- Part 4: Character Class Parsers
@@ -161,6 +198,14 @@ let alphanum () = satisfy is_alphanum "alphanumeric"
 
 -- Skip whitespace
 let spaces () = let _ = many space () in ()
+
+let chars_to_int cs =
+    let rec go acc digits =
+        match digits with
+        | [] -> acc
+        | d :: rest -> go (acc * 10 + (char_to_int d - char_to_int '0')) rest
+    in
+    go 0 cs
 
 -- Parse an integer
 let integer () =

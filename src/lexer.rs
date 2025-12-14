@@ -21,8 +21,8 @@ pub enum Token {
 
     // Keywords
     Let,
-    Rec,  // for 'let rec'
-    And,  // for mutual recursion: 'let rec f = ... and g = ...'
+    Rec, // for 'let rec'
+    And, // for mutual recursion: 'let rec f = ... and g = ...'
     In,
     Fun,
     Match,
@@ -45,45 +45,45 @@ pub enum Token {
     Val,
 
     // Delimiters
-    LParen,   // (
-    RParen,   // )
-    LBracket, // [
-    RBracket, // ]
-    LBrace,   // {
-    RBrace,   // }
-    Comma,    // ,
-    Semicolon,// ;
+    LParen,     // (
+    RParen,     // )
+    LBracket,   // [
+    RBracket,   // ]
+    LBrace,     // {
+    RBrace,     // }
+    Comma,      // ,
+    Semicolon,  // ;
     DoubleSemi, // ;;
-    Colon,    // :
+    Colon,      // :
 
     // Operators
-    Arrow,    // ->
-    FatArrow, // =>
-    LArrow,   // <-
-    Pipe,     // |
-    Eq,       // =
-    EqEq,     // ==
-    Neq,      // !=
-    Lt,       // <
-    Gt,       // >
-    Lte,      // <=
-    Gte,      // >=
-    Plus,     // +
-    Minus,    // -
-    Star,     // *
-    Slash,    // /
-    Percent,  // %
-    AndAnd,   // &&
-    OrOr,     // ||
-    Not,      // not (keyword)
-    Cons,     // ::
-    Concat,   // ++
-    PipeOp,   // |>
-    PipeBack, // <|
-    Compose,  // >>
+    Arrow,       // ->
+    FatArrow,    // =>
+    LArrow,      // <-
+    Pipe,        // |
+    Eq,          // =
+    EqEq,        // ==
+    Neq,         // !=
+    Lt,          // <
+    Gt,          // >
+    Lte,         // <=
+    Gte,         // >=
+    Plus,        // +
+    Minus,       // -
+    Star,        // *
+    Slash,       // /
+    Percent,     // %
+    AndAnd,      // &&
+    OrOr,        // ||
+    Not,         // not (keyword)
+    Cons,        // ::
+    Concat,      // ++
+    PipeOp,      // |>
+    PipeBack,    // <|
+    Compose,     // >>
     ComposeBack, // <<
     Underscore,  // _
-    Dot,      // .
+    Dot,         // .
 
     // User-defined operator symbol (e.g., <|>, >>=, ***)
     OpSymbol(String),
@@ -250,7 +250,7 @@ impl<'a> Lexer<'a> {
                 } else {
                     // It was just a minus
                     self.pos = pos + 1; // Already advanced once
-                    // Check for arrow
+                                        // Check for arrow
                     if self.peek() == Some('>') {
                         self.advance();
                         return Ok(SpannedToken {
@@ -365,8 +365,12 @@ impl<'a> Lexer<'a> {
                         Some('r') => '\r',
                         Some('\\') => '\\',
                         Some('"') => '"',
-                        Some(c) => return Err(LexError::InvalidEscape(c, Span::new(start, self.pos))),
-                        None => return Err(LexError::UnterminatedString(Span::new(start, self.pos))),
+                        Some(c) => {
+                            return Err(LexError::InvalidEscape(c, Span::new(start, self.pos)))
+                        }
+                        None => {
+                            return Err(LexError::UnterminatedString(Span::new(start, self.pos)))
+                        }
                     };
                     s.push(escaped);
                 }
@@ -515,7 +519,10 @@ fn is_ident_continue(c: char) -> bool {
 /// Characters that can appear in operator symbols.
 /// Note: `-` is handled specially due to `--` comments.
 fn is_operator_char(c: char) -> bool {
-    matches!(c, '!' | '$' | '%' | '&' | '*' | '+' | '/' | '<' | '=' | '>' | '?' | '@' | '^' | '|' | '~')
+    matches!(
+        c,
+        '!' | '$' | '%' | '&' | '*' | '+' | '/' | '<' | '=' | '>' | '?' | '@' | '^' | '|' | '~'
+    )
 }
 
 /// Classify an operator string into a specific token or OpSymbol
@@ -648,14 +655,17 @@ mod tests {
             tokens("***"),
             vec![Token::OpSymbol("***".into()), Token::Eof]
         );
-        assert_eq!(
-            tokens("$"),
-            vec![Token::OpSymbol("$".into()), Token::Eof]
-        );
+        assert_eq!(tokens("$"), vec![Token::OpSymbol("$".into()), Token::Eof]);
         // Built-ins should still work
         assert_eq!(
             tokens("+ - * /"),
-            vec![Token::Plus, Token::Minus, Token::Star, Token::Slash, Token::Eof]
+            vec![
+                Token::Plus,
+                Token::Minus,
+                Token::Star,
+                Token::Slash,
+                Token::Eof
+            ]
         );
         // Mixed: built-in followed by user operator
         assert_eq!(
@@ -672,18 +682,9 @@ mod tests {
     #[test]
     fn test_arrows_preserved() {
         // Arrows should not become operators
-        assert_eq!(
-            tokens("->"),
-            vec![Token::Arrow, Token::Eof]
-        );
-        assert_eq!(
-            tokens("<-"),
-            vec![Token::LArrow, Token::Eof]
-        );
-        assert_eq!(
-            tokens("=>"),
-            vec![Token::FatArrow, Token::Eof]
-        );
+        assert_eq!(tokens("->"), vec![Token::Arrow, Token::Eof]);
+        assert_eq!(tokens("<-"), vec![Token::LArrow, Token::Eof]);
+        assert_eq!(tokens("=>"), vec![Token::FatArrow, Token::Eof]);
     }
 
     #[test]
