@@ -204,6 +204,101 @@ pub enum BlockReason {
 }
 
 // ============================================================================
+// Fiber Effects (for unified concurrency model)
+// ============================================================================
+
+/// Unique fiber identifier (typed alternative to Pid)
+pub type FiberId = u64;
+
+/// Effects that fibers can perform, requiring runtime/scheduler intervention.
+/// Each variant captures the continuation to resume after the effect is handled.
+/// This unifies channel operations, spawning, and other fiber effects into a single model.
+#[derive(Debug, Clone)]
+pub enum FiberEffect {
+    /// Fiber completed with a value
+    Done(Box<Value>),
+
+    /// Fork a new fiber
+    /// - `thunk`: The computation to run in the new fiber (a closure)
+    /// - `cont`: Continuation expecting the child's Fiber handle
+    Fork {
+        thunk: Box<Value>,
+        cont: Option<Box<Cont>>,
+    },
+
+    /// Yield control to scheduler (cooperative multitasking)
+    /// - `cont`: Continuation to resume with Unit
+    Yield { cont: Option<Box<Cont>> },
+
+    /// Create a new channel
+    /// - `cont`: Continuation expecting the new Channel
+    NewChan { cont: Option<Box<Cont>> },
+
+    /// Send a value on a channel (blocks until receiver ready)
+    /// - `channel`: Target channel ID
+    /// - `value`: Value to send
+    /// - `cont`: Continuation to resume with Unit after send completes
+    Send {
+        channel: ChannelId,
+        value: Box<Value>,
+        cont: Option<Box<Cont>>,
+    },
+
+    /// Receive a value from a channel (blocks until sender ready)
+    /// - `channel`: Source channel ID
+    /// - `cont`: Continuation expecting the received Value
+    Recv {
+        channel: ChannelId,
+        cont: Option<Box<Cont>>,
+    },
+
+    /// Wait for a fiber to complete (type-safe join)
+    /// - `fiber_id`: The fiber to wait for
+    /// - `cont`: Continuation expecting the fiber's result Value
+    Join {
+        fiber_id: FiberId,
+        cont: Option<Box<Cont>>,
+    },
+
+    /// Select on multiple channels (blocks until one ready)
+    /// - `arms`: Channel IDs with their patterns and body expressions
+    /// - `cont`: Outer continuation (used after arm body evaluates)
+    Select {
+        arms: Vec<SelectEffectArm>,
+        cont: Option<Box<Cont>>,
+    },
+}
+
+impl FiberEffect {
+    /// Attach a captured continuation to this effect.
+    /// Used after capture_to_fiber_boundary captures the continuation.
+    pub fn with_cont(self, captured: Cont) -> Self {
+        let boxed = Some(Box::new(captured));
+        match self {
+            FiberEffect::Done(v) => FiberEffect::Done(v),
+            FiberEffect::Fork { thunk, .. } => FiberEffect::Fork { thunk, cont: boxed },
+            FiberEffect::Yield { .. } => FiberEffect::Yield { cont: boxed },
+            FiberEffect::NewChan { .. } => FiberEffect::NewChan { cont: boxed },
+            FiberEffect::Send { channel, value, .. } => {
+                FiberEffect::Send { channel, value, cont: boxed }
+            }
+            FiberEffect::Recv { channel, .. } => FiberEffect::Recv { channel, cont: boxed },
+            FiberEffect::Join { fiber_id, .. } => FiberEffect::Join { fiber_id, cont: boxed },
+            FiberEffect::Select { arms, .. } => FiberEffect::Select { arms, cont: boxed },
+        }
+    }
+}
+
+/// A select arm for the FiberEffect::Select variant
+#[derive(Debug, Clone)]
+pub struct SelectEffectArm {
+    pub channel: ChannelId,
+    pub pattern: Pattern,
+    pub body: Rc<Expr>,
+    pub env: Env,
+}
+
+// ============================================================================
 
 /// Runtime values
 #[derive(Debug, Clone)]
@@ -253,6 +348,12 @@ pub enum Value {
         trait_name: String,
         methods: HashMap<String, Value>,
     },
+
+    /// A typed fiber handle (returned by Fiber.spawn, consumed by Fiber.join)
+    Fiber(FiberId),
+
+    /// A suspended fiber effect awaiting runtime/scheduler handling
+    FiberEffect(FiberEffect),
 }
 
 impl Value {
@@ -272,6 +373,8 @@ impl Value {
             Value::Channel(_) => "Channel",
             Value::Builtin(_) => "Builtin",
             Value::Continuation { .. } => "Continuation",
+            Value::Fiber(_) => "Fiber",
+            Value::FiberEffect(_) => "FiberEffect",
             Value::Dict { .. } => "Dict",
         }
     }
@@ -1792,6 +1895,8 @@ impl Interpreter {
             Value::Builtin(name) => print!("<builtin:{}>", name),
             Value::Continuation { .. } => print!("<continuation>"),
             Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
+            Value::Fiber(id) => print!("<fiber:{}>", id),
+            Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
         }
     }
 

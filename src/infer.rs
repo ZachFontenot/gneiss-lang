@@ -302,6 +302,9 @@ impl Inferencer {
             // Channels
             (Type::Channel(t1), Type::Channel(t2)) => self.unify_inner(t1, t2, span),
 
+            // Fibers (typed fiber handles)
+            (Type::Fiber(t1), Type::Fiber(t2)) => self.unify_inner(t1, t2, span),
+
             // Named constructors
             (
                 Type::Constructor { name: n1, args: a1 },
@@ -351,6 +354,7 @@ impl Inferencer {
                 }
             }
             Type::Channel(t) => self.update_levels(&t, level),
+            Type::Fiber(t) => self.update_levels(&t, level),
             Type::Constructor { args, .. } => {
                 for t in args {
                     self.update_levels(&t, level);
@@ -395,6 +399,7 @@ impl Inferencer {
             },
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
             Type::Channel(t) => Type::Channel(Rc::new(self.substitute(t, subst))),
+            Type::Fiber(t) => Type::Fiber(Rc::new(self.substitute(t, subst))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
                 args: args.iter().map(|t| self.substitute(t, subst)).collect(),
@@ -447,6 +452,7 @@ impl Inferencer {
                     .collect(),
             ),
             Type::Channel(t) => Type::Channel(Rc::new(self.generalize_inner(t, generics))),
+            Type::Fiber(t) => Type::Fiber(Rc::new(self.generalize_inner(t, generics))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
                 args: args

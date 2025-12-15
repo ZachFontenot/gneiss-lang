@@ -44,8 +44,12 @@ pub enum Type {
     /// Channel type: Channel a
     Channel(Rc<Type>),
 
-    /// Process ID type (returned by spawn)
+    /// Process ID type (returned by spawn) - deprecated, use Fiber instead
     Pid,
+
+    /// Fiber type: Fiber a (typed fiber handle, result of spawning)
+    /// The type parameter is the result type when joined
+    Fiber(Rc<Type>),
 }
 
 /// A type variable that may or may not be bound
@@ -106,6 +110,7 @@ impl Type {
             Type::Tuple(types) => types.iter().any(|t| t.occurs(id)),
             Type::Constructor { args, .. } => args.iter().any(|t| t.occurs(id)),
             Type::Channel(t) => t.occurs(id),
+            Type::Fiber(t) => t.occurs(id),
             Type::Int
             | Type::Float
             | Type::Bool
@@ -310,6 +315,12 @@ impl Type {
                     t.display_with_map(var_map, next_var, hide_answer_types)
                 )
             }
+            Type::Fiber(t) => {
+                format!(
+                    "Fiber {}",
+                    t.display_with_map(var_map, next_var, hide_answer_types)
+                )
+            }
         }
     }
 }
@@ -386,6 +397,7 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Type::Channel(t) => write!(f, "Channel {}", t),
+            Type::Fiber(t) => write!(f, "Fiber {}", t),
         }
     }
 }

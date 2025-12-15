@@ -273,6 +273,8 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::Builtin(name) => print!("<builtin:{}>", name),
         gneiss::Value::Continuation { .. } => print!("<continuation>"),
         gneiss::Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
+        gneiss::Value::Fiber(id) => print!("<fiber:{}>", id),
+        gneiss::Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
     }
 }
 
