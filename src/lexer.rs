@@ -43,6 +43,11 @@ pub enum Token {
     Where,
     Val,
 
+    // Module keywords
+    Pub,
+    Import,
+    As,
+
     // Delimiters
     LParen,     // (
     RParen,     // )
@@ -499,6 +504,10 @@ impl<'a> Lexer<'a> {
             "for" => Token::For,
             "where" => Token::Where,
             "val" => Token::Val,
+            // Module keywords
+            "pub" => Token::Pub,
+            "import" => Token::Import,
+            "as" => Token::As,
             _ => {
                 if s.chars().next().unwrap().is_uppercase() {
                     Token::UpperIdent(s)
@@ -683,6 +692,37 @@ mod tests {
         assert_eq!(tokens("->"), vec![Token::Arrow, Token::Eof]);
         assert_eq!(tokens("<-"), vec![Token::LArrow, Token::Eof]);
         assert_eq!(tokens("=>"), vec![Token::FatArrow, Token::Eof]);
+    }
+
+    #[test]
+    fn test_module_tokens() {
+        assert_eq!(
+            tokens("pub import as"),
+            vec![Token::Pub, Token::Import, Token::As, Token::Eof]
+        );
+        // 'pub' in context
+        assert_eq!(
+            tokens("pub let x = 1"),
+            vec![
+                Token::Pub,
+                Token::Let,
+                Token::Ident("x".into()),
+                Token::Eq,
+                Token::Int(1),
+                Token::Eof
+            ]
+        );
+        // 'import' in context
+        assert_eq!(
+            tokens("import List as L"),
+            vec![
+                Token::Import,
+                Token::UpperIdent("List".into()),
+                Token::As,
+                Token::UpperIdent("L".into()),
+                Token::Eof
+            ]
+        );
     }
 
     #[test]

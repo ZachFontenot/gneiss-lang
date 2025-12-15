@@ -602,6 +602,10 @@ impl Interpreter {
         // Process all items in order: declarations bind values, expressions execute
         for item in &program.items {
             match item {
+                Item::Import(_) => {
+                    // Imports are handled during module resolution (Phase 3)
+                    // At runtime in a single-file context, nothing to do
+                }
                 Item::Decl(decl) => {
                     self.eval_decl(decl)?;
                 }
@@ -690,7 +694,7 @@ impl Interpreter {
                 // At runtime, nothing to do
                 Ok(())
             }
-            Decl::OperatorDef { op, params, body } => {
+            Decl::OperatorDef { op, params, body, .. } => {
                 // Operator definitions are like regular function definitions
                 // The operator name is bound to a closure in the global env
                 let closure = Value::Closure {
@@ -706,7 +710,7 @@ impl Interpreter {
                 // At runtime, nothing to do
                 Ok(())
             }
-            Decl::LetRec { bindings } => {
+            Decl::LetRec { bindings, .. } => {
                 // Create all closures that share the global environment
                 // They can reference each other since they all look up in global_env
                 for binding in bindings {

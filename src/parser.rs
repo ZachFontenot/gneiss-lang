@@ -88,6 +88,18 @@ impl Parser {
         while self.match_token(&Token::DoubleSemi) {}
 
         match self.peek() {
+            Token::Import => {
+                // Parse import statement
+                let import = self.parse_import()?;
+                self.match_token(&Token::DoubleSemi);
+                Ok(Item::Import(import))
+            }
+            Token::Pub => {
+                // Parse public declaration
+                let decl = self.parse_pub_decl()?;
+                self.match_token(&Token::DoubleSemi);
+                Ok(Item::Decl(decl))
+            }
             Token::Let => {
                 // Could be a declaration (let x = e) or expression (let x = e in body)
                 // Parse the common prefix, then check for `in`
@@ -112,6 +124,242 @@ impl Parser {
                 Ok(Item::Expr(expr))
             }
         }
+    }
+
+    /// Parse an import statement
+    /// Syntax:
+    ///   import Module                      -- qualified access
+    ///   import Module as M                 -- alias
+    ///   import Module (item1, item2)       -- selective
+    ///   import Module (item1 as alias1)   -- selective with alias
+    fn parse_import(&mut self) -> Result<Spanned<ImportSpec>, ParseError> {
+        let start = self.current_span();
+        self.consume(Token::Import)?;
+
+        // Parse module path (e.g., "Collections/HashMap" or just "List")
+        let module_path = self.parse_module_path()?;
+
+        // Check for alias: `as Name`
+        let alias = if self.match_token(&Token::As) {
+            Some(self.parse_upper_ident()?)
+        } else {
+            None
+        };
+
+        // Check for selective imports: (item1, item2, ...)
+        let items = if self.check(&Token::LParen) {
+            self.advance(); // consume (
+            let mut imports = Vec::new();
+
+            if !self.check(&Token::RParen) {
+                loop {
+                    let name = self.parse_ident()?;
+                    let item_alias = if self.match_token(&Token::As) {
+                        Some(self.parse_ident()?)
+                    } else {
+                        None
+                    };
+                    imports.push((name, item_alias));
+
+                    if !self.match_token(&Token::Comma) {
+                        break;
+                    }
+                }
+            }
+
+            self.consume(Token::RParen)?;
+            Some(imports)
+        } else {
+            None
+        };
+
+        let end = self.current_span();
+        Ok(Spanned::new(
+            ImportSpec {
+                module_path,
+                alias,
+                items,
+            },
+            start.merge(&end),
+        ))
+    }
+
+    /// Parse a module path like "Collections/HashMap" or "List"
+    fn parse_module_path(&mut self) -> Result<String, ParseError> {
+        let first = self.parse_upper_ident()?;
+        let mut path = first;
+
+        // Check for path separator (using / for now, could also use .)
+        while self.check(&Token::Slash) {
+            self.advance();
+            let next = self.parse_upper_ident()?;
+            path.push('/');
+            path.push_str(&next);
+        }
+
+        Ok(path)
+    }
+
+    /// Parse a public declaration: pub let, pub type, pub trait
+    fn parse_pub_decl(&mut self) -> Result<Decl, ParseError> {
+        self.consume(Token::Pub)?;
+
+        match self.peek() {
+            Token::Let => {
+                let start = self.current_span();
+                self.consume(Token::Let)?;
+
+                // Check for 'rec'
+                if self.match_token(&Token::Rec) {
+                    return self.parse_let_rec_decl_with_visibility(Visibility::Public);
+                }
+
+                // Check for operator definition: pub let (<|>) a b = ...
+                if self.check(&Token::LParen) {
+                    if let Some(op) = self.peek_operator_in_parens() {
+                        return self.parse_operator_def_decl_with_visibility(start, op, None, Visibility::Public);
+                    }
+                }
+
+                // Parse regular let
+                let name = self.parse_ident()?;
+
+                // Check for infix operator: pub let a <|> b = ...
+                if let Some(op) = self.try_peek_operator() {
+                    return self.parse_operator_def_decl_with_visibility(start.clone(), op, Some((name.clone(), start)), Visibility::Public);
+                }
+
+                let mut params = Vec::new();
+                while self.is_pattern_start() && !self.check(&Token::Eq) {
+                    params.push(self.parse_simple_pattern()?);
+                }
+
+                self.consume(Token::Eq)?;
+                let body = self.parse_expr()?;
+
+                Ok(Decl::Let {
+                    visibility: Visibility::Public,
+                    name,
+                    type_ann: None,
+                    params,
+                    body,
+                })
+            }
+            Token::Type => {
+                self.consume(Token::Type)?;
+                let name = self.parse_upper_ident()?;
+
+                let mut params = Vec::new();
+                while let Token::Ident(_) = self.peek() {
+                    params.push(self.parse_ident()?);
+                }
+
+                self.consume(Token::Eq)?;
+
+                if self.check(&Token::Pipe) || self.peek_is_upper_ident() {
+                    let constructors = self.parse_constructors()?;
+                    Ok(Decl::Type {
+                        visibility: Visibility::Public,
+                        name,
+                        params,
+                        constructors,
+                    })
+                } else {
+                    let body = self.parse_type_expr()?;
+                    Ok(Decl::TypeAlias {
+                        visibility: Visibility::Public,
+                        name,
+                        params,
+                        body,
+                    })
+                }
+            }
+            Token::Trait => {
+                self.consume(Token::Trait)?;
+                let name = self.parse_upper_ident()?;
+                let type_param = self.parse_ident()?;
+
+                let supertraits = if self.match_token(&Token::Colon) {
+                    self.parse_supertrait_list()?
+                } else {
+                    vec![]
+                };
+
+                self.consume(Token::Eq)?;
+
+                let mut methods = Vec::new();
+                while self.match_token(&Token::Val) {
+                    let method_name = self.parse_ident()?;
+                    self.consume(Token::Colon)?;
+                    let type_sig = self.parse_type_expr()?;
+                    methods.push(TraitMethod {
+                        name: method_name,
+                        type_sig,
+                    });
+                }
+
+                self.consume(Token::End)?;
+
+                Ok(Decl::Trait {
+                    visibility: Visibility::Public,
+                    name,
+                    type_param,
+                    supertraits,
+                    methods,
+                })
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "let, type, or trait after pub".to_string(),
+                found: self.peek().clone(),
+                span: self.current_span(),
+            }),
+        }
+    }
+
+    /// Parse let rec with specified visibility
+    fn parse_let_rec_decl_with_visibility(&mut self, visibility: Visibility) -> Result<Decl, ParseError> {
+        let mut bindings = Vec::new();
+        bindings.push(self.parse_rec_binding()?);
+
+        while self.match_token(&Token::And) {
+            bindings.push(self.parse_rec_binding()?);
+        }
+
+        Ok(Decl::LetRec { visibility, bindings })
+    }
+
+    /// Parse operator definition with specified visibility
+    fn parse_operator_def_decl_with_visibility(
+        &mut self,
+        _start: Span,
+        op: String,
+        first_param: Option<(String, Span)>,
+        visibility: Visibility,
+    ) -> Result<Decl, ParseError> {
+        let mut params = Vec::new();
+
+        if let Some((name, param_span)) = first_param {
+            self.advance(); // consume operator
+            params.push(Spanned::new(PatternKind::Var(name), param_span));
+            params.push(self.parse_simple_pattern()?);
+        } else {
+            self.consume(Token::LParen)?;
+            self.advance(); // consume operator
+            self.consume(Token::RParen)?;
+            while self.is_pattern_start() && !self.check(&Token::Eq) {
+                params.push(self.parse_simple_pattern()?);
+            }
+        }
+
+        self.consume(Token::Eq)?;
+        let body = self.parse_expr()?;
+
+        Ok(Decl::OperatorDef {
+            visibility,
+            op,
+            params,
+            body,
+        })
     }
 
     /// Parse a let that could be either a declaration or a let-expression.
@@ -200,6 +448,7 @@ impl Parser {
             // Optionally consume ;; after declaration
             self.match_token(&Token::DoubleSemi);
             Ok(Item::Decl(Decl::Let {
+                visibility: Visibility::Private,
                 name: first_name,
                 type_ann: None,
                 params,
@@ -263,7 +512,12 @@ impl Parser {
 
         self.match_token(&Token::DoubleSemi);
 
-        Ok(Item::Decl(Decl::OperatorDef { op, params, body }))
+        Ok(Item::Decl(Decl::OperatorDef {
+            visibility: Visibility::Private,
+            op,
+            params,
+            body,
+        }))
     }
 
     /// Parse mutually recursive let: let rec f x = ... and g y = ...
@@ -296,7 +550,10 @@ impl Parser {
         } else {
             // Top-level declaration
             self.match_token(&Token::DoubleSemi);
-            Ok(Item::Decl(Decl::LetRec { bindings }))
+            Ok(Item::Decl(Decl::LetRec {
+                visibility: Visibility::Private,
+                bindings,
+            }))
         }
     }
 
@@ -503,6 +760,7 @@ impl Parser {
         let body = self.parse_expr()?;
 
         Ok(Decl::Let {
+            visibility: Visibility::Private,
             name,
             type_ann: None,
             params,
@@ -528,6 +786,7 @@ impl Parser {
             // Variant type
             let constructors = self.parse_constructors()?;
             Ok(Decl::Type {
+                visibility: Visibility::Private,
                 name,
                 params,
                 constructors,
@@ -535,7 +794,12 @@ impl Parser {
         } else {
             // Type alias
             let body = self.parse_type_expr()?;
-            Ok(Decl::TypeAlias { name, params, body })
+            Ok(Decl::TypeAlias {
+                visibility: Visibility::Private,
+                name,
+                params,
+                body,
+            })
         }
     }
 
@@ -608,6 +872,7 @@ impl Parser {
         self.consume(Token::End)?;
 
         Ok(Decl::Trait {
+            visibility: Visibility::Private,
             name,
             type_param,
             supertraits,
@@ -1786,6 +2051,7 @@ mod tests {
                 type_param,
                 supertraits,
                 methods,
+                ..
             }) => {
                 assert_eq!(name, "Show");
                 assert_eq!(type_param, "a");
@@ -2091,7 +2357,7 @@ mod tests {
         let prog = parse("let rec f n = n");
         assert_eq!(prog.items.len(), 1);
         match &prog.items[0] {
-            Item::Decl(Decl::LetRec { bindings }) => {
+            Item::Decl(Decl::LetRec { bindings, .. }) => {
                 assert_eq!(bindings.len(), 1);
                 assert_eq!(bindings[0].name.node, "f");
                 assert_eq!(bindings[0].params.len(), 1);
@@ -2106,7 +2372,7 @@ mod tests {
         let prog = parse("let rec f n = g n and g n = f n");
         assert_eq!(prog.items.len(), 1);
         match &prog.items[0] {
-            Item::Decl(Decl::LetRec { bindings }) => {
+            Item::Decl(Decl::LetRec { bindings, .. }) => {
                 assert_eq!(bindings.len(), 2);
                 assert_eq!(bindings[0].name.node, "f");
                 assert_eq!(bindings[1].name.node, "g");
@@ -2192,6 +2458,135 @@ mod tests {
                 _ => panic!("expected Match expression"),
             },
             _ => panic!("expected expression"),
+        }
+    }
+
+    // ========================================================================
+    // Module system tests
+    // ========================================================================
+
+    #[test]
+    fn test_import_simple() {
+        let prog = parse("import List");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Import(import) => {
+                assert_eq!(import.node.module_path, "List");
+                assert!(import.node.alias.is_none());
+                assert!(import.node.items.is_none());
+            }
+            _ => panic!("expected import"),
+        }
+    }
+
+    #[test]
+    fn test_import_with_alias() {
+        let prog = parse("import List as L");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Import(import) => {
+                assert_eq!(import.node.module_path, "List");
+                assert_eq!(import.node.alias, Some("L".to_string()));
+                assert!(import.node.items.is_none());
+            }
+            _ => panic!("expected import"),
+        }
+    }
+
+    #[test]
+    fn test_import_selective() {
+        let prog = parse("import List (map, filter)");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Import(import) => {
+                assert_eq!(import.node.module_path, "List");
+                assert!(import.node.alias.is_none());
+                let items = import.node.items.as_ref().unwrap();
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], ("map".to_string(), None));
+                assert_eq!(items[1], ("filter".to_string(), None));
+            }
+            _ => panic!("expected import"),
+        }
+    }
+
+    #[test]
+    fn test_import_selective_with_alias() {
+        let prog = parse("import List (map as m, filter as f)");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Import(import) => {
+                let items = import.node.items.as_ref().unwrap();
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], ("map".to_string(), Some("m".to_string())));
+                assert_eq!(items[1], ("filter".to_string(), Some("f".to_string())));
+            }
+            _ => panic!("expected import"),
+        }
+    }
+
+    #[test]
+    fn test_pub_let() {
+        let prog = parse("pub let x = 42");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Let { visibility, name, .. }) => {
+                assert_eq!(*visibility, Visibility::Public);
+                assert_eq!(name, "x");
+            }
+            _ => panic!("expected pub let"),
+        }
+    }
+
+    #[test]
+    fn test_pub_let_function() {
+        let prog = parse("pub let add x y = x + y");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Let { visibility, name, params, .. }) => {
+                assert_eq!(*visibility, Visibility::Public);
+                assert_eq!(name, "add");
+                assert_eq!(params.len(), 2);
+            }
+            _ => panic!("expected pub let"),
+        }
+    }
+
+    #[test]
+    fn test_pub_type() {
+        let prog = parse("pub type Option a = | Some a | None");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Type { visibility, name, .. }) => {
+                assert_eq!(*visibility, Visibility::Public);
+                assert_eq!(name, "Option");
+            }
+            _ => panic!("expected pub type"),
+        }
+    }
+
+    #[test]
+    fn test_pub_trait() {
+        let prog = parse("pub trait Show a = val show : a -> String end");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Trait { visibility, name, .. }) => {
+                assert_eq!(*visibility, Visibility::Public);
+                assert_eq!(name, "Show");
+            }
+            _ => panic!("expected pub trait"),
+        }
+    }
+
+    #[test]
+    fn test_private_by_default() {
+        let prog = parse("let x = 42");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Let { visibility, .. }) => {
+                assert_eq!(*visibility, Visibility::Private);
+            }
+            _ => panic!("expected let"),
         }
     }
 }

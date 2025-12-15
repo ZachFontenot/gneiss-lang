@@ -364,15 +364,24 @@ impl Inferencer {
         }
     }
 
-    /// Instantiate a polymorphic type scheme
+    /// Instantiate a polymorphic type scheme, adding predicates to wanted_preds
     fn instantiate(&mut self, scheme: &Scheme) -> Type {
-        if scheme.num_generics == 0 {
+        if scheme.num_generics == 0 && scheme.predicates.is_empty() {
             return scheme.ty.clone();
         }
 
         let mut substitution: HashMap<TypeVarId, Type> = HashMap::new();
         for i in 0..scheme.num_generics {
             substitution.insert(i, self.fresh_var());
+        }
+
+        // Instantiate predicates and add to wanted_preds
+        for pred in &scheme.predicates {
+            let instantiated_pred = Pred {
+                trait_name: pred.trait_name.clone(),
+                ty: self.substitute(&pred.ty, &substitution),
+            };
+            self.wanted_preds.push(instantiated_pred);
         }
 
         self.substitute(&scheme.ty, &substitution)
@@ -408,14 +417,195 @@ impl Inferencer {
         }
     }
 
-    /// Generalize a type to a polymorphic scheme
-    fn generalize(&self, ty: &Type) -> Scheme {
+    /// Generalize a type to a polymorphic scheme, capturing relevant predicates
+    fn generalize(&mut self, ty: &Type) -> Scheme {
         let mut generics: HashMap<TypeVarId, TypeVarId> = HashMap::new();
         let generalized = self.generalize_inner(ty, &mut generics);
 
+        // Take all predicates, then partition them
+        let all_preds: Vec<_> = std::mem::take(&mut self.wanted_preds);
+
+        let (captured, remaining): (Vec<_>, Vec<_>) = all_preds
+            .into_iter()
+            .partition(|pred| Self::pred_mentions_generalized_vars_static(pred, &generics, self.level));
+
+        self.wanted_preds = remaining;
+
+        // Convert captured predicates to use Generic type vars
+        let preds = captured
+            .into_iter()
+            .map(|pred| Self::apply_generic_subst_to_pred_static(&pred, &generics, self.level))
+            .collect();
+
         Scheme {
             num_generics: generics.len() as u32,
+            predicates: preds,
             ty: generalized,
+        }
+    }
+
+    /// Collect level-0 "placeholder" type vars from a type and add fresh var substitutions
+    /// These are created by Type::arrow() and need to be replaced to avoid sharing across method calls
+    fn collect_level_zero_vars(ty: &Type, subst: &mut HashMap<TypeVarId, Type>, inferencer: &mut Inferencer) {
+        match ty.resolve() {
+            Type::Var(var) => {
+                if let TypeVar::Unbound { id, level: 0 } = &*var.borrow() {
+                    // Level-0 var that's not already in subst - create fresh var for it
+                    if !subst.contains_key(id) {
+                        subst.insert(*id, inferencer.fresh_var());
+                    }
+                }
+            }
+            Type::Arrow { arg, ret, ans_in, ans_out } => {
+                Self::collect_level_zero_vars(&arg, subst, inferencer);
+                Self::collect_level_zero_vars(&ret, subst, inferencer);
+                Self::collect_level_zero_vars(&ans_in, subst, inferencer);
+                Self::collect_level_zero_vars(&ans_out, subst, inferencer);
+            }
+            Type::Tuple(ts) => {
+                for t in ts.iter() {
+                    Self::collect_level_zero_vars(t, subst, inferencer);
+                }
+            }
+            Type::Constructor { args, .. } => {
+                for t in args.iter() {
+                    Self::collect_level_zero_vars(t, subst, inferencer);
+                }
+            }
+            Type::Channel(t) | Type::Fiber(t) => {
+                Self::collect_level_zero_vars(&t, subst, inferencer);
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if a predicate mentions any of the generalized type variables (static version)
+    fn pred_mentions_generalized_vars_static(
+        pred: &Pred,
+        generics: &HashMap<TypeVarId, TypeVarId>,
+        current_level: u32,
+    ) -> bool {
+        Self::type_mentions_generalized_vars_static(&pred.ty, generics, current_level)
+    }
+
+    /// Check if a type contains any of the generalized type variables (static version)
+    fn type_mentions_generalized_vars_static(
+        ty: &Type,
+        generics: &HashMap<TypeVarId, TypeVarId>,
+        current_level: u32,
+    ) -> bool {
+        let resolved = ty.resolve();
+        match &resolved {
+            Type::Var(var) => match &*var.borrow() {
+                TypeVar::Unbound { id, level } if *level > current_level => {
+                    generics.contains_key(id)
+                }
+                _ => false,
+            },
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => {
+                Self::type_mentions_generalized_vars_static(arg, generics, current_level)
+                    || Self::type_mentions_generalized_vars_static(ret, generics, current_level)
+                    || Self::type_mentions_generalized_vars_static(ans_in, generics, current_level)
+                    || Self::type_mentions_generalized_vars_static(ans_out, generics, current_level)
+            }
+            Type::Tuple(ts) => ts
+                .iter()
+                .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level)),
+            Type::Channel(t) | Type::Fiber(t) => {
+                Self::type_mentions_generalized_vars_static(t, generics, current_level)
+            }
+            Type::Constructor { args, .. } => args
+                .iter()
+                .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level)),
+            _ => false,
+        }
+    }
+
+    /// Apply generic substitution to a predicate (static version)
+    fn apply_generic_subst_to_pred_static(
+        pred: &Pred,
+        generics: &HashMap<TypeVarId, TypeVarId>,
+        current_level: u32,
+    ) -> Pred {
+        Pred {
+            trait_name: pred.trait_name.clone(),
+            ty: Self::apply_generic_subst_to_type_static(&pred.ty, generics, current_level),
+        }
+    }
+
+    /// Apply generic substitution to a type (static version)
+    fn apply_generic_subst_to_type_static(
+        ty: &Type,
+        generics: &HashMap<TypeVarId, TypeVarId>,
+        current_level: u32,
+    ) -> Type {
+        let resolved = ty.resolve();
+        match &resolved {
+            Type::Var(var) => match &*var.borrow() {
+                TypeVar::Unbound { id, level } if *level > current_level => {
+                    if let Some(&gen_id) = generics.get(id) {
+                        Type::new_generic(gen_id)
+                    } else {
+                        resolved.clone()
+                    }
+                }
+                _ => resolved.clone(),
+            },
+            Type::Arrow {
+                arg,
+                ret,
+                ans_in,
+                ans_out,
+            } => Type::Arrow {
+                arg: Rc::new(Self::apply_generic_subst_to_type_static(
+                    arg,
+                    generics,
+                    current_level,
+                )),
+                ret: Rc::new(Self::apply_generic_subst_to_type_static(
+                    ret,
+                    generics,
+                    current_level,
+                )),
+                ans_in: Rc::new(Self::apply_generic_subst_to_type_static(
+                    ans_in,
+                    generics,
+                    current_level,
+                )),
+                ans_out: Rc::new(Self::apply_generic_subst_to_type_static(
+                    ans_out,
+                    generics,
+                    current_level,
+                )),
+            },
+            Type::Tuple(ts) => Type::Tuple(
+                ts.iter()
+                    .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level))
+                    .collect(),
+            ),
+            Type::Channel(t) => Type::Channel(Rc::new(Self::apply_generic_subst_to_type_static(
+                t,
+                generics,
+                current_level,
+            ))),
+            Type::Fiber(t) => Type::Fiber(Rc::new(Self::apply_generic_subst_to_type_static(
+                t,
+                generics,
+                current_level,
+            ))),
+            Type::Constructor { name, args } => Type::Constructor {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level))
+                    .collect(),
+            },
+            _ => resolved.clone(),
         }
     }
 
@@ -533,9 +723,17 @@ impl Inferencer {
                     let fresh_ty = self.fresh_var();
 
                     // The method type has Generic(0) for the trait's type param
-                    // Substitute it with a fresh var
+                    // It may also have level-0 "placeholder" vars for answer types from Type::arrow
+                    // We need to substitute both:
+                    // 1. Generic(0) -> fresh type var for the trait param
+                    // 2. Level-0 unbound vars -> fresh answer type vars
                     let mut subst = HashMap::new();
                     subst.insert(0, fresh_ty.clone());
+
+                    // Find and replace level-0 placeholder vars (created by Type::arrow)
+                    // These have level 0 and need fresh vars to avoid sharing across different method calls
+                    Self::collect_level_zero_vars(&method_ty, &mut subst, self);
+
                     let instantiated = apply_subst(&method_ty, &subst);
 
                     // Add a wanted predicate: TraitName fresh_ty
@@ -714,6 +912,7 @@ impl Inferencer {
                     // Don't generalize - keep the monomorphic type
                     Scheme {
                         num_generics: 0,
+                        predicates: vec![],
                         ty: value_result.ty.clone(),
                     }
                 };
@@ -1306,6 +1505,7 @@ impl Inferencer {
                 };
                 let k_scheme = Scheme {
                     num_generics: 1,
+                    predicates: vec![],
                     ty: k_type,
                 };
 
@@ -1547,6 +1747,7 @@ impl Inferencer {
             name,
             params,
             constructors,
+            ..
         } = decl
         {
             // Map type parameter names to generic variable IDs
@@ -1582,6 +1783,7 @@ impl Inferencer {
             type_param,
             supertraits,
             methods,
+            ..
         } = decl
         {
             // Map the type parameter to Generic(0)
@@ -1679,6 +1881,7 @@ impl Inferencer {
         // print : forall a t. a/t -> ()/t  (polymorphic in arg type and answer type)
         let print_scheme = Scheme {
             num_generics: 2,
+            predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::new_generic(0)), // Generic arg type
                 ret: Rc::new(Type::Unit),
@@ -1728,6 +1931,7 @@ impl Inferencer {
         // Note: This is the old spawn syntax, returns Pid not Fiber
         let spawn_scheme = Scheme {
             num_generics: 2,
+            predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Unit),
@@ -1745,6 +1949,7 @@ impl Inferencer {
         // Fiber.spawn : forall a t. (() -> a) -> Fiber a
         let fiber_spawn_scheme = Scheme {
             num_generics: 2,
+            predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Unit),
@@ -1762,6 +1967,7 @@ impl Inferencer {
         // Fiber.join : forall a t. Fiber a -> a
         let fiber_join_scheme = Scheme {
             num_generics: 2,
+            predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Fiber(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::new_generic(0)),
@@ -1774,6 +1980,7 @@ impl Inferencer {
         // Fiber.yield : forall t. () -> ()
         let fiber_yield_scheme = Scheme {
             num_generics: 1,
+            predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Unit),
                 ret: Rc::new(Type::Unit),
@@ -1893,7 +2100,7 @@ impl Inferencer {
                     let scheme = self.generalize(&declared_ty);
                     env.insert(name.clone(), scheme);
                 }
-                Item::Decl(Decl::OperatorDef { op, params, body }) => {
+                Item::Decl(Decl::OperatorDef { op, params, body, .. }) => {
                     // Operator definitions work like function definitions
                     self.level += 1;
                     self.wanted_preds.clear();
@@ -1938,7 +2145,7 @@ impl Inferencer {
                     // Fixity declarations are handled during parsing
                     // No type inference needed
                 }
-                Item::Decl(Decl::LetRec { bindings }) => {
+                Item::Decl(Decl::LetRec { bindings, .. }) => {
                     // Mutually recursive function definitions
                     self.level += 1;
                     self.wanted_preds.clear();
@@ -2004,6 +2211,10 @@ impl Inferencer {
                         let scheme = self.generalize(&preliminary_types[i]);
                         env.insert(binding.name.node.clone(), scheme);
                     }
+                }
+                Item::Import(_) => {
+                    // Imports are handled during module resolution (Phase 3)
+                    // Type inference for single-file programs ignores imports
                 }
                 Item::Expr(expr) => {
                     // Type-check top-level expressions

@@ -228,7 +228,6 @@ let main () =
 // ============================================================================
 
 #[test]
-#[ignore] // Bug: gneiss-lang-lhy - type inference monomorphizes trait methods across top-level defs
 fn same_trait_different_types() {
     // Show implemented for multiple unrelated types
     // Note: Each show call must be in a separate let binding to avoid
@@ -335,7 +334,6 @@ let main () =
 // ============================================================================
 
 #[test]
-#[ignore] // Bug: gneiss-lang-lhy - type inference monomorphizes trait methods across top-level defs
 fn specific_instance_over_generic() {
     // When both specific (Show Int) and generic (Show (List a)) could apply,
     // the specific one should be chosen for the right type

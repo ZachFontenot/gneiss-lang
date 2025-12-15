@@ -5,6 +5,7 @@ pub mod errors;
 pub mod eval;
 pub mod infer;
 pub mod lexer;
+pub mod module;
 pub mod operators;
 pub mod parser;
 pub mod runtime;

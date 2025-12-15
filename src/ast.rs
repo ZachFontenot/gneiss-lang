@@ -511,6 +511,32 @@ pub struct FixityDecl {
 }
 
 // ============================================================================
+// Visibility and Imports
+// ============================================================================
+
+/// Visibility modifier for declarations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    /// Public: accessible from other modules
+    Public,
+    /// Private: only accessible within the defining module (default)
+    #[default]
+    Private,
+}
+
+/// An import specification
+#[derive(Debug, Clone)]
+pub struct ImportSpec {
+    /// The module path (e.g., "List" or "Collections/HashMap")
+    pub module_path: String,
+    /// Optional alias for the module (e.g., "L" in `import List as L`)
+    pub alias: Option<String>,
+    /// Optional selective imports. None = import whole module, Some = selective
+    /// Each item is (name, optional alias), e.g., ("map", Some("listMap"))
+    pub items: Option<Vec<(String, Option<String>)>>,
+}
+
+// ============================================================================
 // Declarations
 // ============================================================================
 
@@ -518,6 +544,7 @@ pub struct FixityDecl {
 pub enum Decl {
     // let x = e  or  let f a b = e
     Let {
+        visibility: Visibility,
         name: Ident,
         type_ann: Option<TypeExpr>,
         params: Vec<Pattern>,
@@ -526,11 +553,13 @@ pub enum Decl {
 
     /// Mutually recursive function definitions: let rec f x = ... and g y = ...
     LetRec {
+        visibility: Visibility,
         bindings: Vec<RecBinding>,
     },
 
     // Operator definition: let (<|>) a b = e or let a <|> b = e
     OperatorDef {
+        visibility: Visibility,
         op: String,
         params: Vec<Pattern>,
         body: Expr,
@@ -541,6 +570,7 @@ pub enum Decl {
 
     // type Option a = | Some a | None
     Type {
+        visibility: Visibility,
         name: Ident,
         params: Vec<Ident>,
         constructors: Vec<Constructor>,
@@ -548,6 +578,7 @@ pub enum Decl {
 
     // type alias: type UserId = Int
     TypeAlias {
+        visibility: Visibility,
         name: Ident,
         params: Vec<Ident>,
         body: TypeExpr,
@@ -555,6 +586,7 @@ pub enum Decl {
 
     // trait Show a = val show : a -> String end
     Trait {
+        visibility: Visibility,
         name: Ident,
         type_param: Ident,
         supertraits: Vec<Ident>,
@@ -608,10 +640,14 @@ pub struct Constraint {
 // Program
 // ============================================================================
 
-/// A top-level item: either a declaration or an expression
+/// A top-level item: declaration, import, or expression
 #[derive(Debug, Clone)]
 pub enum Item {
+    /// An import statement
+    Import(Spanned<ImportSpec>),
+    /// A declaration (let, type, trait, impl)
     Decl(Decl),
+    /// A top-level expression
     Expr(Expr),
 }
 

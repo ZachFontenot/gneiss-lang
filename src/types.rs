@@ -121,12 +121,16 @@ impl Type {
         }
     }
 
+    /// Sentinel ID for placeholder answer type vars - won't collide with Generic IDs
+    pub const PLACEHOLDER_ANS_ID: TypeVarId = TypeVarId::MAX;
+
     /// Create a pure function type (ans_in == ans_out)
     /// Uses a shared type variable for both answer types
     pub fn arrow(from: Type, to: Type) -> Type {
         // For a pure function, we use the same Rc for both answer types
         // This ensures they're always unified together
-        let ans = Rc::new(Type::new_var(0, 0)); // Placeholder - will be replaced during inference
+        // Use PLACEHOLDER_ANS_ID to avoid collision with Generic(0) in trait methods
+        let ans = Rc::new(Type::new_var(Self::PLACEHOLDER_ANS_ID, 0));
         Type::Arrow {
             arg: Rc::new(from),
             ret: Rc::new(to),
@@ -403,19 +407,32 @@ impl fmt::Display for Type {
 }
 
 /// A polymorphic type scheme: forall a b. a -> b -> a
+/// With optional type class constraints: forall a. Show a => a -> String
 #[derive(Debug, Clone)]
 pub struct Scheme {
     /// The number of generic type variables
     pub num_generics: u32,
+    /// Type class predicates/constraints on the generic variables
+    pub predicates: Vec<Pred>,
     /// The underlying type
     pub ty: Type,
 }
 
 impl Scheme {
-    /// A monomorphic type (no generics)
+    /// A monomorphic type (no generics, no constraints)
     pub fn mono(ty: Type) -> Scheme {
         Scheme {
             num_generics: 0,
+            predicates: vec![],
+            ty,
+        }
+    }
+
+    /// A polymorphic type with constraints
+    pub fn with_predicates(num_generics: u32, predicates: Vec<Pred>, ty: Type) -> Scheme {
+        Scheme {
+            num_generics,
+            predicates,
             ty,
         }
     }
@@ -432,6 +449,21 @@ impl fmt::Display for Scheme {
                 write!(f, "{}", ('a' as u8 + (i % 26) as u8) as char)?;
             }
             write!(f, ". ")?;
+        }
+        // Display type class constraints if present
+        if !self.predicates.is_empty() {
+            if self.predicates.len() == 1 {
+                write!(f, "{} => ", self.predicates[0])?;
+            } else {
+                write!(f, "(")?;
+                for (i, pred) in self.predicates.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", pred)?;
+                }
+                write!(f, ") => ")?;
+            }
         }
         write!(f, "{}", self.ty)
     }
