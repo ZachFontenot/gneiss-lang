@@ -1,0 +1,78 @@
+-- Worker Pool Pattern (Synchronous Channels)
+--
+-- This example demonstrates a worker pool with synchronous rendezvous channels.
+-- Key insight: With synchronous channels, we must interleave sends and receives.
+--
+-- Architecture:
+--   [Producer] --jobs--> [Worker 1] --results-->
+--                        [Worker 2] --results-->  [Main/Collector]
+--                        [Worker 3] --results-->
+
+let main () =
+    -- Create channels
+    let jobs = Channel.new in
+    let results = Channel.new in
+
+    -- Producer: sends all jobs
+    let producer = Fiber.spawn (fun () ->
+        Channel.send jobs 1;
+        Channel.send jobs 2;
+        Channel.send jobs 3;
+        Channel.send jobs 4;
+        Channel.send jobs 5;
+        Channel.send jobs 6;
+        Channel.send jobs 7;
+        Channel.send jobs 8;
+        Channel.send jobs 9
+    ) in
+
+    -- Workers: each processes 3 jobs, doubling the value
+    let worker1 = Fiber.spawn (fun () ->
+        let j1 = Channel.recv jobs in
+        Channel.send results (j1 * 2);
+        let j2 = Channel.recv jobs in
+        Channel.send results (j2 * 2);
+        let j3 = Channel.recv jobs in
+        Channel.send results (j3 * 2)
+    ) in
+
+    let worker2 = Fiber.spawn (fun () ->
+        let j1 = Channel.recv jobs in
+        Channel.send results (j1 * 2);
+        let j2 = Channel.recv jobs in
+        Channel.send results (j2 * 2);
+        let j3 = Channel.recv jobs in
+        Channel.send results (j3 * 2)
+    ) in
+
+    let worker3 = Fiber.spawn (fun () ->
+        let j1 = Channel.recv jobs in
+        Channel.send results (j1 * 2);
+        let j2 = Channel.recv jobs in
+        Channel.send results (j2 * 2);
+        let j3 = Channel.recv jobs in
+        Channel.send results (j3 * 2)
+    ) in
+
+    -- Collector: main collects all 9 results
+    let r1 = Channel.recv results in
+    let r2 = Channel.recv results in
+    let r3 = Channel.recv results in
+    let r4 = Channel.recv results in
+    let r5 = Channel.recv results in
+    let r6 = Channel.recv results in
+    let r7 = Channel.recv results in
+    let r8 = Channel.recv results in
+    let r9 = Channel.recv results in
+
+    -- Wait for all fibers to complete
+    let _ = Fiber.join producer in
+    let _ = Fiber.join worker1 in
+    let _ = Fiber.join worker2 in
+    let _ = Fiber.join worker3 in
+
+    -- Sum of 2*(1+2+3+4+5+6+7+8+9) = 2*45 = 90
+    let total = r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9 in
+    print "Worker pool complete!";
+    print total;
+    total

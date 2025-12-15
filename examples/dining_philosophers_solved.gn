@@ -1,0 +1,86 @@
+-- Dining Philosophers Problem - SOLVED
+--
+-- This version avoids deadlock using the "waiter" pattern.
+-- A central waiter (arbitrator) ensures only 2 philosophers
+-- can attempt to eat at once, preventing circular wait.
+
+let main () =
+    -- Channels for results
+    let results = Channel.new in
+
+    -- Permission channel (waiter)
+    -- Only 2 tokens (permissions) available at a time
+    let get_permission = Channel.new in
+    let return_permission = Channel.new in
+
+    -- Waiter manages 2 permissions
+    -- Uses a simplified protocol for demonstration
+    let waiter = Fiber.spawn (fun () ->
+        -- Issue permission to first 2 requesters
+        let _ = Channel.recv get_permission in
+        let _ = Channel.recv get_permission in
+        -- Wait for them to finish
+        let _ = Channel.recv return_permission in
+        let _ = Channel.recv return_permission in
+        -- Third philosopher gets permission
+        let _ = Channel.recv get_permission in
+        let _ = Channel.recv return_permission in
+        ()
+    ) in
+
+    -- Fork channels (simplified: just coordinate between adjacent philosophers)
+    let fork12 = Channel.new in
+    let fork23 = Channel.new in
+    let fork31 = Channel.new in
+
+    -- Fork servers
+    let f1 = Fiber.spawn (fun () ->
+        let _ = Channel.recv fork12 in ()
+    ) in
+    let f2 = Fiber.spawn (fun () ->
+        let _ = Channel.recv fork23 in ()
+    ) in
+    let f3 = Fiber.spawn (fun () ->
+        let _ = Channel.recv fork31 in ()
+    ) in
+
+    -- Philosophers ask waiter first, then eat
+    let phil1 = Fiber.spawn (fun () ->
+        Channel.send get_permission 1;
+        Channel.send fork12 1;
+        -- "eating"
+        Channel.send return_permission 1;
+        Channel.send results 1
+    ) in
+
+    let phil2 = Fiber.spawn (fun () ->
+        Channel.send get_permission 2;
+        Channel.send fork23 2;
+        Channel.send return_permission 2;
+        Channel.send results 2
+    ) in
+
+    let phil3 = Fiber.spawn (fun () ->
+        Channel.send get_permission 3;
+        Channel.send fork31 3;
+        Channel.send return_permission 3;
+        Channel.send results 3
+    ) in
+
+    -- Collect results (all should finish)
+    let r1 = Channel.recv results in
+    let r2 = Channel.recv results in
+    let r3 = Channel.recv results in
+
+    -- Join all fibers
+    let _ = Fiber.join waiter in
+    let _ = Fiber.join f1 in
+    let _ = Fiber.join f2 in
+    let _ = Fiber.join f3 in
+    let _ = Fiber.join phil1 in
+    let _ = Fiber.join phil2 in
+    let _ = Fiber.join phil3 in
+
+    print "All philosophers finished eating!";
+    print (r1 + r2 + r3);
+    r1 + r2 + r3

@@ -1724,6 +1724,65 @@ impl Inferencer {
             Scheme::mono(Type::arrow(Type::Char, Type::Int)),
         );
 
+        // spawn : forall a. (() -> a) -> Pid (backwards compatibility)
+        // Note: This is the old spawn syntax, returns Pid not Fiber
+        let spawn_scheme = Scheme {
+            num_generics: 2,
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Unit),
+                    ret: Rc::new(Type::new_generic(0)),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ret: Rc::new(Type::Pid),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("spawn".into(), spawn_scheme);
+
+        // Fiber.spawn : forall a t. (() -> a) -> Fiber a
+        let fiber_spawn_scheme = Scheme {
+            num_generics: 2,
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Unit),
+                    ret: Rc::new(Type::new_generic(0)),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ret: Rc::new(Type::Fiber(Rc::new(Type::new_generic(0)))),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Fiber.spawn".into(), fiber_spawn_scheme);
+
+        // Fiber.join : forall a t. Fiber a -> a
+        let fiber_join_scheme = Scheme {
+            num_generics: 2,
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Fiber(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::new_generic(0)),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Fiber.join".into(), fiber_join_scheme);
+
+        // Fiber.yield : forall t. () -> ()
+        let fiber_yield_scheme = Scheme {
+            num_generics: 1,
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Unit),
+                ret: Rc::new(Type::Unit),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Fiber.yield".into(), fiber_yield_scheme);
+
         // First pass: register all type declarations
         for item in &program.items {
             if let Item::Decl(decl) = item {

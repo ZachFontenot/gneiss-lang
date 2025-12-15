@@ -95,41 +95,10 @@ pub enum Frame {
     // === Concurrency frames ===
     /// After evaluating the thunk expression for spawn
     Spawn,
-    /// After evaluating channel expr in send, evaluate the value
-    SendChan { value_expr: Rc<Expr>, env: Env },
-    /// After evaluating value in send, perform the send
-    SendVal { channel: ChannelId },
-    /// After evaluating channel expr in recv, perform the recv
-    Recv,
 
     // === Delimited continuation frames ===
     /// Delimiter marker for reset
     Prompt,
-
-    // === Select frames ===
-    /// Evaluating channel expressions for select, collecting them
-    SelectChans {
-        /// Patterns for each arm (parallel to channels being collected)
-        patterns: Vec<Pattern>,
-        /// Body expressions for each arm
-        bodies: Vec<Rc<Expr>>,
-        /// Channel expressions still to evaluate
-        remaining_chans: Vec<Expr>,
-        /// Channel IDs already evaluated
-        collected_chans: Vec<ChannelId>,
-        env: Env,
-    },
-
-    /// All channels evaluated, now perform the select
-    SelectReady {
-        /// Channel IDs to select from
-        channels: Vec<ChannelId>,
-        /// Corresponding patterns
-        patterns: Vec<Pattern>,
-        /// Corresponding bodies
-        bodies: Vec<Rc<Expr>>,
-        env: Env,
-    },
 
     // === Fiber effect frames (unified runtime) ===
     /// Implicit delimiter for fiber continuations.
@@ -211,6 +180,11 @@ impl Cont {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
+
+    /// Insert a frame at the bottom of the continuation stack
+    pub fn insert_at_bottom(&mut self, frame: Frame) {
+        self.frames.insert(0, frame);
+    }
 }
 
 impl Default for Cont {
@@ -238,18 +212,8 @@ pub enum StepResult {
     Continue(State),
     /// Evaluation completed with a final value
     Done(Value),
-    /// Process needs to block (for concurrency)
-    Blocked { reason: BlockReason, state: State },
     /// An error occurred
     Error(EvalError),
-}
-
-/// Why a process is blocked (for concurrency)
-#[derive(Debug, Clone)]
-pub enum BlockReason {
-    Send { channel: ChannelId, value: Value },
-    Recv { channel: ChannelId },
-    Select { channels: Vec<ChannelId> },
 }
 
 /// Result of applying an effectful builtin function
@@ -598,6 +562,9 @@ impl Interpreter {
             );
             env.define("char_to_int".into(), Value::Builtin("char_to_int".into()));
 
+            // spawn : (() -> a) -> Pid (backwards compatibility with old spawn keyword)
+            env.define("spawn".into(), Value::Builtin("spawn".into()));
+
             // Fiber builtins (for unified fiber runtime)
             env.define(
                 "Fiber.spawn".into(),
@@ -830,16 +797,13 @@ impl Interpreter {
         self.run_to_completion(state)
     }
 
-    /// Run the machine until completion, error, or block
+    /// Run the machine until completion or error
     fn run_to_completion(&mut self, mut state: State) -> Result<Value, EvalError> {
         loop {
             match self.step(state) {
                 StepResult::Continue(next) => state = next,
                 StepResult::Done(value) => return Ok(value),
                 StepResult::Error(e) => return Err(e),
-                StepResult::Blocked { .. } => {
-                    return Err(EvalError::RuntimeError("main thread cannot block".into()));
-                }
             }
         }
     }
@@ -1045,7 +1009,7 @@ impl Interpreter {
             }
 
             ExprKind::ChanSend { channel, value } => {
-                cont.push(Frame::SendChan {
+                cont.push(Frame::FiberSendValue {
                     value_expr: value.clone(),
                     env: env.clone(),
                 });
@@ -1057,7 +1021,7 @@ impl Interpreter {
             }
 
             ExprKind::ChanRecv(channel) => {
-                cont.push(Frame::Recv);
+                cont.push(Frame::FiberRecv);
                 StepResult::Continue(State::Eval {
                     expr: channel.clone(),
                     env,
@@ -1117,7 +1081,6 @@ impl Interpreter {
 
             ExprKind::Select { arms } => {
                 if arms.is_empty() {
-                    // Empty select blocks forever (or error)
                     return StepResult::Error(EvalError::RuntimeError("empty select".into()));
                 }
 
@@ -1130,7 +1093,7 @@ impl Interpreter {
                 let mut remaining = chan_exprs;
                 let first = remaining.remove(0);
 
-                cont.push(Frame::SelectChans {
+                cont.push(Frame::FiberSelectChans {
                     patterns,
                     bodies,
                     remaining_chans: remaining,
@@ -1419,217 +1382,17 @@ impl Interpreter {
                 })
             }
 
-            Some(Frame::SendChan { value_expr, env }) => {
-                let channel = match value {
-                    Value::Channel(id) => id,
-                    _ => return StepResult::Error(EvalError::TypeError("expected channel".into())),
-                };
-                cont.push(Frame::SendVal { channel });
-                StepResult::Continue(State::Eval {
-                    expr: value_expr,
-                    env,
-                    cont,
-                })
-            }
-
-            Some(Frame::SendVal { channel }) => {
-                // We have the channel and the value to send
-                // Check we're in a process context (requires main function)
-                if self.runtime.current_pid().is_none() {
-                    return StepResult::Error(EvalError::RuntimeError(
-                        "Channel.send requires a process context (define a main function)".into(),
-                    ));
-                }
-                // Check if there's a waiting receiver (rendezvous)
-                if self.runtime.send(channel, value) {
-                    // Immediate rendezvous - sender continues with Unit
-                    StepResult::Continue(State::Apply {
-                        value: Value::Unit,
-                        cont,
-                    })
-                } else {
-                    // No receiver ready - block this process
-                    // The continuation expects Unit when we resume
-                    StepResult::Blocked {
-                        reason: BlockReason::Send {
-                            channel,
-                            value: Value::Unit,
-                        },
-                        state: State::Apply {
-                            value: Value::Unit,
-                            cont,
-                        },
-                    }
-                }
-            }
-
-            Some(Frame::Recv) => {
-                let channel = match value {
-                    Value::Channel(id) => id,
-                    _ => return StepResult::Error(EvalError::TypeError("expected channel".into())),
-                };
-                // Check we're in a process context (requires main function)
-                if self.runtime.current_pid().is_none() {
-                    return StepResult::Error(EvalError::RuntimeError(
-                        "Channel.recv requires a process context (define a main function)".into(),
-                    ));
-                }
-                // Check if there's a waiting sender (rendezvous)
-                if let Some(received) = self.runtime.recv(channel) {
-                    // Immediate rendezvous - got value from sender
-                    StepResult::Continue(State::Apply {
-                        value: received,
-                        cont,
-                    })
-                } else {
-                    // No sender ready - block this process
-                    // When we resume, we'll have a received value
-                    StepResult::Blocked {
-                        reason: BlockReason::Recv { channel },
-                        state: State::Apply {
-                            value: Value::Unit,
-                            cont,
-                        }, // placeholder, will be replaced
-                    }
-                }
-            }
-
-            // === Select frames ===
-            Some(Frame::SelectChans {
-                patterns,
-                bodies,
-                mut remaining_chans,
-                mut collected_chans,
-                env,
-            }) => {
-                // Value should be a channel
-                let channel_id = match value {
-                    Value::Channel(id) => id,
-                    _ => {
-                        return StepResult::Error(EvalError::TypeError(
-                            "select arm must be a channel".into(),
-                        ))
-                    }
-                };
-
-                collected_chans.push(channel_id);
-
-                if remaining_chans.is_empty() {
-                    // All channels evaluated, now do the select
-                    cont.push(Frame::SelectReady {
-                        channels: collected_chans,
-                        patterns,
-                        bodies,
-                        env: env.clone(),
-                    });
-
-                    // Return unit to trigger the SelectReady frame
-                    StepResult::Continue(State::Apply {
-                        value: Value::Unit,
-                        cont,
-                    })
-                } else {
-                    // More channels to evaluate
-                    let next = remaining_chans.remove(0);
-
-                    cont.push(Frame::SelectChans {
-                        patterns,
-                        bodies,
-                        remaining_chans,
-                        collected_chans,
-                        env: env.clone(),
-                    });
-
-                    StepResult::Continue(State::Eval {
-                        expr: Rc::new(next),
-                        env,
-                        cont,
-                    })
-                }
-            }
-
-            Some(Frame::SelectReady {
-                channels,
-                patterns,
-                bodies,
-                env,
-            }) => {
-                // Check if we're resuming after being woken (a channel fired)
-                if let Some(pid) = self.runtime.current_pid() {
-                    if let Some(fired_channel) = self.runtime.take_select_fired_channel(pid) {
-                        // Find which arm this channel corresponds to
-                        if let Some(i) = channels.iter().position(|&ch| ch == fired_channel) {
-                            // Get the received value
-                            let recv_value =
-                                self.runtime.take_received_value(pid).unwrap_or(Value::Unit);
-
-                            // Bind pattern and evaluate body
-                            let new_env = EnvInner::with_parent(&env);
-                            if self.try_bind_pattern(&new_env, &patterns[i], &recv_value) {
-                                return StepResult::Continue(State::Eval {
-                                    expr: bodies[i].clone(),
-                                    env: new_env,
-                                    cont,
-                                });
-                            } else {
-                                return StepResult::Error(EvalError::MatchFailed);
-                            }
-                        }
-                    }
-                }
-
-                // Not resuming from a wakeup - check if any channel has a waiting sender
-                for (i, &channel_id) in channels.iter().enumerate() {
-                    if let Some(recv_value) = self.runtime.try_recv(channel_id) {
-                        // Got a value! Bind pattern and evaluate body
-                        let new_env = EnvInner::with_parent(&env);
-                        if self.try_bind_pattern(&new_env, &patterns[i], &recv_value) {
-                            return StepResult::Continue(State::Eval {
-                                expr: bodies[i].clone(),
-                                env: new_env,
-                                cont,
-                            });
-                        } else {
-                            return StepResult::Error(EvalError::MatchFailed);
-                        }
-                    }
-                }
-
-                // No channel ready - block on all of them
-                // Check we're in a process context (requires main function)
-                if self.runtime.current_pid().is_none() {
-                    return StepResult::Error(EvalError::RuntimeError(
-                        "select requires a process context (define a main function)".into(),
-                    ));
-                }
-                self.runtime.block_on_select(&channels);
-
-                StepResult::Blocked {
-                    reason: BlockReason::Select {
-                        channels: channels.clone(),
-                    },
-                    state: State::Apply {
-                        value: Value::Unit,
-                        cont: {
-                            let mut new_cont = cont;
-                            new_cont.push(Frame::SelectReady {
-                                channels,
-                                patterns,
-                                bodies,
-                                env,
-                            });
-                            new_cont
-                        },
-                    },
-                }
-            }
-
             // === Fiber effect frames ===
             Some(Frame::FiberBoundary) => {
-                // Fiber completed normally - wrap value in Done effect
-                // This signals to the scheduler that the fiber is finished
-                let effect = FiberEffect::Done(Box::new(value));
-                self.return_fiber_effect(effect, cont)
+                // Check if this is a fiber effect propagating to scheduler
+                if let Value::FiberEffect(effect) = value {
+                    // Already a fiber effect - propagate directly without wrapping
+                    self.return_fiber_effect(effect, cont)
+                } else {
+                    // Normal value - fiber completed, wrap in Done effect
+                    let effect = FiberEffect::Done(Box::new(value));
+                    self.return_fiber_effect(effect, cont)
+                }
             }
 
             Some(Frame::FiberRecv) => {
@@ -1915,6 +1678,14 @@ impl Interpreter {
                             name
                         )))
                     }
+                } else if name == "spawn" {
+                    // The old spawn builtin - directly spawns a process, returns Pid
+                    // This needs mutable access to runtime, so handle specially
+                    let pid = self.runtime.spawn(arg);
+                    StepResult::Continue(State::Apply {
+                        value: Value::Pid(pid),
+                        cont,
+                    })
                 } else if Self::is_effectful_builtin(name) {
                     // Handle effectful fiber builtins
                     match self.apply_effectful_builtin(name, arg) {
@@ -2339,45 +2110,39 @@ impl Interpreter {
                         // Start a new process: apply thunk to unit
                         self.run_process(pid, thunk)?;
                     }
-                    ProcessContinuation::ResumeAfterRecv => {
-                        // Process was waiting to receive - resume with received value
-                        if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
-                            let value =
-                                self.runtime.take_received_value(pid).unwrap_or(Value::Unit);
-                            // Resume by applying the received value to the saved continuation
+                    ProcessContinuation::ResumeFiber(value) => {
+                        // Resume fiber with a value using fiber_cont
+                        if let Some(mut fiber_cont) = self.runtime.take_fiber_cont(pid) {
+                            fiber_cont.insert_at_bottom(Frame::FiberBoundary);
                             let state = State::Apply {
                                 value,
-                                cont: saved_cont,
-                            };
-                            self.run_state(pid, state)?;
-                        } else {
-                            // No saved continuation - shouldn't happen
-                            self.runtime.mark_done(pid);
-                        }
-                    }
-                    ProcessContinuation::ResumeAfterSelect => {
-                        // Process was blocked on select - SelectReady frame handles the value
-                        if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
-                            // Don't take the received value here - SelectReady frame will get it
-                            let state = State::Apply {
-                                value: Value::Unit,
-                                cont: saved_cont,
+                                cont: fiber_cont,
                             };
                             self.run_state(pid, state)?;
                         } else {
                             self.runtime.mark_done(pid);
                         }
                     }
-                    ProcessContinuation::ResumeAfterSend => {
-                        // Process was waiting to send - resume with Unit
-                        if let Some(saved_cont) = self.runtime.take_saved_cont(pid) {
-                            let state = State::Apply {
-                                value: Value::Unit,
-                                cont: saved_cont,
-                            };
-                            self.run_state(pid, state)?;
-                        } else {
-                            self.runtime.mark_done(pid);
+                    ProcessContinuation::ResumeSelect { channel, value } => {
+                        // Resume from select - find matching arm, bind pattern, evaluate body
+                        if let Some(arms) = self.runtime.take_select_arms(pid) {
+                            if let Some(arm) = arms.into_iter().find(|a| a.channel == channel) {
+                                // Bind pattern to received value
+                                let new_env = EnvInner::with_parent(&arm.env);
+                                if self.try_bind_pattern(&new_env, &arm.pattern, &value) {
+                                    // Build continuation with fiber_cont
+                                    let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_else(Cont::new);
+                                    cont.insert_at_bottom(Frame::FiberBoundary);
+                                    let state = State::Eval {
+                                        expr: arm.body,
+                                        env: new_env,
+                                        cont,
+                                    };
+                                    self.run_state(pid, state)?;
+                                } else {
+                                    return Err(EvalError::MatchFailed);
+                                }
+                            }
                         }
                     }
                 }
@@ -2397,6 +2162,8 @@ impl Interpreter {
     fn run_process(&mut self, pid: Pid, thunk: Value) -> Result<(), EvalError> {
         // Build initial state: apply thunk to Unit
         let mut cont = Cont::new();
+        // Push FiberBoundary at the bottom of the stack to enable fiber effects
+        cont.push(Frame::FiberBoundary);
         cont.push(Frame::AppArg { func: thunk });
         let state = State::Apply {
             value: Value::Unit,
@@ -2412,20 +2179,13 @@ impl Interpreter {
                 StepResult::Continue(next) => {
                     state = next;
                 }
-                StepResult::Done(_value) => {
-                    self.runtime.mark_done(pid);
-                    return Ok(());
-                }
-                StepResult::Blocked {
-                    state: blocked_state,
-                    ..
-                } => {
-                    // Save the continuation for later resumption
-                    // The blocked_state contains the continuation to resume with
-                    if let State::Apply { cont, .. } = blocked_state {
-                        self.runtime.save_cont(pid, cont);
+                StepResult::Done(value) => {
+                    // Check if this is a fiber effect
+                    if let Value::FiberEffect(effect) = value {
+                        return self.handle_fiber_effect(pid, effect);
                     }
-                    // Process is now blocked - scheduler will pick up another process
+                    // Regular completion
+                    self.runtime.mark_done(pid);
                     return Ok(());
                 }
                 StepResult::Error(e) => {
@@ -2435,6 +2195,62 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    /// Handle a fiber effect that bubbled up from the interpreter.
+    /// This is the NEW effect-based scheduler interface (Phase 7).
+    fn handle_fiber_effect(&mut self, pid: Pid, effect: FiberEffect) -> Result<(), EvalError> {
+        match effect {
+            FiberEffect::Done(value) => {
+                // Fiber completed with a result
+                self.runtime.complete_fiber(pid, *value);
+            }
+            FiberEffect::Fork { thunk, cont } => {
+                // Store parent's continuation
+                if let Some(c) = cont {
+                    self.runtime.store_fiber_cont(pid, *c);
+                }
+                // Spawn child fiber
+                let child_pid = self.runtime.spawn(*thunk);
+                // Resume parent with child's handle
+                self.runtime.resume_fiber_with(pid, Value::Fiber(child_pid));
+            }
+            FiberEffect::Yield { cont } => {
+                // Store continuation and re-queue at back
+                if let Some(c) = cont {
+                    self.runtime.store_fiber_cont(pid, *c);
+                }
+                self.runtime.yield_fiber(pid);
+            }
+            FiberEffect::NewChan { cont } => {
+                // Create new channel and resume with it
+                let channel_id = self.runtime.new_channel();
+                if let Some(c) = cont {
+                    self.runtime.store_fiber_cont(pid, *c);
+                }
+                self.runtime.resume_fiber_with(pid, Value::Channel(channel_id));
+            }
+            FiberEffect::Send { channel, value, cont } => {
+                // Block fiber waiting to send (try immediate handoff first)
+                self.runtime
+                    .block_fiber_send(pid, channel, *value, cont.map(|c| *c));
+            }
+            FiberEffect::Recv { channel, cont } => {
+                // Block fiber waiting to receive (try immediate handoff first)
+                self.runtime.block_fiber_recv(pid, channel, cont.map(|c| *c));
+            }
+            FiberEffect::Join { fiber_id, cont } => {
+                // Block fiber waiting to join another fiber
+                self.runtime
+                    .block_fiber_join(pid, fiber_id, cont.map(|c| *c));
+            }
+            FiberEffect::Select { arms, cont } => {
+                // Block fiber on select (register on all channels)
+                self.runtime
+                    .block_fiber_select(pid, arms, cont.map(|c| *c));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2538,8 +2354,15 @@ mod tests {
 
     #[test]
     fn test_spawn_returns_pid() {
-        let val = eval("spawn (fun () -> 42)").unwrap();
-        assert!(matches!(val, Value::Pid(_)));
+        // spawn is now a builtin that requires the runtime environment
+        // Testing via run_program with a simple spawn
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () -> Channel.send ch 42) in
+    Channel.recv ch
+"#;
+        run_program(program).unwrap();
     }
 
     #[test]

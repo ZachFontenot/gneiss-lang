@@ -1,0 +1,69 @@
+-- Dining Philosophers Problem
+--
+-- This classic concurrency problem demonstrates potential deadlock.
+-- N philosophers sit at a table with N forks. Each needs 2 forks to eat.
+-- If each picks up their left fork first, deadlock occurs!
+--
+-- This version INTENTIONALLY deadlocks to demonstrate detection.
+
+let main () =
+    -- 3 philosophers, 3 forks (represented by channels)
+    -- Each fork is a channel. Picking up = send, putting down = recv
+    let fork1 = Channel.new in
+    let fork2 = Channel.new in
+    let fork3 = Channel.new in
+
+    -- Fork servers: manage access to each fork
+    -- Fork is "available" when server is ready to receive
+    let fork_server1 = Fiber.spawn (fun () ->
+        -- Wait for pickup
+        let _ = Channel.recv fork1 in
+        -- Wait for putdown (but we'll deadlock before this)
+        let _ = Channel.recv fork1 in
+        ()
+    ) in
+
+    let fork_server2 = Fiber.spawn (fun () ->
+        let _ = Channel.recv fork2 in
+        let _ = Channel.recv fork2 in
+        ()
+    ) in
+
+    let fork_server3 = Fiber.spawn (fun () ->
+        let _ = Channel.recv fork3 in
+        let _ = Channel.recv fork3 in
+        ()
+    ) in
+
+    -- Philosopher 1: tries to pick up fork1, then fork2
+    let phil1 = Fiber.spawn (fun () ->
+        Channel.send fork1 1;  -- Pick up left fork
+        Channel.send fork2 1;  -- Pick up right fork (will block)
+        Channel.send fork2 2;  -- Put down right
+        Channel.send fork1 2   -- Put down left
+    ) in
+
+    -- Philosopher 2: tries to pick up fork2, then fork3
+    let phil2 = Fiber.spawn (fun () ->
+        Channel.send fork2 1;  -- Pick up left fork
+        Channel.send fork3 1;  -- Pick up right fork (will block)
+        Channel.send fork3 2;
+        Channel.send fork2 2
+    ) in
+
+    -- Philosopher 3: tries to pick up fork3, then fork1
+    -- This creates the circular wait -> DEADLOCK
+    let phil3 = Fiber.spawn (fun () ->
+        Channel.send fork3 1;  -- Pick up left fork
+        Channel.send fork1 1;  -- Pick up right fork (will block on fork1)
+        Channel.send fork1 2;
+        Channel.send fork3 2
+    ) in
+
+    -- Wait for completion (will never happen - deadlock!)
+    let _ = Fiber.join phil1 in
+    let _ = Fiber.join phil2 in
+    let _ = Fiber.join phil3 in
+
+    print "All philosophers finished eating!";
+    0

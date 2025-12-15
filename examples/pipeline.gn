@@ -1,0 +1,82 @@
+-- Pipeline Pattern
+--
+-- This example demonstrates a multi-stage pipeline where data flows
+-- through several processing stages connected by channels.
+--
+-- Each stage transforms the data and passes it to the next.
+-- Synchronous channels naturally provide backpressure.
+--
+-- Pipeline: Source -> Add10 -> Double -> Square -> Collector
+
+let main () =
+    -- Create pipeline channels
+    let c1 = Channel.new in
+    let c2 = Channel.new in
+    let c3 = Channel.new in
+    let c4 = Channel.new in
+
+    -- Stage 1: Source (sends initial values)
+    let source = Fiber.spawn (fun () ->
+        Channel.send c1 1;
+        Channel.send c1 2;
+        Channel.send c1 3;
+        Channel.send c1 4;
+        Channel.send c1 5
+    ) in
+
+    -- Stage 2: Add 10 to each value
+    let add10 = Fiber.spawn (fun () ->
+        let v1 = Channel.recv c1 in Channel.send c2 (v1 + 10);
+        let v2 = Channel.recv c1 in Channel.send c2 (v2 + 10);
+        let v3 = Channel.recv c1 in Channel.send c2 (v3 + 10);
+        let v4 = Channel.recv c1 in Channel.send c2 (v4 + 10);
+        let v5 = Channel.recv c1 in Channel.send c2 (v5 + 10)
+    ) in
+
+    -- Stage 3: Double each value
+    let double_stage = Fiber.spawn (fun () ->
+        let v1 = Channel.recv c2 in Channel.send c3 (v1 * 2);
+        let v2 = Channel.recv c2 in Channel.send c3 (v2 * 2);
+        let v3 = Channel.recv c2 in Channel.send c3 (v3 * 2);
+        let v4 = Channel.recv c2 in Channel.send c3 (v4 * 2);
+        let v5 = Channel.recv c2 in Channel.send c3 (v5 * 2)
+    ) in
+
+    -- Stage 4: Modulo 100 (to avoid huge numbers)
+    let mod_stage = Fiber.spawn (fun () ->
+        let v1 = Channel.recv c3 in Channel.send c4 (v1 % 100);
+        let v2 = Channel.recv c3 in Channel.send c4 (v2 % 100);
+        let v3 = Channel.recv c3 in Channel.send c4 (v3 % 100);
+        let v4 = Channel.recv c3 in Channel.send c4 (v4 % 100);
+        let v5 = Channel.recv c3 in Channel.send c4 (v5 % 100)
+    ) in
+
+    -- Collector: main receives final values
+    let r1 = Channel.recv c4 in
+    let r2 = Channel.recv c4 in
+    let r3 = Channel.recv c4 in
+    let r4 = Channel.recv c4 in
+    let r5 = Channel.recv c4 in
+
+    -- Wait for all stages
+    let _ = Fiber.join source in
+    let _ = Fiber.join add10 in
+    let _ = Fiber.join double_stage in
+    let _ = Fiber.join mod_stage in
+
+    -- Print results
+    -- Input:  1,    2,    3,    4,    5
+    -- +10:   11,   12,   13,   14,   15
+    -- *2:    22,   24,   26,   28,   30
+    -- %100:  22,   24,   26,   28,   30
+    print "Pipeline results:";
+    print r1;
+    print r2;
+    print r3;
+    print r4;
+    print r5;
+
+    let total = r1 + r2 + r3 + r4 + r5 in
+    print "Total:";
+    print total;
+    total

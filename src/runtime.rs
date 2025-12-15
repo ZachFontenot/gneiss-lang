@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
-use crate::eval::{Cont, Value};
+use crate::eval::{Cont, FiberId, SelectEffectArm, Value};
 
 /// Unique process identifier
 pub type Pid = u64;
@@ -42,34 +42,36 @@ pub enum ProcessState {
     BlockedRecv(ChannelId),
     /// Blocked waiting on multiple channels (select)
     BlockedSelect(Vec<ChannelId>),
+    /// Blocked waiting for another fiber to complete (Phase 7)
+    BlockedJoin(FiberId),
     /// Terminated
     Done,
 }
 
-/// A lightweight process
+/// A lightweight process (fiber)
 pub struct Process {
     pub pid: Pid,
     pub state: ProcessState,
     /// The continuation (thunk to call when resumed)
     pub continuation: Option<ProcessContinuation>,
-    /// Saved continuation stack when blocked (for resumption)
-    pub saved_cont: Option<Cont>,
-    /// Value received from a channel (set when unblocked)
-    pub received_value: Option<Value>,
-    /// Channel that fired when resuming from a select
-    pub select_fired_channel: Option<ChannelId>,
+    /// Fiber continuation for effect resumption
+    pub fiber_cont: Option<Cont>,
+    /// Result value when fiber completes (for join)
+    pub result: Option<Value>,
+    /// Fibers waiting to join this one
+    pub joiners: Vec<Pid>,
+    /// Select arms (stored when blocked on select)
+    pub select_arms: Option<Vec<SelectEffectArm>>,
 }
 
 /// What a process should do when it resumes
 pub enum ProcessContinuation {
     /// Start executing a thunk (initial spawn)
     Start(Value),
-    /// Resume after receiving a value - continue with saved_cont
-    ResumeAfterRecv,
-    /// Resume after sending - continue with saved_cont
-    ResumeAfterSend,
-    /// Resume after select received a value - SelectReady frame handles the value
-    ResumeAfterSelect,
+    /// Resume fiber with a value
+    ResumeFiber(Value),
+    /// Resume fiber from select with channel and value
+    ResumeSelect { channel: ChannelId, value: Value },
 }
 
 /// The runtime scheduler
@@ -112,9 +114,10 @@ impl Runtime {
             pid,
             state: ProcessState::Ready,
             continuation: Some(ProcessContinuation::Start(thunk)),
-            saved_cont: None,
-            received_value: None,
-            select_fired_channel: None,
+            fiber_cont: None,
+            result: None,
+            joiners: Vec::new(),
+            select_arms: None,
         };
 
         self.processes.insert(pid, RefCell::new(process));
@@ -139,137 +142,6 @@ impl Runtime {
     /// Get the current process ID
     pub fn current_pid(&self) -> Option<Pid> {
         self.current_pid
-    }
-
-    /// Attempt to send a value on a channel (synchronous rendezvous)
-    /// Returns true if the send completed immediately, false if blocked
-    pub fn send(&mut self, channel_id: ChannelId, value: Value) -> bool {
-        let pid = self.current_pid.expect("send called outside of process");
-
-        let mut channel = self
-            .channels
-            .get(&channel_id)
-            .expect("invalid channel")
-            .borrow_mut();
-
-        // Check if there's a waiting receiver
-        if let Some(receiver_pid) = channel.receivers.pop_front() {
-            // Direct handoff - wake up the receiver with the value
-            drop(channel);
-
-            let mut receiver = self.processes.get(&receiver_pid).unwrap().borrow_mut();
-
-            // If receiver was in a select, unregister from other channels and record which channel fired
-            if let ProcessState::BlockedSelect(ref select_channels) = receiver.state {
-                let other_channels: Vec<_> = select_channels
-                    .iter()
-                    .filter(|&&ch| ch != channel_id)
-                    .copied()
-                    .collect();
-                drop(receiver);
-
-                // Remove from other channels' receiver lists
-                for other_ch in other_channels {
-                    if let Some(ch) = self.channels.get(&other_ch) {
-                        ch.borrow_mut().receivers.retain(|&p| p != receiver_pid);
-                    }
-                }
-
-                let mut receiver = self.processes.get(&receiver_pid).unwrap().borrow_mut();
-                receiver.received_value = Some(value);
-                receiver.select_fired_channel = Some(channel_id); // Record which channel fired
-                receiver.state = ProcessState::Ready;
-                receiver.continuation = Some(ProcessContinuation::ResumeAfterSelect);
-            } else {
-                receiver.received_value = Some(value);
-                receiver.state = ProcessState::Ready;
-                receiver.continuation = Some(ProcessContinuation::ResumeAfterRecv);
-            }
-
-            self.ready_queue.push_back(receiver_pid);
-            true
-        } else {
-            // No receiver - block the sender
-            channel.senders.push_back((pid, value));
-            drop(channel);
-
-            let mut process = self.processes.get(&pid).unwrap().borrow_mut();
-            process.state = ProcessState::BlockedSend(channel_id);
-            false
-        }
-    }
-
-    /// Attempt to receive from a channel (synchronous rendezvous)
-    /// Returns Some(value) if received immediately, None if blocked
-    pub fn recv(&mut self, channel_id: ChannelId) -> Option<Value> {
-        let pid = self.current_pid.expect("recv called outside of process");
-
-        let mut channel = self
-            .channels
-            .get(&channel_id)
-            .expect("invalid channel")
-            .borrow_mut();
-
-        // Check if there's a waiting sender
-        if let Some((sender_pid, value)) = channel.senders.pop_front() {
-            // Direct handoff - wake up the sender
-            drop(channel);
-
-            let mut sender = self.processes.get(&sender_pid).unwrap().borrow_mut();
-            sender.state = ProcessState::Ready;
-            sender.continuation = Some(ProcessContinuation::ResumeAfterSend);
-            drop(sender);
-
-            self.ready_queue.push_back(sender_pid);
-            Some(value)
-        } else {
-            // No sender - block the receiver
-            channel.receivers.push_back(pid);
-            drop(channel);
-
-            let mut process = self.processes.get(&pid).unwrap().borrow_mut();
-            process.state = ProcessState::BlockedRecv(channel_id);
-            None
-        }
-    }
-
-    /// Non-blocking receive: check if sender waiting, don't block if not.
-    /// Does NOT register as a waiter. Used for select.
-    pub fn try_recv(&mut self, channel_id: ChannelId) -> Option<Value> {
-        let mut channel = self.channels.get(&channel_id)?.borrow_mut();
-
-        if let Some((sender_pid, value)) = channel.senders.pop_front() {
-            drop(channel);
-
-            // Wake up the sender
-            let mut sender = self.processes.get(&sender_pid).unwrap().borrow_mut();
-            sender.state = ProcessState::Ready;
-            sender.continuation = Some(ProcessContinuation::ResumeAfterSend);
-            drop(sender);
-
-            self.ready_queue.push_back(sender_pid);
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    /// Block current process waiting on any of the given channels (for select)
-    pub fn block_on_select(&mut self, channels: &[ChannelId]) {
-        let pid = self
-            .current_pid
-            .expect("block_on_select called outside process");
-
-        // Register as receiver on all channels
-        for &channel_id in channels {
-            if let Some(channel) = self.channels.get(&channel_id) {
-                channel.borrow_mut().receivers.push_back(pid);
-            }
-        }
-
-        // Mark process as blocked on select
-        let mut process = self.processes.get(&pid).unwrap().borrow_mut();
-        process.state = ProcessState::BlockedSelect(channels.to_vec());
     }
 
     /// Get the next ready process to run
@@ -307,34 +179,6 @@ impl Runtime {
             .and_then(|p| p.borrow_mut().continuation.take())
     }
 
-    /// Get the received value for a process
-    pub fn take_received_value(&mut self, pid: Pid) -> Option<Value> {
-        self.processes
-            .get(&pid)
-            .and_then(|p| p.borrow_mut().received_value.take())
-    }
-
-    /// Save a continuation for a blocked process
-    pub fn save_cont(&mut self, pid: Pid, cont: Cont) {
-        if let Some(process) = self.processes.get(&pid) {
-            process.borrow_mut().saved_cont = Some(cont);
-        }
-    }
-
-    /// Take the saved continuation for a process
-    pub fn take_saved_cont(&mut self, pid: Pid) -> Option<Cont> {
-        self.processes
-            .get(&pid)
-            .and_then(|p| p.borrow_mut().saved_cont.take())
-    }
-
-    /// Take the select_fired_channel for a process (used when resuming from select)
-    pub fn take_select_fired_channel(&mut self, pid: Pid) -> Option<ChannelId> {
-        self.processes
-            .get(&pid)
-            .and_then(|p| p.borrow_mut().select_fired_channel.take())
-    }
-
     /// Check if we're in a true deadlock situation
     /// A deadlock is when the main process is blocked (or there are only blocked processes left)
     /// Spawned processes being blocked after main completes is not deadlock
@@ -352,6 +196,7 @@ impl Runtime {
                     ProcessState::BlockedSend(_)
                         | ProcessState::BlockedRecv(_)
                         | ProcessState::BlockedSelect(_)
+                        | ProcessState::BlockedJoin(_)
                 ) {
                     return true; // Main is blocked = deadlock
                 }
@@ -368,6 +213,7 @@ impl Runtime {
                 ProcessState::BlockedSend(_)
                     | ProcessState::BlockedRecv(_)
                     | ProcessState::BlockedSelect(_)
+                    | ProcessState::BlockedJoin(_)
             )
         })
     }
@@ -397,6 +243,7 @@ impl Runtime {
                     ProcessState::BlockedSend(_)
                         | ProcessState::BlockedRecv(_)
                         | ProcessState::BlockedSelect(_)
+                        | ProcessState::BlockedJoin(_)
                 )
             })
             .count()
@@ -416,6 +263,230 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    // ========================================================================
+    // Phase 7: Fiber Effect-Based Methods
+    // ========================================================================
+
+    /// Store fiber's continuation for later resumption (Phase 7)
+    pub fn store_fiber_cont(&mut self, pid: Pid, cont: Cont) {
+        if let Some(process) = self.processes.get(&pid) {
+            process.borrow_mut().fiber_cont = Some(cont);
+        }
+    }
+
+    /// Take the fiber continuation for a process (Phase 7)
+    pub fn take_fiber_cont(&mut self, pid: Pid) -> Option<Cont> {
+        self.processes
+            .get(&pid)
+            .and_then(|p| p.borrow_mut().fiber_cont.take())
+    }
+
+    /// Resume fiber with a value - set continuation and re-queue as ready (Phase 7)
+    pub fn resume_fiber_with(&mut self, pid: Pid, value: Value) {
+        if let Some(process) = self.processes.get(&pid) {
+            let mut p = process.borrow_mut();
+            p.state = ProcessState::Ready;
+            p.continuation = Some(ProcessContinuation::ResumeFiber(value));
+            drop(p);
+            self.ready_queue.push_back(pid);
+        }
+    }
+
+    /// Complete a fiber and wake any joiners (Phase 7)
+    pub fn complete_fiber(&mut self, pid: Pid, result: Value) {
+        if let Some(process) = self.processes.get(&pid) {
+            let mut p = process.borrow_mut();
+            p.state = ProcessState::Done;
+            p.result = Some(result.clone());
+
+            // Wake all joiners with the result
+            let joiners = std::mem::take(&mut p.joiners);
+            drop(p);
+
+            for joiner_pid in joiners {
+                self.resume_fiber_with(joiner_pid, result.clone());
+            }
+        }
+    }
+
+    /// Yield fiber - store continuation and re-queue at back of ready queue (Phase 7)
+    pub fn yield_fiber(&mut self, pid: Pid) {
+        if let Some(process) = self.processes.get(&pid) {
+            let mut p = process.borrow_mut();
+            p.state = ProcessState::Ready;
+            p.continuation = Some(ProcessContinuation::ResumeFiber(Value::Unit));
+            drop(p);
+            self.ready_queue.push_back(pid);
+        }
+    }
+
+    /// Block fiber waiting to send - try immediate handoff first
+    pub fn block_fiber_send(&mut self, pid: Pid, channel_id: ChannelId, value: Value, cont: Option<Cont>) {
+        if let Some(c) = cont {
+            self.store_fiber_cont(pid, c);
+        }
+
+        let mut channel = match self.channels.get(&channel_id) {
+            Some(ch) => ch.borrow_mut(),
+            None => return,
+        };
+
+        if let Some(receiver_pid) = channel.receivers.pop_front() {
+            drop(channel);
+
+            let receiver = self.processes.get(&receiver_pid).unwrap().borrow();
+            let is_select = matches!(receiver.state, ProcessState::BlockedSelect(_));
+            let select_channels: Vec<ChannelId> = if let ProcessState::BlockedSelect(ref chs) = receiver.state {
+                chs.iter().filter(|&&ch| ch != channel_id).copied().collect()
+            } else {
+                Vec::new()
+            };
+            drop(receiver);
+
+            if is_select {
+                // Remove from other channels' receiver lists
+                for other_ch in select_channels {
+                    if let Some(ch) = self.channels.get(&other_ch) {
+                        ch.borrow_mut().receivers.retain(|&p| p != receiver_pid);
+                    }
+                }
+                let mut receiver = self.processes.get(&receiver_pid).unwrap().borrow_mut();
+                receiver.state = ProcessState::Ready;
+                receiver.continuation = Some(ProcessContinuation::ResumeSelect { channel: channel_id, value });
+            } else {
+                let mut receiver = self.processes.get(&receiver_pid).unwrap().borrow_mut();
+                receiver.state = ProcessState::Ready;
+                receiver.continuation = Some(ProcessContinuation::ResumeFiber(value));
+            }
+            self.ready_queue.push_back(receiver_pid);
+            self.resume_fiber_with(pid, Value::Unit);
+        } else {
+            channel.senders.push_back((pid, value));
+            drop(channel);
+            let mut process = self.processes.get(&pid).unwrap().borrow_mut();
+            process.state = ProcessState::BlockedSend(channel_id);
+        }
+    }
+
+    /// Block fiber waiting to receive - try immediate handoff first
+    pub fn block_fiber_recv(&mut self, pid: Pid, channel_id: ChannelId, cont: Option<Cont>) {
+        if let Some(c) = cont {
+            self.store_fiber_cont(pid, c);
+        }
+
+        let mut channel = match self.channels.get(&channel_id) {
+            Some(ch) => ch.borrow_mut(),
+            None => return,
+        };
+
+        if let Some((sender_pid, value)) = channel.senders.pop_front() {
+            drop(channel);
+
+            // Wake sender with Unit
+            let mut sender = self.processes.get(&sender_pid).unwrap().borrow_mut();
+            sender.state = ProcessState::Ready;
+            sender.continuation = Some(ProcessContinuation::ResumeFiber(Value::Unit));
+            drop(sender);
+            self.ready_queue.push_back(sender_pid);
+
+            // Resume receiver with value
+            self.resume_fiber_with(pid, value);
+        } else {
+            channel.receivers.push_back(pid);
+            drop(channel);
+            let mut process = self.processes.get(&pid).unwrap().borrow_mut();
+            process.state = ProcessState::BlockedRecv(channel_id);
+        }
+    }
+
+    /// Block fiber waiting to join another fiber (Phase 7)
+    pub fn block_fiber_join(&mut self, pid: Pid, target_id: FiberId, cont: Option<Cont>) {
+        // Store continuation first
+        if let Some(c) = cont {
+            self.store_fiber_cont(pid, c);
+        }
+
+        // Check if target already completed
+        if let Some(target) = self.processes.get(&target_id) {
+            let target_ref = target.borrow();
+            if target_ref.state == ProcessState::Done {
+                // Already done - resume with result immediately
+                if let Some(result) = target_ref.result.clone() {
+                    drop(target_ref);
+                    self.resume_fiber_with(pid, result);
+                    return;
+                }
+            }
+            drop(target_ref);
+
+            // Not done yet - add to joiners list
+            target.borrow_mut().joiners.push(pid);
+        }
+
+        // Mark as blocked
+        if let Some(process) = self.processes.get(&pid) {
+            process.borrow_mut().state = ProcessState::BlockedJoin(target_id);
+        }
+    }
+
+    /// Block fiber on select - register on all channels
+    pub fn block_fiber_select(&mut self, pid: Pid, arms: Vec<SelectEffectArm>, cont: Option<Cont>) {
+        if let Some(c) = cont {
+            self.store_fiber_cont(pid, c);
+        }
+
+        let channels: Vec<ChannelId> = arms.iter().map(|a| a.channel).collect();
+
+        // Try each channel for immediate handoff
+        for i in 0..arms.len() {
+            let arm_channel = arms[i].channel;
+            if let Some(channel) = self.channels.get(&arm_channel) {
+                let mut ch = channel.borrow_mut();
+                if let Some((sender_pid, value)) = ch.senders.pop_front() {
+                    drop(ch);
+
+                    // Wake sender with Unit
+                    let mut sender = self.processes.get(&sender_pid).unwrap().borrow_mut();
+                    sender.state = ProcessState::Ready;
+                    sender.continuation = Some(ProcessContinuation::ResumeFiber(Value::Unit));
+                    drop(sender);
+                    self.ready_queue.push_back(sender_pid);
+
+                    // Store arms and resume with select
+                    if let Some(process) = self.processes.get(&pid) {
+                        let mut p = process.borrow_mut();
+                        p.select_arms = Some(arms);
+                        p.state = ProcessState::Ready;
+                        p.continuation = Some(ProcessContinuation::ResumeSelect { channel: arm_channel, value });
+                        drop(p);
+                        self.ready_queue.push_back(pid);
+                    }
+                    return;
+                }
+            }
+        }
+
+        // No immediate match - store arms and block on all channels
+        if let Some(process) = self.processes.get(&pid) {
+            let mut p = process.borrow_mut();
+            p.select_arms = Some(arms);
+            p.state = ProcessState::BlockedSelect(channels.clone());
+        }
+
+        for &channel_id in &channels {
+            if let Some(channel) = self.channels.get(&channel_id) {
+                channel.borrow_mut().receivers.push_back(pid);
+            }
+        }
+    }
+
+    /// Take the select arms from a process
+    pub fn take_select_arms(&mut self, pid: Pid) -> Option<Vec<SelectEffectArm>> {
+        self.processes
+            .get(&pid)
+            .and_then(|p| p.borrow_mut().select_arms.take())
     }
 }
 

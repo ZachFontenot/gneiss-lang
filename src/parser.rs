@@ -1347,7 +1347,6 @@ impl Parser {
                 | Token::UpperIdent(_)
                 | Token::LParen
                 | Token::LBracket
-                | Token::Spawn
                 | Token::Reset
                 | Token::Shift
         )
@@ -1463,12 +1462,6 @@ impl Parser {
                         start,
                     ))
                 }
-            }
-            Token::Spawn => {
-                self.advance();
-                let body = self.parse_expr_atom()?;
-                let span = start.merge(&body.span);
-                Ok(Spanned::new(ExprKind::Spawn(Rc::new(body)), span))
             }
             Token::Reset => {
                 self.advance();

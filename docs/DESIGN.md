@@ -1,190 +1,79 @@
 # Gneiss Design Document
 
-This document captures the design rationale, key decisions, and invariants for the Gneiss programming language. It is intended to be loaded into context by AI assistants and human contributors.
+This document captures the design rationale, key decisions, and invariants for the Gneiss programming language.
 
 ## Overview
 
 Gneiss is a statically-typed functional programming language with:
 - **ML-family syntax** (inspired by OCaml)
 - **Hindley-Milner type inference** with let-polymorphism
-- **CSP-style concurrency** with synchronous (rendezvous) channels
+- **Fiber-based concurrency** built on delimited continuations
+- **Typeclasses** with dictionary passing
 
-The goal is a language where concurrent programs are safe by construction: no data races, no shared mutable state, typed channels that prevent mixed-type sends.
+The goal is a language where concurrent programs are safe by construction: no data races, no shared mutable state, typed channels that prevent mixed-type communication.
 
 ## Core Design Decisions
 
-### 1. Concurrency Model: CML, not Erlang
+### 1. Concurrency Model: Fibers + Delimited Continuations
 
-**Decision:** Synchronous rendezvous channels (Concurrent ML style), not async mailboxes (Erlang style).
-
-**Rationale:**
-- Go popularized CSP channels; this model is well-understood
-- Synchronous semantics are simpler to reason about
-- Typed channels (vs. untyped mailboxes) catch errors at compile time
-- No need for selective receive pattern matching
-
-**Implications:**
-- `Channel.send` blocks until a receiver is ready
-- `Channel.recv` blocks until a sender is ready
-- Single-process send-then-recv deadlocks (this is correct behavior)
-- Two processes must rendezvous for communication to occur
-
-**Example of correct blocking:**
-```
--- This DEADLOCKS (correctly!)
-let main () =
-  let ch = Channel.new in
-  Channel.send ch 42;   -- blocks forever, no receiver
-  Channel.recv ch       -- never reached
-```
-
-**Example of correct communication:**
-```
--- This WORKS: two processes rendezvous
-let main () =
-  let ch = Channel.new in
-  spawn (fun () -> Channel.send ch 42);
-  Channel.recv ch  -- receives 42
-```
-
-### 2. Type System: Hindley-Milner Only
-
-**Decision:** No typeclasses, no HKT, no traits, no row polymorphism (for now).
+**Decision:** Lightweight fibers with synchronous channels, implemented via delimited continuations.
 
 **Rationale:**
-- HM is well-understood and sufficient for v0.1
-- Typeclasses add significant implementation complexity
-- Can be added later without breaking existing code
-- Focus on getting concurrency semantics right first
+- Delimited continuations provide a clean foundation for suspendable computation
+- Fibers are first-class values that can be spawned, joined, and yielded
+- Synchronous (rendezvous) channels force explicit synchronization points
+- Typed channels catch communication errors at compile time
+- Single unified mechanism for all blocking operations
+
+**Key primitives:**
+```gneiss
+-- Fiber operations
+let fiber = Fiber.spawn (fun () -> computation)
+let result = Fiber.join fiber
+let _ = Fiber.yield ()
+
+-- Channel operations
+let ch = Channel.new
+Channel.send ch value
+let x = Channel.recv ch
+
+-- Select over multiple channels
+select
+| x <- ch1 -> handle_x x
+| y <- ch2 -> handle_y y
+end
+```
+
+**How it works:**
+1. All blocking operations produce `FiberEffect` values
+2. Effects bubble up to a `FiberBoundary` frame (implicit delimiter)
+3. The scheduler pattern-matches on effects and handles them uniformly
+4. Continuations are captured and stored for later resumption
+
+**Example:**
+```gneiss
+let main () =
+  let ch = Channel.new in
+  let worker = Fiber.spawn (fun () ->
+    Channel.send ch 42
+  ) in
+  let result = Channel.recv ch in
+  let _ = Fiber.join worker in
+  result
+```
+
+### 2. Type System: Hindley-Milner + Typeclasses
+
+**Decision:** HM type inference with single-parameter typeclasses.
 
 **What we have:**
 - Parametric polymorphism (`let id x = x` works at any type)
 - Let-polymorphism (polymorphic let bindings)
 - ADTs (algebraic data types) with pattern matching
 - Type inference (almost no annotations needed)
+- Typeclasses with dictionary passing
 
-**What we don't have (intentionally deferred):**
-- Typeclasses / traits
-- Higher-kinded types
-- GADTs
-- Row polymorphism / extensible records
-- Type annotations on expressions (only on top-level bindings, optionally)
-
-### 3. Value Restriction for Channels
-
-**Decision:** Apply ML-style value restriction to prevent unsound polymorphic channels.
-
-**The problem:**
-```
-let ch = Channel.new        -- What type? Channel 'a (polymorphic)?
-let _ = spawn (fun () -> Channel.send ch 42)
-let _ = spawn (fun () -> Channel.send ch "hello")  -- Unsound!
-```
-
-If `Channel.new` gets type `forall a. Channel a`, we can send different types through the same channel.
-
-**The solution:** Only generalize *syntactic values* in let bindings.
-
-Syntactic values are:
-- Literals (`42`, `true`, `"hello"`)
-- Variables
-- Lambdas (`fun x -> ...`)
-- Constructors applied to values
-- Tuples/lists of values
-
-`Channel.new` is NOT a syntactic value (it's an effectful expression), so:
-```
-let ch = Channel.new  -- NOT generalized, stays monomorphic
-```
-
-The channel's type is fixed at its first use, catching mixed-type sends at compile time.
-
-**Implementation:** See `is_syntactic_value()` in `infer.rs`.
-
-### 4. Interpreter Architecture: Defunctionalized CPS
-
-**Decision:** CPS interpreter with explicit continuation stack, not direct recursion.
-
-**Rationale:**
-- Processes must be suspendable at channel operations
-- Direct recursive `eval()` can't yield mid-expression
-- CPS allows saving continuation and resuming later
-
-**Key types:**
-```rust
-enum State {
-    Eval { expr, env, cont },   // Evaluate an expression
-    Apply { value, cont },       // Return a value to continuation
-}
-
-enum Frame {
-    AppFunc { arg, env },        // Evaluating func, arg next
-    AppArg { func },             // Have func, evaluating arg
-    Let { pattern, body, env },  // Evaluated value, bind and continue
-    // ... etc for each expression form
-}
-
-struct Cont {
-    frames: Vec<Frame>,          // The continuation stack
-}
-```
-
-**Blocking:**
-```rust
-enum StepResult {
-    Continue(State),                              // More work
-    Done(Value),                                  // Finished
-    Blocked { reason: BlockReason, state: State }, // Suspended
-}
-```
-
-When a process hits `Channel.send` with no receiver, it returns `Blocked` with its continuation saved. The scheduler picks another process. When a receiver arrives, the sender is resumed with its saved continuation.
-
-### 5. Scheduler: Cooperative, Single-Threaded
-
-**Decision:** Single-threaded cooperative scheduler for v0.1.
-
-**Rationale:**
-- Simpler to implement and debug
-- No need for synchronization primitives
-- Sufficient for demonstrating semantics
-- Can add preemption/parallelism later
-
-**Behavior:**
-- Round-robin ready queue
-- Processes yield at channel operations
-- Deadlock detected when all processes blocked and ready queue empty
-
-### 6. No Async/Buffered Channels
-
-**Decision:** Channels are strictly synchronous with no buffering.
-
-**Rationale:**
-- Simpler semantics
-- Forces explicit synchronization
-- Buffered channels can be built on top if needed
-- Matches CML semantics
-
-**NOT supported:**
-```
--- NO buffered channels
-let ch = Channel.new_buffered 10  -- doesn't exist
-
--- NO non-blocking operations
-let result = Channel.try_send ch x  -- doesn't exist
-```
-
-### 7. Typeclasses: Dictionary Passing
-
-**Decision:** Implement typeclasses using dictionary passing at runtime.
-
-**Rationale:**
-- Simpler than monomorphization (no code duplication)
-- Works with separate compilation
-- Runtime overhead acceptable for interpreted language
-- Clear semantics for constrained instances
-
-**Syntax:**
+**Typeclass syntax:**
 ```gneiss
 trait Show a =
   val show : a -> String
@@ -199,31 +88,91 @@ impl Show for (List a) where a : Show =
 end
 ```
 
-**How it works:**
-1. Type inference collects predicates (constraints) during inference
-2. Instance resolution finds matching instances for each predicate
-3. At runtime, dictionaries are constructed containing method implementations
-4. Method calls dispatch through the dictionary
-
 **Constraints:**
-- Single-parameter typeclasses only (no multi-param or HKT)
+- Single-parameter typeclasses only (no multi-param or functional dependencies)
 - Overlapping instances are detected and rejected
 - Orphan instances allowed (no coherence checking yet)
 
-### 8. Delimited Continuations
+### 3. Value Restriction for Soundness
 
-**Decision:** Implement shift/reset style delimited continuations.
+**Decision:** Apply ML-style value restriction to prevent unsound polymorphic effects.
+
+**The problem:**
+```gneiss
+let ch = Channel.new        -- What type? Channel 'a (polymorphic)?
+let _ = Fiber.spawn (fun () -> Channel.send ch 42)
+let _ = Fiber.spawn (fun () -> Channel.send ch "hello")  -- Unsound!
+```
+
+**The solution:** Only generalize *syntactic values* in let bindings.
+
+Syntactic values are: literals, variables, lambdas, constructors applied to values, tuples/lists of values.
+
+`Channel.new` is NOT a syntactic value (it's effectful), so:
+```gneiss
+let ch = Channel.new  -- NOT generalized, stays monomorphic
+```
+
+The channel's type is fixed at its first use, catching mixed-type sends at compile time.
+
+### 4. Interpreter Architecture: Effect-Based CPS
+
+**Decision:** CPS interpreter where all blocking operations produce effects handled by a unified scheduler.
+
+**Key types:**
+```rust
+enum State {
+    Eval { expr, env, cont },   // Evaluate an expression
+    Apply { value, cont },       // Return a value to continuation
+}
+
+enum Frame {
+    AppFunc { arg, env },        // Evaluating func, arg next
+    AppArg { func },             // Have func, evaluating arg
+    FiberBoundary,               // Implicit delimiter for fiber effects
+    FiberRecv,                   // Waiting for channel value
+    // ... etc
+}
+
+enum FiberEffect {
+    Done(Value),                 // Fiber completed
+    Fork { thunk, cont },        // Spawn new fiber
+    Yield { cont },              // Yield to scheduler
+    Send { channel, value, cont },
+    Recv { channel, cont },
+    Join { fiber_id, cont },
+    Select { arms, cont },
+}
+```
+
+**Effect flow:**
+1. Fiber operation (e.g., `Channel.recv ch`) pushes appropriate frame
+2. Frame captures continuation up to `FiberBoundary`
+3. `FiberEffect` value bubbles up to boundary
+4. Boundary returns `StepResult::Done(Value::FiberEffect(effect))`
+5. Scheduler handles effect, stores continuation, manages ready queue
+
+### 5. Scheduler: Cooperative, Single-Threaded
+
+**Decision:** Single-threaded cooperative scheduler.
 
 **Rationale:**
-- Composable control flow primitive
-- Can express exceptions, generators, coroutines, etc.
-- Well-studied semantics
-- Complements channel-based concurrency
+- Simpler to implement and debug
+- No need for synchronization primitives
+- Sufficient for demonstrating semantics
+- Can add parallelism later without changing the model
+
+**Behavior:**
+- Round-robin ready queue
+- Fibers yield at channel operations, explicit yield, or join
+- Deadlock detected when all fibers blocked and ready queue empty
+
+### 6. Delimited Continuations: shift/reset
+
+**Decision:** First-class delimited continuations as a user-facing feature.
 
 **Syntax:**
 ```gneiss
--- reset delimits the continuation scope
--- shift captures the continuation up to the enclosing reset
 let result = reset (
   1 + shift (fun k -> k (k 10))
 )
@@ -232,15 +181,27 @@ let result = reset (
 
 **Semantics:**
 - `reset e` evaluates `e` with a prompt (delimiter)
-- `shift (fun k -> body)` captures the continuation up to the nearest reset
-- The captured continuation `k` can be called zero, once, or multiple times
-- Calling `k v` resumes computation with `v` as the result of the shift
+- `shift (fun k -> body)` captures continuation up to nearest reset
+- Captured continuation `k` can be called zero, once, or multiple times
+- Fiber effects use the same underlying mechanism (FiberBoundary as implicit prompt)
 
-**Implementation:**
-- Uses the CPS interpreter's frame stack
-- `Frame::Prompt` marks reset boundaries
-- `Value::Continuation` holds captured frames
-- Continuation application splices frames back into the stack
+### 7. Channels: Synchronous Rendezvous
+
+**Decision:** Channels are strictly synchronous with no buffering.
+
+**Rationale:**
+- Simpler semantics
+- Forces explicit synchronization
+- Predictable behavior (send blocks until recv ready, and vice versa)
+
+**NOT supported:**
+```gneiss
+-- NO buffered channels
+let ch = Channel.new_buffered 10  -- doesn't exist
+
+-- NO non-blocking operations
+let result = Channel.try_send ch x  -- doesn't exist
+```
 
 ## Invariants
 
@@ -252,7 +213,7 @@ These properties should always hold. Violating them is a bug.
 
 2. **Channel type consistency.** Every value sent through a channel `ch : Channel T` has type `T`.
 
-3. **Value restriction prevents polymorphic effectful bindings.** `Channel.new`, `spawn`, etc. are never generalized.
+3. **Value restriction prevents polymorphic effectful bindings.** `Channel.new`, `Fiber.spawn`, etc. are never generalized.
 
 4. **Occurs check prevents infinite types.** `fun x -> x x` is rejected.
 
@@ -260,73 +221,69 @@ These properties should always hold. Violating them is a bug.
 
 5. **Rendezvous semantics.** Send and receive both block until a partner is available.
 
-6. **No data races.** Processes share nothing; all communication is through channels.
+6. **No data races.** Fibers share nothing; all communication is through channels.
 
-7. **Deadlock is detectable.** When all processes are blocked and ready queue is empty, we report deadlock (not hang silently).
+7. **Deadlock is detectable.** When all fibers are blocked and ready queue is empty, we report deadlock.
 
-8. **Process isolation.** A process cannot access another process's local variables or continuation.
+8. **Fiber isolation.** A fiber cannot access another fiber's local variables or continuation.
+
+9. **Effect uniformity.** All blocking operations go through the same effect mechanism.
 
 ## File Structure
 
 ```
 src/
   ast.rs      -- AST node definitions with Span for error reporting
-  lexer.rs    -- Hand-written tokenizer (no parser generators)
+  lexer.rs    -- Hand-written tokenizer
   parser.rs   -- Recursive descent parser
   types.rs    -- Internal type representation (Type, TypeVar, Scheme)
-  infer.rs    -- Hindley-Milner inference with value restriction
-  eval.rs     -- CPS interpreter with Frame/Cont/State
-  runtime.rs  -- Process scheduler, Channel, ready queue
+  infer.rs    -- Hindley-Milner inference with typeclasses
+  eval.rs     -- CPS interpreter with fiber effects
+  runtime.rs  -- Fiber scheduler, channels, ready queue
   main.rs     -- REPL and file execution
   lib.rs      -- Public exports
 
 tests/
-  properties.rs  -- Property-based tests for soundness
+  fiber_effects.rs  -- Fiber and channel tests
+  continuations.rs  -- Delimited continuation tests
+  typeclasses.rs    -- Typeclass tests
+  properties.rs     -- Property-based soundness tests
 
 examples/
   *.gn        -- Example programs
 
 docs/
   SYNTAX.md   -- Full syntax reference
-  ROADMAP.md  -- Development phases
+  ROADMAP.md  -- Development roadmap
+  DESIGN.md   -- This file
 ```
 
 ## Testing Strategy
 
-### Unit Tests (in each module)
+### Unit Tests
 - Lexer: token sequences
 - Parser: AST structure
-- Inference: type of expressions
+- Inference: type of expressions, typeclass resolution
 - Eval: value of expressions
-- Runtime: scheduler behavior
+- Runtime: scheduler behavior, effect handling
 
-### Property Tests (`tests/properties.rs`)
-- **Type preservation:** well-typed expr → well-typed value
-- **Progress:** well-typed expr doesn't panic
-- **Determinism:** same expr → same type/value
-- **Occurs check:** self-application rejected
-- **Let-polymorphism:** identity usable at multiple types
-
-### Concurrency Tests (in `eval.rs`)
-- Ping-pong communication
-- Multiple messages through channel
+### Fiber/Concurrency Tests
+- Spawn and join
+- Channel send/recv
+- Select over multiple channels
 - Deadlock detection
-- Interleaving requirement (programs that need scheduler to not deadlock)
+- Interleaving (programs that need scheduler cooperation)
 
 ### Soundness Canaries
 These should always be **type errors**:
-```
+```gneiss
 -- Mixed types through same channel
 let ch = Channel.new in Channel.send ch 42; Channel.send ch true
 
 -- Via spawn
-let ch = Channel.new in 
-spawn (fun () -> Channel.send ch 42);
+let ch = Channel.new in
+Fiber.spawn (fun () -> Channel.send ch 42);
 Channel.send ch true
-
--- Via function
-let f ch = Channel.send ch true
-let ch = Channel.new in Channel.send ch 42; f ch
 ```
 
 ## What NOT To Do
@@ -335,29 +292,37 @@ When working on this codebase, avoid these anti-patterns:
 
 1. **Don't make channels async/buffered.** Synchronous rendezvous is intentional.
 
-2. **Don't use parser generator libraries.** Hand-written parser gives better errors and was chosen after Chumsky failed.
+2. **Don't use parser generator libraries.** Hand-written parser gives better errors.
 
-3. **Don't add `receive` syntax (Erlang-style).** We use CML channels, not mailboxes.
+3. **Don't add implicit parallelism.** Single-threaded cooperative scheduler is intentional for now.
 
-4. **Don't add implicit parallelism.** Single-threaded cooperative scheduler is intentional.
+4. **Don't generalize non-values.** Value restriction is load-bearing for soundness.
 
-5. **Don't generalize non-values.** Value restriction is load-bearing for soundness.
+5. **Don't bypass the effect system.** All blocking operations should produce FiberEffects.
 
-6. **Don't add multi-parameter typeclasses or HKT.** Single-parameter typeclasses are sufficient for now.
+6. **Don't add multiple code paths for blocking.** The unified fiber effect system replaced the old dual-path architecture.
 
 ## Future Directions
 
-Next phases of development (see ROADMAP.md for details):
+Development is driven by a **dogfooding goal**: build a web server in Gneiss.
 
-- **Phase 2:** Error infrastructure - line:column tracking, source context in errors
-- **Phase 3:** Module system - explicit `module` keyword, imports/exports
-- **Phase 4:** REPL & tooling - history, multi-line, :load command
-- **Phase 5:** Bytecode compiler, tail call optimization
-- **Phase 6:** Real backend (BEAM/WASM/native)
+This goal identifies what language features are actually needed:
+- **Module system** - Can't build real projects without imports
+- **Record types** - Structured data (Request, Response, Config)
+- **Standard library** - String ops, data structures, Result/Option
+- **I/O primitives** - Files, sockets, read/write
+- **Async I/O integration** - Hook scheduler into epoll/kqueue/io_uring
+
+Type system opportunities:
+- **Effect tracking** - Distinguish pure functions from I/O
+- **Resource types** - Ensure handles are closed (linear/affine types)
+
+See ROADMAP.md for detailed plans.
 
 ## References
 
-- *Concurrent ML* (Reppy) - channel semantics
+- *Delimcc* - Delimited continuation implementations
 - *Types and Programming Languages* (Pierce) - HM inference
-- *Crafting Interpreters* (Nystrom) - interpreter patterns
-- Standard ML value restriction - preventing unsound polymorphism
+- *Typing Haskell in Haskell* - Typeclass implementation
+- *Crafting Interpreters* (Nystrom) - Interpreter patterns
+- Standard ML value restriction - Preventing unsound polymorphism

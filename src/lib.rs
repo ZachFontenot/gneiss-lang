@@ -8,6 +8,7 @@ pub mod lexer;
 pub mod operators;
 pub mod parser;
 pub mod runtime;
+pub mod test_support;
 pub mod types;
 
 pub use ast::{LocatedSpan, Position, Program, SourceMap, Span};
