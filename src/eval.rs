@@ -1624,11 +1624,12 @@ impl Interpreter {
                 }
             }
 
-            // === Fiber effect frames (Phase 3+ will implement these) ===
+            // === Fiber effect frames ===
             Some(Frame::FiberBoundary) => {
-                // Phase 6: Wrap value in FiberEffect::Done and return
-                // For now, just pass through the value
-                StepResult::Continue(State::Apply { value, cont })
+                // Fiber completed normally - wrap value in Done effect
+                // This signals to the scheduler that the fiber is finished
+                let effect = FiberEffect::Done(Box::new(value));
+                self.return_fiber_effect(effect, cont)
             }
 
             Some(Frame::FiberRecv) => {
