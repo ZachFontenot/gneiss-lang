@@ -530,6 +530,12 @@ pub struct Interpreter {
     class_env: ClassEnv,
     /// Type context for constructor -> type mapping
     type_ctx: TypeContext,
+    /// Module environments: module name -> Env of exports
+    module_envs: HashMap<String, Env>,
+    /// Import mappings: local name -> (module name, original name)
+    imports: HashMap<String, (String, String)>,
+    /// Module aliases: alias -> original module name
+    module_aliases: HashMap<String, String>,
 }
 
 impl Interpreter {
@@ -582,6 +588,9 @@ impl Interpreter {
             runtime: Runtime::new(),
             class_env: ClassEnv::new(),
             type_ctx: TypeContext::new(),
+            module_envs: HashMap::new(),
+            imports: HashMap::new(),
+            module_aliases: HashMap::new(),
         }
     }
 
@@ -593,6 +602,63 @@ impl Interpreter {
     /// Set the type context (called after type inference)
     pub fn set_type_ctx(&mut self, type_ctx: TypeContext) {
         self.type_ctx = type_ctx;
+    }
+
+    /// Register a module's exported values
+    pub fn register_module(&mut self, name: String, env: Env) {
+        self.module_envs.insert(name, env);
+    }
+
+    /// Add an import mapping (local name -> module.original name)
+    pub fn add_import(&mut self, local_name: String, module_name: String, original_name: String) {
+        self.imports.insert(local_name, (module_name, original_name));
+    }
+
+    /// Add a module alias (alias -> original module name)
+    pub fn add_module_alias(&mut self, alias: String, module_name: String) {
+        self.module_aliases.insert(alias, module_name);
+    }
+
+    /// Clear imports for a fresh module context
+    pub fn clear_imports(&mut self) {
+        self.imports.clear();
+        self.module_aliases.clear();
+    }
+
+    /// Resolve a module name (following aliases)
+    fn resolve_module_name<'a>(&'a self, name: &'a str) -> &'a str {
+        self.module_aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
+    }
+
+    /// Look up a name, checking imports and qualified names
+    pub fn lookup_name(&self, name: &str, env: &Env) -> Option<Value> {
+        // First check local environment
+        if let Some(v) = env.borrow().get(name) {
+            return Some(v);
+        }
+
+        // Check if it's a qualified name (Module.x)
+        if let Some(dot_pos) = name.find('.') {
+            let module_part = &name[..dot_pos];
+            let item_part = &name[dot_pos + 1..];
+
+            // Resolve module alias
+            let module_name = self.resolve_module_name(module_part);
+
+            // Look up in module's exports
+            if let Some(module_env) = self.module_envs.get(module_name) {
+                return module_env.borrow().get(item_part);
+            }
+        }
+
+        // Check unqualified imports
+        if let Some((module_name, original_name)) = self.imports.get(name) {
+            if let Some(module_env) = self.module_envs.get(module_name) {
+                return module_env.borrow().get(original_name);
+            }
+        }
+
+        None
     }
 
     /// Run a program
@@ -830,19 +896,19 @@ impl Interpreter {
             }
 
             ExprKind::Var(name) => {
-                match env.borrow().get(name) {
-                    Some(value) => StepResult::Continue(State::Apply { value, cont }),
-                    None => {
-                        // Check if this is a trait method
-                        if let Some((trait_name, _)) = self.class_env.lookup_method(name) {
-                            // Return a special "method reference" that will be resolved
-                            // when we know the argument type
-                            let value =
-                                Value::Builtin(format!("__method__{}_{}", trait_name, name));
-                            StepResult::Continue(State::Apply { value, cont })
-                        } else {
-                            StepResult::Error(EvalError::UnboundVariable(name.clone()))
-                        }
+                // Try local env first, then imports/qualified names
+                if let Some(value) = self.lookup_name(name, &env) {
+                    StepResult::Continue(State::Apply { value, cont })
+                } else {
+                    // Check if this is a trait method
+                    if let Some((trait_name, _)) = self.class_env.lookup_method(name) {
+                        // Return a special "method reference" that will be resolved
+                        // when we know the argument type
+                        let value =
+                            Value::Builtin(format!("__method__{}_{}", trait_name, name));
+                        StepResult::Continue(State::Apply { value, cont })
+                    } else {
+                        StepResult::Error(EvalError::UnboundVariable(name.clone()))
                     }
                 }
             }

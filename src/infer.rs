@@ -3,7 +3,7 @@
 use crate::ast::*;
 use crate::errors::find_similar;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -182,6 +182,16 @@ pub struct Inferencer {
     class_env: ClassEnv,
     /// Wanted predicates (constraints collected during inference)
     wanted_preds: Vec<Pred>,
+    /// Module environments: module name -> TypeEnv of exports
+    module_envs: HashMap<String, TypeEnv>,
+    /// Import mappings for current module: local name -> (module name, original name)
+    imports: HashMap<String, (String, String)>,
+    /// Module aliases: alias -> original module name
+    module_aliases: HashMap<String, String>,
+    /// Track which imports have been used (for unused import warnings)
+    used_imports: HashSet<String>,
+    /// Track which module aliases have been used
+    used_module_aliases: HashSet<String>,
 }
 
 impl Inferencer {
@@ -192,7 +202,98 @@ impl Inferencer {
             type_ctx: TypeContext::new(),
             class_env: ClassEnv::new(),
             wanted_preds: Vec::new(),
+            module_envs: HashMap::new(),
+            imports: HashMap::new(),
+            module_aliases: HashMap::new(),
+            used_imports: HashSet::new(),
+            used_module_aliases: HashSet::new(),
         }
+    }
+
+    /// Register a module's type environment for qualified access
+    pub fn register_module(&mut self, name: String, env: TypeEnv) {
+        self.module_envs.insert(name, env);
+    }
+
+    /// Add an import mapping: `import Module (item)` or `import Module (item as alias)`
+    pub fn add_import(&mut self, local_name: String, module_name: String, original_name: String) {
+        self.imports.insert(local_name, (module_name, original_name));
+    }
+
+    /// Add a module alias: `import Module as Alias`
+    pub fn add_module_alias(&mut self, alias: String, module_name: String) {
+        self.module_aliases.insert(alias, module_name);
+    }
+
+    /// Clear imports for a new module context
+    pub fn clear_imports(&mut self) {
+        self.imports.clear();
+        self.module_aliases.clear();
+        self.used_imports.clear();
+        self.used_module_aliases.clear();
+    }
+
+    /// Get list of unused selective imports
+    pub fn get_unused_imports(&self) -> Vec<String> {
+        self.imports
+            .keys()
+            .filter(|name| !self.used_imports.contains(*name))
+            .cloned()
+            .collect()
+    }
+
+    /// Get list of unused module aliases
+    pub fn get_unused_module_aliases(&self) -> Vec<String> {
+        self.module_aliases
+            .keys()
+            .filter(|alias| !self.used_module_aliases.contains(*alias))
+            .cloned()
+            .collect()
+    }
+
+    /// Look up a name, checking imports and module-qualified names.
+    /// Tracks usage for unused import warnings.
+    fn lookup_name(&mut self, env: &TypeEnv, name: &str) -> Option<Scheme> {
+        // 1. Check local environment first
+        if let Some(scheme) = env.get(name) {
+            return Some(scheme.clone());
+        }
+
+        // 2. Check unqualified imports
+        if let Some((module_name, original_name)) = self.imports.get(name).cloned() {
+            if let Some(module_env) = self.module_envs.get(&module_name) {
+                if let Some(scheme) = module_env.get(&original_name) {
+                    // Mark this import as used
+                    self.used_imports.insert(name.to_string());
+                    return Some(scheme.clone());
+                }
+            }
+        }
+
+        // 3. Check for qualified name (Module.name)
+        if let Some(dot_pos) = name.find('.') {
+            let (module_part, item_name) = name.split_at(dot_pos);
+            let item_name = &item_name[1..]; // skip the dot
+
+            // Resolve module alias if present
+            let actual_module = self.module_aliases
+                .get(module_part)
+                .cloned();
+
+            let module_to_check = actual_module.as_deref().unwrap_or(module_part);
+
+            if let Some(module_env) = self.module_envs.get(module_to_check) {
+                if let Some(scheme) = module_env.get(item_name) {
+                    // Mark module alias as used if one was used
+                    if actual_module.is_some() {
+                        self.used_module_aliases.insert(module_part.to_string());
+                    }
+                    return Some(scheme.clone());
+                }
+            }
+        }
+
+        None
     }
 
     /// Generate a fresh type variable
@@ -712,8 +813,9 @@ impl Inferencer {
 
             // Variables are pure
             ExprKind::Var(name) => {
-                let ty = if let Some(scheme) = env.get(name) {
-                    self.instantiate(scheme)
+                // Try module-aware lookup first (includes local env, imports, and qualified names)
+                let ty = if let Some(scheme) = self.lookup_name(env, name) {
+                    self.instantiate(&scheme)
                 } else if let Some((trait_name, method_ty)) = self.class_env.lookup_method(name) {
                     // Clone to avoid borrow conflicts
                     let trait_name = trait_name.to_string();
@@ -742,7 +844,11 @@ impl Inferencer {
                     instantiated
                 } else {
                     // Collect suggestions for "did you mean?"
-                    let candidates: Vec<&str> = env.keys().map(|s| s.as_str()).collect();
+                    let mut candidates: Vec<&str> = env.keys().map(|s| s.as_str()).collect();
+                    // Also suggest imported names
+                    for name in self.imports.keys() {
+                        candidates.push(name.as_str());
+                    }
                     let suggestions = find_similar(name, candidates, 2);
                     return Err(TypeError::UnboundVariable {
                         name: name.clone(),
@@ -2212,9 +2318,24 @@ impl Inferencer {
                         env.insert(binding.name.node.clone(), scheme);
                     }
                 }
-                Item::Import(_) => {
-                    // Imports are handled during module resolution (Phase 3)
-                    // Type inference for single-file programs ignores imports
+                Item::Import(import_spec) => {
+                    // Process imports to populate the import mappings
+                    let module_name = &import_spec.node.module_path;
+
+                    // Handle module alias: import Module as Alias
+                    if let Some(alias) = &import_spec.node.alias {
+                        self.add_module_alias(alias.clone(), module_name.clone());
+                    }
+
+                    // Handle selective imports: import Module (x, y as z)
+                    if let Some(items) = &import_spec.node.items {
+                        for (name, alias) in items {
+                            let local_name = alias.as_ref().unwrap_or(name).clone();
+                            self.add_import(local_name, module_name.clone(), name.clone());
+                        }
+                    }
+                    // Note: For `import Module` without selective imports, qualified access
+                    // (Module.name) is handled by lookup_name checking module_envs directly
                 }
                 Item::Expr(expr) => {
                     // Type-check top-level expressions
@@ -2588,5 +2709,109 @@ end
             .expect("Should have constrained instance");
         assert_eq!(list_instance.constraints.len(), 1);
         assert_eq!(list_instance.constraints[0].trait_name, "Show");
+    }
+
+    // ========================================================================
+    // Module / Import Tests
+    // ========================================================================
+
+    #[test]
+    fn test_unused_import_tracking() {
+        // Manually set up imports and check unused detection
+        let mut inferencer = Inferencer::new();
+
+        // Create a fake module environment
+        let mut module_env = TypeEnv::new();
+        module_env.insert("foo".to_string(), Scheme::mono(Type::Int));
+        module_env.insert("bar".to_string(), Scheme::mono(Type::String));
+        inferencer.register_module("TestModule".to_string(), module_env);
+
+        // Add imports for both items
+        inferencer.add_import("foo".to_string(), "TestModule".to_string(), "foo".to_string());
+        inferencer.add_import("bar".to_string(), "TestModule".to_string(), "bar".to_string());
+
+        // Look up only 'foo', leaving 'bar' unused
+        let env = TypeEnv::new();
+        let _ = inferencer.lookup_name(&env, "foo");
+
+        // Check unused imports
+        let unused = inferencer.get_unused_imports();
+        assert_eq!(unused.len(), 1);
+        assert!(unused.contains(&"bar".to_string()));
+    }
+
+    #[test]
+    fn test_all_imports_used() {
+        let mut inferencer = Inferencer::new();
+
+        let mut module_env = TypeEnv::new();
+        module_env.insert("x".to_string(), Scheme::mono(Type::Int));
+        module_env.insert("y".to_string(), Scheme::mono(Type::Int));
+        inferencer.register_module("M".to_string(), module_env);
+
+        inferencer.add_import("x".to_string(), "M".to_string(), "x".to_string());
+        inferencer.add_import("y".to_string(), "M".to_string(), "y".to_string());
+
+        // Use both imports
+        let env = TypeEnv::new();
+        let _ = inferencer.lookup_name(&env, "x");
+        let _ = inferencer.lookup_name(&env, "y");
+
+        // No unused imports
+        let unused = inferencer.get_unused_imports();
+        assert!(unused.is_empty());
+    }
+
+    #[test]
+    fn test_unused_module_alias() {
+        let mut inferencer = Inferencer::new();
+
+        let mut module_env = TypeEnv::new();
+        module_env.insert("func".to_string(), Scheme::mono(Type::Int));
+        inferencer.register_module("LongModuleName".to_string(), module_env);
+
+        // Add an alias that is never used
+        inferencer.add_module_alias("L".to_string(), "LongModuleName".to_string());
+
+        // Don't use qualified access via alias at all
+        let unused_aliases = inferencer.get_unused_module_aliases();
+        assert_eq!(unused_aliases.len(), 1);
+        assert!(unused_aliases.contains(&"L".to_string()));
+    }
+
+    #[test]
+    fn test_module_alias_used() {
+        let mut inferencer = Inferencer::new();
+
+        let mut module_env = TypeEnv::new();
+        module_env.insert("func".to_string(), Scheme::mono(Type::Int));
+        inferencer.register_module("LongModuleName".to_string(), module_env);
+
+        inferencer.add_module_alias("L".to_string(), "LongModuleName".to_string());
+
+        // Use qualified access via alias
+        let env = TypeEnv::new();
+        let _ = inferencer.lookup_name(&env, "L.func");
+
+        let unused_aliases = inferencer.get_unused_module_aliases();
+        assert!(unused_aliases.is_empty());
+    }
+
+    #[test]
+    fn test_clear_imports_resets_usage() {
+        let mut inferencer = Inferencer::new();
+
+        let mut module_env = TypeEnv::new();
+        module_env.insert("x".to_string(), Scheme::mono(Type::Int));
+        inferencer.register_module("M".to_string(), module_env);
+        inferencer.add_import("x".to_string(), "M".to_string(), "x".to_string());
+
+        let env = TypeEnv::new();
+        let _ = inferencer.lookup_name(&env, "x");
+        assert!(inferencer.get_unused_imports().is_empty());
+
+        // Clear should reset everything
+        inferencer.clear_imports();
+        assert!(inferencer.get_unused_imports().is_empty()); // No imports anymore
     }
 }
