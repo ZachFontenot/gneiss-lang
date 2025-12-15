@@ -252,6 +252,17 @@ pub enum BlockReason {
     Select { channels: Vec<ChannelId> },
 }
 
+/// Result of applying an effectful builtin function
+/// Used for Fiber.spawn, Fiber.join, Fiber.yield
+pub enum BuiltinResult {
+    /// Builtin completed with a value
+    Value(Value),
+    /// Builtin needs to produce a fiber effect (requires continuation capture)
+    Effect(FiberEffect),
+    /// Builtin needs more arguments (partial application)
+    Partial { name: String, args: Vec<Value> },
+}
+
 // ============================================================================
 // Fiber Effects (for unified concurrency model)
 // ============================================================================
@@ -387,6 +398,9 @@ pub enum Value {
     /// Built-in function
     Builtin(String),
 
+    /// Partially applied builtin (waiting for more arguments)
+    BuiltinPartial { name: String, args: Vec<Value> },
+
     /// A captured delimited continuation
     Continuation {
         frames: Vec<Frame>,
@@ -421,6 +435,7 @@ impl Value {
             Value::Pid(_) => "Pid",
             Value::Channel(_) => "Channel",
             Value::Builtin(_) => "Builtin",
+            Value::BuiltinPartial { .. } => "BuiltinPartial",
             Value::Continuation { .. } => "Continuation",
             Value::Fiber(_) => "Fiber",
             Value::FiberEffect(_) => "FiberEffect",
@@ -582,6 +597,17 @@ impl Interpreter {
                 Value::Builtin("char_to_string".into()),
             );
             env.define("char_to_int".into(), Value::Builtin("char_to_int".into()));
+
+            // Fiber builtins (for unified fiber runtime)
+            env.define(
+                "Fiber.spawn".into(),
+                Value::Builtin("Fiber.spawn".into()),
+            );
+            env.define("Fiber.join".into(), Value::Builtin("Fiber.join".into()));
+            env.define(
+                "Fiber.yield".into(),
+                Value::Builtin("Fiber.yield".into()),
+            );
         }
 
         Self {
@@ -1663,17 +1689,40 @@ impl Interpreter {
             }
 
             Some(Frame::FiberFork) => {
-                // Phase 5: Capture continuation, return Fork effect
-                StepResult::Error(EvalError::RuntimeError(
-                    "FiberFork not yet implemented".into(),
-                ))
+                // Thunk evaluated, capture continuation and return Fork effect
+                match self.capture_to_fiber_boundary(&mut cont) {
+                    Ok(captured) => {
+                        let effect = FiberEffect::Fork {
+                            thunk: Box::new(value),
+                            cont: Some(Box::new(captured)),
+                        };
+                        self.return_fiber_effect(effect, cont)
+                    }
+                    Err(e) => StepResult::Error(e),
+                }
             }
 
             Some(Frame::FiberJoin) => {
-                // Phase 5: Capture continuation, return Join effect
-                StepResult::Error(EvalError::RuntimeError(
-                    "FiberJoin not yet implemented".into(),
-                ))
+                // Fiber handle evaluated, capture continuation and return Join effect
+                let fiber_id = match &value {
+                    Value::Fiber(id) => *id,
+                    _ => {
+                        return StepResult::Error(EvalError::RuntimeError(
+                            "FiberJoin: expected Fiber value".into(),
+                        ))
+                    }
+                };
+
+                match self.capture_to_fiber_boundary(&mut cont) {
+                    Ok(captured) => {
+                        let effect = FiberEffect::Join {
+                            fiber_id,
+                            cont: Some(Box::new(captured)),
+                        };
+                        self.return_fiber_effect(effect, cont)
+                    }
+                    Err(e) => StepResult::Error(e),
+                }
             }
 
             Some(Frame::FiberSelectChans {
@@ -1865,6 +1914,31 @@ impl Interpreter {
                             name
                         )))
                     }
+                } else if Self::is_effectful_builtin(name) {
+                    // Handle effectful fiber builtins
+                    match self.apply_effectful_builtin(name, arg) {
+                        Ok(BuiltinResult::Value(value)) => {
+                            StepResult::Continue(State::Apply { value, cont })
+                        }
+                        Ok(BuiltinResult::Effect(mut effect)) => {
+                            // Capture continuation to FiberBoundary and attach to effect
+                            match self.capture_to_fiber_boundary(&mut cont) {
+                                Ok(captured) => {
+                                    effect = effect.with_cont(captured);
+                                    self.return_fiber_effect(effect, cont)
+                                }
+                                Err(e) => StepResult::Error(e),
+                            }
+                        }
+                        Ok(BuiltinResult::Partial { name, args }) => {
+                            // Need more arguments
+                            StepResult::Continue(State::Apply {
+                                value: Value::BuiltinPartial { name, args },
+                                cont,
+                            })
+                        }
+                        Err(e) => StepResult::Error(e),
+                    }
                 } else {
                     match self.apply_builtin(name, arg) {
                         Ok(value) => StepResult::Continue(State::Apply { value, cont }),
@@ -1898,6 +1972,18 @@ impl Interpreter {
 
                 // The argument becomes the "return value" to those frames
                 StepResult::Continue(State::Apply { value: arg, cont })
+            }
+
+            Value::BuiltinPartial { name, mut args } => {
+                // Add argument to the partial application
+                args.push(arg);
+
+                // For now, fiber builtins only take 1 arg, so this shouldn't happen
+                // If we add multi-arg effectful builtins, we'd check arity here
+                StepResult::Error(EvalError::RuntimeError(format!(
+                    "BuiltinPartial with {} args not yet supported",
+                    args.len()
+                )))
             }
 
             _ => StepResult::Error(EvalError::TypeError(format!(
@@ -2062,6 +2148,46 @@ impl Interpreter {
         }
     }
 
+    /// Apply an effectful builtin function.
+    /// Returns BuiltinResult which may require continuation capture.
+    fn apply_effectful_builtin(&self, name: &str, arg: Value) -> Result<BuiltinResult, EvalError> {
+        match name {
+            "Fiber.spawn" => {
+                // arg should be a thunk (() -> a)
+                // Return a Fork effect - continuation capture happens at call site
+                Ok(BuiltinResult::Effect(FiberEffect::Fork {
+                    thunk: Box::new(arg),
+                    cont: None, // Will be filled in by caller after capture
+                }))
+            }
+            "Fiber.join" => {
+                // arg should be a Fiber<A>
+                match arg {
+                    Value::Fiber(fiber_id) => Ok(BuiltinResult::Effect(FiberEffect::Join {
+                        fiber_id,
+                        cont: None, // Will be filled in by caller after capture
+                    })),
+                    _ => Err(EvalError::TypeError(
+                        "Fiber.join expects a Fiber value".into(),
+                    )),
+                }
+            }
+            "Fiber.yield" => {
+                // arg should be ()
+                Ok(BuiltinResult::Effect(FiberEffect::Yield { cont: None }))
+            }
+            _ => Err(EvalError::RuntimeError(format!(
+                "unknown effectful builtin: {}",
+                name
+            ))),
+        }
+    }
+
+    /// Check if a builtin name is an effectful fiber builtin
+    fn is_effectful_builtin(name: &str) -> bool {
+        matches!(name, "Fiber.spawn" | "Fiber.join" | "Fiber.yield")
+    }
+
     fn print_value(&self, val: &Value) {
         match val {
             Value::Int(n) => print!("{}", n),
@@ -2101,6 +2227,9 @@ impl Interpreter {
             Value::Pid(pid) => print!("<pid:{}>", pid),
             Value::Channel(id) => print!("<channel:{}>", id),
             Value::Builtin(name) => print!("<builtin:{}>", name),
+            Value::BuiltinPartial { name, args } => {
+                print!("<builtin-partial:{}({} args)>", name, args.len())
+            }
             Value::Continuation { .. } => print!("<continuation>"),
             Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
             Value::Fiber(id) => print!("<fiber:{}>", id),

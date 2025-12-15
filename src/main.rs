@@ -271,6 +271,9 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::Pid(pid) => print!("<pid:{}>", pid),
         gneiss::Value::Channel(id) => print!("<channel:{}>", id),
         gneiss::Value::Builtin(name) => print!("<builtin:{}>", name),
+        gneiss::Value::BuiltinPartial { name, args } => {
+            print!("<builtin-partial:{}({} args)>", name, args.len())
+        }
         gneiss::Value::Continuation { .. } => print!("<continuation>"),
         gneiss::Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
         gneiss::Value::Fiber(id) => print!("<fiber:{}>", id),
