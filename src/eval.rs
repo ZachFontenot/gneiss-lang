@@ -195,6 +195,11 @@ impl Cont {
         Self { frames: Vec::new() }
     }
 
+    /// Create a Cont from a vector of frames (used when capturing continuations)
+    pub fn from_frames(frames: Vec<Frame>) -> Self {
+        Self { frames }
+    }
+
     pub fn push(&mut self, frame: Frame) {
         self.frames.push(frame);
     }
@@ -2056,6 +2061,46 @@ impl Interpreter {
             Value::Fiber(id) => print!("<fiber:{}>", id),
             Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
         }
+    }
+
+    // === Fiber effect helpers ===
+
+    /// Capture frames from continuation up to (but not including) FiberBoundary.
+    /// Unlike shift's capture to Prompt, FiberBoundary remains on the stack.
+    /// Returns the captured frames as a new Cont.
+    fn capture_to_fiber_boundary(&self, cont: &mut Cont) -> Result<Cont, EvalError> {
+        let mut captured = Vec::new();
+
+        loop {
+            match cont.pop() {
+                None => {
+                    return Err(EvalError::RuntimeError(
+                        "fiber effect without enclosing FiberBoundary".into(),
+                    ));
+                }
+                Some(Frame::FiberBoundary) => {
+                    // Found delimiter - put it back (unlike Prompt, we keep it)
+                    cont.push(Frame::FiberBoundary);
+                    break;
+                }
+                Some(frame) => {
+                    captured.push(frame);
+                }
+            }
+        }
+
+        // Frames were popped innermost-first; reverse so outermost is first
+        captured.reverse();
+        Ok(Cont::from_frames(captured))
+    }
+
+    /// Return a FiberEffect value via the Apply state.
+    /// This allows the scheduler to pattern match on the effect.
+    fn return_fiber_effect(&self, effect: FiberEffect, cont: Cont) -> StepResult {
+        StepResult::Continue(State::Apply {
+            value: Value::FiberEffect(effect),
+            cont,
+        })
     }
 
     /// Try to bind a pattern, returning false if it doesn't match
