@@ -130,6 +130,50 @@ pub enum Frame {
         bodies: Vec<Rc<Expr>>,
         env: Env,
     },
+
+    // === Fiber effect frames (unified runtime) ===
+    /// Implicit delimiter for fiber continuations.
+    /// Unlike Prompt, FiberBoundary remains on stack after capture.
+    FiberBoundary,
+
+    /// After evaluating channel expr in fiber recv
+    FiberRecv,
+
+    /// After evaluating channel expr in fiber send, evaluate the value
+    FiberSendValue { value_expr: Rc<Expr>, env: Env },
+
+    /// Channel and value both evaluated, ready to produce Send effect
+    FiberSendReady { channel: ChannelId },
+
+    /// After evaluating thunk expression for fiber spawn
+    FiberFork,
+
+    /// After evaluating fiber handle for join
+    FiberJoin,
+
+    /// Evaluating channel expressions for fiber select, collecting them
+    FiberSelectChans {
+        /// Patterns for each arm (parallel to channels being collected)
+        patterns: Vec<Pattern>,
+        /// Body expressions for each arm
+        bodies: Vec<Rc<Expr>>,
+        /// Channel expressions still to evaluate
+        remaining_chans: Vec<Expr>,
+        /// Channel IDs already evaluated
+        collected_chans: Vec<ChannelId>,
+        env: Env,
+    },
+
+    /// All channels evaluated for fiber select, ready to produce Select effect
+    FiberSelectReady {
+        /// Channel IDs to select from
+        channels: Vec<ChannelId>,
+        /// Corresponding patterns
+        patterns: Vec<Pattern>,
+        /// Corresponding bodies
+        bodies: Vec<Rc<Expr>>,
+        env: Env,
+    },
 }
 
 /// What kind of collection we're building
@@ -1547,6 +1591,120 @@ impl Interpreter {
                         },
                     },
                 }
+            }
+
+            // === Fiber effect frames (Phase 3+ will implement these) ===
+            Some(Frame::FiberBoundary) => {
+                // Phase 6: Wrap value in FiberEffect::Done and return
+                // For now, just pass through the value
+                StepResult::Continue(State::Apply { value, cont })
+            }
+
+            Some(Frame::FiberRecv) => {
+                // Phase 4: Capture continuation, return Recv effect
+                StepResult::Error(EvalError::RuntimeError(
+                    "FiberRecv not yet implemented".into(),
+                ))
+            }
+
+            Some(Frame::FiberSendValue { value_expr, env }) => {
+                // Phase 4: Channel evaluated, now evaluate value
+                let channel = match &value {
+                    Value::Channel(id) => *id,
+                    _ => {
+                        return StepResult::Error(EvalError::RuntimeError(
+                            "FiberSendValue: expected channel".into(),
+                        ))
+                    }
+                };
+                cont.push(Frame::FiberSendReady { channel });
+                StepResult::Continue(State::Eval {
+                    expr: value_expr,
+                    env,
+                    cont,
+                })
+            }
+
+            Some(Frame::FiberSendReady { channel: _ }) => {
+                // Phase 4: Capture continuation, return Send effect
+                StepResult::Error(EvalError::RuntimeError(
+                    "FiberSendReady not yet implemented".into(),
+                ))
+            }
+
+            Some(Frame::FiberFork) => {
+                // Phase 5: Capture continuation, return Fork effect
+                StepResult::Error(EvalError::RuntimeError(
+                    "FiberFork not yet implemented".into(),
+                ))
+            }
+
+            Some(Frame::FiberJoin) => {
+                // Phase 5: Capture continuation, return Join effect
+                StepResult::Error(EvalError::RuntimeError(
+                    "FiberJoin not yet implemented".into(),
+                ))
+            }
+
+            Some(Frame::FiberSelectChans {
+                patterns,
+                bodies,
+                remaining_chans,
+                mut collected_chans,
+                env,
+            }) => {
+                // Collecting channels for fiber select
+                let channel = match &value {
+                    Value::Channel(id) => *id,
+                    _ => {
+                        return StepResult::Error(EvalError::RuntimeError(
+                            "FiberSelectChans: expected channel".into(),
+                        ))
+                    }
+                };
+                collected_chans.push(channel);
+
+                if remaining_chans.is_empty() {
+                    // All channels collected, ready to produce Select effect
+                    cont.push(Frame::FiberSelectReady {
+                        channels: collected_chans,
+                        patterns,
+                        bodies,
+                        env,
+                    });
+                    StepResult::Continue(State::Apply {
+                        value: Value::Unit,
+                        cont,
+                    })
+                } else {
+                    // More channels to evaluate
+                    let mut remaining = remaining_chans;
+                    let next = remaining.remove(0);
+                    cont.push(Frame::FiberSelectChans {
+                        patterns,
+                        bodies,
+                        remaining_chans: remaining,
+                        collected_chans,
+                        env: env.clone(),
+                    });
+                    StepResult::Continue(State::Eval {
+                        expr: Rc::new(next),
+                        env,
+                        cont,
+                    })
+                }
+            }
+
+            Some(Frame::FiberSelectReady {
+                channels: _,
+                patterns: _,
+                bodies: _,
+                env: _,
+            }) => {
+                // Phase 4: Capture continuation, return Select effect
+                StepResult::Error(EvalError::RuntimeError(
+                    "FiberSelectReady not yet implemented".into(),
+                ))
             }
         }
     }
