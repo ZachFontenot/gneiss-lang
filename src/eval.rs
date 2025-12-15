@@ -1606,10 +1606,27 @@ impl Interpreter {
             }
 
             Some(Frame::FiberRecv) => {
-                // Phase 4: Capture continuation, return Recv effect
-                StepResult::Error(EvalError::RuntimeError(
-                    "FiberRecv not yet implemented".into(),
-                ))
+                // Channel evaluated, capture continuation and return Recv effect
+                let channel = match &value {
+                    Value::Channel(id) => *id,
+                    _ => {
+                        return StepResult::Error(EvalError::RuntimeError(
+                            "FiberRecv: expected channel".into(),
+                        ))
+                    }
+                };
+
+                // Capture continuation to FiberBoundary
+                match self.capture_to_fiber_boundary(&mut cont) {
+                    Ok(captured) => {
+                        let effect = FiberEffect::Recv {
+                            channel,
+                            cont: Some(Box::new(captured)),
+                        };
+                        self.return_fiber_effect(effect, cont)
+                    }
+                    Err(e) => StepResult::Error(e),
+                }
             }
 
             Some(Frame::FiberSendValue { value_expr, env }) => {
@@ -1630,11 +1647,19 @@ impl Interpreter {
                 })
             }
 
-            Some(Frame::FiberSendReady { channel: _ }) => {
-                // Phase 4: Capture continuation, return Send effect
-                StepResult::Error(EvalError::RuntimeError(
-                    "FiberSendReady not yet implemented".into(),
-                ))
+            Some(Frame::FiberSendReady { channel }) => {
+                // Value evaluated, capture continuation and return Send effect
+                match self.capture_to_fiber_boundary(&mut cont) {
+                    Ok(captured) => {
+                        let effect = FiberEffect::Send {
+                            channel,
+                            value: Box::new(value),
+                            cont: Some(Box::new(captured)),
+                        };
+                        self.return_fiber_effect(effect, cont)
+                    }
+                    Err(e) => StepResult::Error(e),
+                }
             }
 
             Some(Frame::FiberFork) => {
@@ -1701,15 +1726,35 @@ impl Interpreter {
             }
 
             Some(Frame::FiberSelectReady {
-                channels: _,
-                patterns: _,
-                bodies: _,
-                env: _,
+                channels,
+                patterns,
+                bodies,
+                env,
             }) => {
-                // Phase 4: Capture continuation, return Select effect
-                StepResult::Error(EvalError::RuntimeError(
-                    "FiberSelectReady not yet implemented".into(),
-                ))
+                // All channels collected, capture continuation and return Select effect
+                match self.capture_to_fiber_boundary(&mut cont) {
+                    Ok(captured) => {
+                        // Convert patterns/bodies/env into SelectEffectArms
+                        let arms: Vec<SelectEffectArm> = channels
+                            .into_iter()
+                            .zip(patterns.into_iter())
+                            .zip(bodies.into_iter())
+                            .map(|((channel, pattern), body)| SelectEffectArm {
+                                channel,
+                                pattern,
+                                body,
+                                env: env.clone(),
+                            })
+                            .collect();
+
+                        let effect = FiberEffect::Select {
+                            arms,
+                            cont: Some(Box::new(captured)),
+                        };
+                        self.return_fiber_effect(effect, cont)
+                    }
+                    Err(e) => StepResult::Error(e),
+                }
             }
         }
     }
