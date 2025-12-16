@@ -1,0 +1,93 @@
+-- Dictionary (Dict) - String-keyed persistent hashmap
+-- Demonstrating all Dict builtins
+
+-- Create an empty dictionary
+let empty = Dict.new ()
+
+-- Insert key-value pairs (returns new dict, original unchanged)
+let d1 = Dict.insert "name" "Alice" empty
+let d2 = Dict.insert "age" "30" d1
+let d3 = Dict.insert "city" "Seattle" d2
+
+-- Dict.size - get number of entries
+let _ = print "=== Basic Operations ==="
+let _ = print "Dictionary:"
+let _ = print d3
+let _ = print "Size:"
+let _ = print (Dict.size d3)
+
+-- Dict.get - lookup returns Option
+let _ = print ""
+let _ = print "=== Lookups (Dict.get) ==="
+let name_result = Dict.get "name" d3
+let missing_result = Dict.get "email" d3
+
+let _ = print "Get 'name':"
+let _ = print name_result
+
+let _ = print "Get 'email' (missing):"
+let _ = print missing_result
+
+-- Pattern match on lookup result
+let greet = fun dict ->
+    match Dict.get "name" dict with
+    | Some n -> "Hello, " ++ n ++ "!"
+    | None -> "Hello, stranger!"
+
+let _ = print "Greeting:"
+let _ = print (greet d3)
+
+-- Dict.contains - check if key exists
+let _ = print ""
+let _ = print "=== Contains Check ==="
+let _ = print "Contains 'name':"
+let _ = print (Dict.contains "name" d3)
+let _ = print "Contains 'email':"
+let _ = print (Dict.contains "email" d3)
+
+-- Dict.remove - remove a key (returns new dict)
+let _ = print ""
+let _ = print "=== Remove Key ==="
+let d4 = Dict.remove "age" d3
+let _ = print "After removing 'age':"
+let _ = print d4
+let _ = print "Size after remove:"
+let _ = print (Dict.size d4)
+
+-- Dict.keys - get list of all keys
+let _ = print ""
+let _ = print "=== Keys and Values ==="
+let _ = print "Keys:"
+let _ = print (Dict.keys d3)
+
+-- Dict.values - get list of all values
+let _ = print "Values:"
+let _ = print (Dict.values d3)
+
+-- Building a config dictionary
+let _ = print ""
+let _ = print "=== Practical Example: Config ==="
+
+let make_config = fun host port debug ->
+    Dict.insert "host" host
+        (Dict.insert "port" port
+            (Dict.insert "debug" debug (Dict.new ())))
+
+let config = make_config "localhost" "8080" "true"
+let _ = print "Config:"
+let _ = print config
+
+-- Update config (immutable - creates new dict)
+let prod_config = Dict.insert "host" "prod.example.com"
+    (Dict.insert "debug" "false" config)
+
+let _ = print "Production config:"
+let _ = print prod_config
+
+let _ = print ""
+let _ = print "=== Immutability Demo ==="
+let _ = print "Original config unchanged:"
+let _ = print config
+
+let _ = print ""
+let _ = print "Done!"

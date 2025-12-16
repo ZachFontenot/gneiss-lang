@@ -294,6 +294,33 @@ pub enum ExprKind {
         /// Body to execute with continuation bound
         body: Rc<Expr>,
     },
+
+    // ========================================================================
+    // Records
+    // ========================================================================
+    /// Record literal: Request { method = "GET", path = "/" }
+    Record {
+        /// Type name (e.g., "Request")
+        name: Ident,
+        /// Field assignments: (field_name, value)
+        fields: Vec<(Ident, Expr)>,
+    },
+
+    /// Field access: expr.field
+    FieldAccess {
+        /// The record expression
+        record: Rc<Expr>,
+        /// The field name to access
+        field: Ident,
+    },
+
+    /// Record update: { base with field = value, ... }
+    RecordUpdate {
+        /// The base record expression
+        base: Rc<Expr>,
+        /// Field updates: (field_name, new_value)
+        updates: Vec<(Ident, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -447,6 +474,15 @@ pub enum PatternKind {
     Constructor {
         name: Ident,
         args: Vec<Pattern>,
+    },
+
+    // Record pattern: Request { method, path } or Request { method = m, path = p }
+    Record {
+        /// The record type name
+        name: Ident,
+        /// Field patterns: (field_name, optional binding pattern)
+        /// If pattern is None, the field name is used as the variable binding
+        fields: Vec<(Ident, Option<Pattern>)>,
     },
 }
 
@@ -606,12 +642,27 @@ pub enum Decl {
         name: Ident,
         type_sig: TypeExpr,
     },
+
+    // Record type declaration: type Request = { method : String, path : String }
+    Record {
+        visibility: Visibility,
+        name: Ident,
+        params: Vec<Ident>,
+        fields: Vec<RecordField>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct Constructor {
     pub name: Ident,
     pub fields: Vec<TypeExpr>,
+}
+
+/// A field in a record type declaration: field_name : Type
+#[derive(Debug, Clone)]
+pub struct RecordField {
+    pub name: Ident,
+    pub ty: TypeExpr,
 }
 
 /// A method signature in a trait declaration: val show : a -> String

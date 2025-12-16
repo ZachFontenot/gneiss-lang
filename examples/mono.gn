@@ -1,0 +1,7 @@
+let map f lst =
+  match lst with
+  | [] -> []
+  | hd :: rest -> (f hd :: map f rest)
+
+let string_mapped = map (fun s -> s ++ "!") ["a", "b", "c"]
+let int_mapped = map (fun x -> x + 1) [1,2,3]

@@ -268,6 +268,56 @@ fn format_type_error_for_test(
             );
             ("TYPE ERROR", msg, span.as_ref(), vec![])
         }
+        TypeError::UnknownRecordType { name, span } => (
+            "NAME ERROR",
+            format!("I cannot find a record type named `{}`.", name),
+            Some(span),
+            vec![],
+        ),
+        TypeError::MissingRecordField {
+            record_type,
+            field,
+            span,
+        } => (
+            "RECORD ERROR",
+            format!(
+                "The record type `{}` requires a field named `{}`.",
+                record_type, field
+            ),
+            Some(span),
+            vec![],
+        ),
+        TypeError::UnknownRecordField {
+            record_type,
+            field,
+            span,
+        } => (
+            "RECORD ERROR",
+            format!(
+                "The record type `{}` has no field named `{}`.",
+                record_type, field
+            ),
+            Some(span),
+            vec![],
+        ),
+        TypeError::NotARecordType { ty, span } => (
+            "TYPE ERROR",
+            format!("I expected a record type, but found `{}`.", ty),
+            Some(span),
+            vec![],
+        ),
+        TypeError::CannotInferRecordType { span } => (
+            "TYPE ERROR",
+            "I cannot infer the record type for this update expression.".to_string(),
+            Some(span),
+            vec![],
+        ),
+        TypeError::Other(msg) => (
+            "ERROR",
+            msg.clone(),
+            None,
+            vec![],
+        ),
     };
 
     out.push_str(&format_header(header, colors));

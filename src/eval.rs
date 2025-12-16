@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::*;
+use crate::prelude::parse_prelude;
 use crate::runtime::{ChannelId, Pid, ProcessContinuation, Runtime};
 use crate::types::{ClassEnv, Pred, Type, TypeContext};
 use thiserror::Error;
@@ -143,6 +144,44 @@ pub enum Frame {
         bodies: Vec<Rc<Expr>>,
         env: Env,
     },
+
+    /// After evaluating record, access the field
+    FieldAccess { field: String },
+
+    /// After evaluating base record, evaluate update fields
+    RecordUpdate {
+        /// Field names for the updates
+        update_field_names: Vec<String>,
+        /// Remaining update expressions to evaluate
+        remaining_updates: Vec<Expr>,
+        /// Accumulated updated values
+        collected_updates: Vec<(String, Value)>,
+        env: Env,
+    },
+
+    /// All update values evaluated, merge with base record
+    RecordUpdateApply {
+        /// Base record value
+        base: Value,
+        /// Updates to apply (field name -> new value)
+        updates: Vec<(String, Value)>,
+    },
+
+    /// Continue evaluating record update fields
+    RecordUpdateContinue {
+        /// Current field name being evaluated
+        current_field_name: String,
+        /// Remaining field names
+        remaining_field_names: Vec<String>,
+        /// Remaining update expressions
+        remaining_updates: Vec<Expr>,
+        env: Env,
+    },
+
+    /// Collect the last update field value
+    RecordUpdateCollectLast {
+        field_name: String,
+    },
 }
 
 /// What kind of collection we're building
@@ -151,6 +190,7 @@ pub enum CollectKind {
     List,
     Tuple,
     Constructor { name: String },
+    Record { type_name: String, field_names: Vec<String> },
 }
 
 /// The continuation stack
@@ -334,8 +374,8 @@ pub enum Value {
     Char(char),
     Unit,
 
-    /// A list
-    List(Vec<Value>),
+    /// A list (persistent/immutable vector for O(log n) operations)
+    List(im::Vector<Value>),
 
     /// A tuple
     Tuple(Vec<Value>),
@@ -381,6 +421,18 @@ pub enum Value {
 
     /// A suspended fiber effect awaiting runtime/scheduler handling
     FiberEffect(FiberEffect),
+
+    /// A record value with named fields (persistent hashmap for O(log m) updates)
+    Record {
+        type_name: String,
+        fields: im::HashMap<String, Value>,
+    },
+
+    /// A dictionary value (String-keyed persistent hashmap)
+    Dictionary(im::HashMap<String, Value>),
+
+    /// A set value (String elements, persistent hashset)
+    Set(im::HashSet<String>),
 }
 
 impl Value {
@@ -404,6 +456,9 @@ impl Value {
             Value::Fiber(_) => "Fiber",
             Value::FiberEffect(_) => "FiberEffect",
             Value::Dict { .. } => "Dict",
+            Value::Record { .. } => "Record",
+            Value::Dictionary(_) => "Dictionary",
+            Value::Set(_) => "Set",
         }
     }
 
@@ -418,7 +473,7 @@ impl Value {
             Value::Unit => Type::Unit,
             Value::List(items) => {
                 // Infer element type from first item, or use a fresh var
-                let elem_ty = items.first().map(|v| v.to_type()).unwrap_or(Type::Unit);
+                let elem_ty = items.front().map(|v| v.to_type()).unwrap_or(Type::Unit);
                 Type::list(elem_ty)
             }
             Value::Tuple(items) => Type::Tuple(items.iter().map(|v| v.to_type()).collect()),
@@ -428,6 +483,16 @@ impl Value {
             },
             Value::Pid(_) => Type::Pid,
             Value::Channel(_) => Type::Channel(Rc::new(Type::Unit)), // Simplified
+            Value::Record { type_name, .. } => Type::Constructor {
+                name: type_name.clone(),
+                args: vec![], // Simplified - don't track type args at runtime
+            },
+            Value::Dictionary(dict) => {
+                // Infer value type from first entry, or use Unit
+                let val_ty = dict.values().next().map(|v| v.to_type()).unwrap_or(Type::Unit);
+                Type::Dict(Rc::new(val_ty))
+            }
+            Value::Set(_) => Type::Set,
             _ => Type::Unit, // Fallback for closures, continuations, etc.
         }
     }
@@ -443,7 +508,7 @@ impl Value {
             Value::Unit => Type::Unit,
             Value::List(items) => {
                 let elem_ty = items
-                    .first()
+                    .front()
                     .map(|v| v.to_type_with_ctx(type_ctx))
                     .unwrap_or(Type::Unit);
                 Type::list(elem_ty)
@@ -467,6 +532,17 @@ impl Value {
             }
             Value::Pid(_) => Type::Pid,
             Value::Channel(_) => Type::Channel(Rc::new(Type::Unit)),
+            Value::Record { type_name, .. } => Type::Constructor {
+                name: type_name.clone(),
+                args: vec![],
+            },
+            Value::Dictionary(dict) => {
+                let val_ty = dict.values().next()
+                    .map(|v| v.to_type_with_ctx(type_ctx))
+                    .unwrap_or(Type::Unit);
+                Type::Dict(Rc::new(val_ty))
+            }
+            Value::Set(_) => Type::Set,
             _ => Type::Unit,
         }
     }
@@ -581,6 +657,26 @@ impl Interpreter {
                 "Fiber.yield".into(),
                 Value::Builtin("Fiber.yield".into()),
             );
+
+            // Dict builtins (String-keyed dictionary)
+            env.define("Dict.new".into(), Value::Builtin("Dict.new".into()));
+            env.define("Dict.insert".into(), Value::Builtin("Dict.insert".into()));
+            env.define("Dict.get".into(), Value::Builtin("Dict.get".into()));
+            env.define("Dict.remove".into(), Value::Builtin("Dict.remove".into()));
+            env.define("Dict.contains".into(), Value::Builtin("Dict.contains".into()));
+            env.define("Dict.keys".into(), Value::Builtin("Dict.keys".into()));
+            env.define("Dict.values".into(), Value::Builtin("Dict.values".into()));
+            env.define("Dict.size".into(), Value::Builtin("Dict.size".into()));
+
+            // Set builtins (String-element set)
+            env.define("Set.new".into(), Value::Builtin("Set.new".into()));
+            env.define("Set.insert".into(), Value::Builtin("Set.insert".into()));
+            env.define("Set.contains".into(), Value::Builtin("Set.contains".into()));
+            env.define("Set.remove".into(), Value::Builtin("Set.remove".into()));
+            env.define("Set.union".into(), Value::Builtin("Set.union".into()));
+            env.define("Set.intersect".into(), Value::Builtin("Set.intersect".into()));
+            env.define("Set.size".into(), Value::Builtin("Set.size".into()));
+            env.define("Set.toList".into(), Value::Builtin("Set.toList".into()));
         }
 
         Self {
@@ -625,6 +721,21 @@ impl Interpreter {
         self.module_aliases.clear();
     }
 
+    /// Create an environment containing only the exported names from global_env
+    pub fn create_exports_env(&self, exports: &std::collections::HashSet<String>) -> Env {
+        let exports_env = EnvInner::new();
+        {
+            let global = self.global_env.borrow();
+            let mut exp = exports_env.borrow_mut();
+            for name in exports {
+                if let Some(value) = global.get(name) {
+                    exp.define(name.clone(), value);
+                }
+            }
+        }
+        exports_env
+    }
+
     /// Resolve a module name (following aliases)
     fn resolve_module_name<'a>(&'a self, name: &'a str) -> &'a str {
         self.module_aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
@@ -665,7 +776,18 @@ impl Interpreter {
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
         let mut last_expr_value = Value::Unit;
 
-        // Process all items in order: declarations bind values, expressions execute
+        // Parse and evaluate prelude (Option, Result, id, const, flip)
+        let prelude = parse_prelude()
+            .map_err(|e| EvalError::TypeError(format!("Prelude error: {}", e)))?;
+
+        // Evaluate prelude declarations first
+        for item in &prelude.items {
+            if let Item::Decl(decl) = item {
+                self.eval_decl(decl)?;
+            }
+        }
+
+        // Process all user items in order: declarations bind values, expressions execute
         for item in &program.items {
             match item {
                 Item::Import(_) => {
@@ -789,6 +911,11 @@ impl Interpreter {
                         .borrow_mut()
                         .define(binding.name.node.clone(), closure);
                 }
+                Ok(())
+            }
+            Decl::Record { .. } => {
+                // Record type declarations are handled during type inference
+                // At runtime, nothing to do (like ADT type declarations)
                 Ok(())
             }
         }
@@ -1177,6 +1304,65 @@ impl Interpreter {
                     cont,
                 })
             }
+
+            // ========================================================================
+            // Records
+            // ========================================================================
+            ExprKind::Record { name, fields } => {
+                // Collect field names and expressions
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.to_string()).collect();
+                let field_exprs: Vec<Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
+
+                self.start_collect(
+                    CollectKind::Record {
+                        type_name: name.to_string(),
+                        field_names,
+                    },
+                    field_exprs,
+                    env,
+                    cont,
+                )
+            }
+
+            ExprKind::FieldAccess { record, field } => {
+                cont.push(Frame::FieldAccess {
+                    field: field.to_string(),
+                });
+                StepResult::Continue(State::Eval {
+                    expr: record.clone(),
+                    env,
+                    cont,
+                })
+            }
+
+            ExprKind::RecordUpdate { base, updates } => {
+                // Collect update field names and expressions
+                let update_field_names: Vec<String> =
+                    updates.iter().map(|(n, _)| n.to_string()).collect();
+                let update_exprs: Vec<Expr> = updates.iter().map(|(_, e)| e.clone()).collect();
+
+                if update_exprs.is_empty() {
+                    // No updates, just evaluate and return the base
+                    StepResult::Continue(State::Eval {
+                        expr: base.clone(),
+                        env,
+                        cont,
+                    })
+                } else {
+                    // Push frame to collect updates, then push frame to eval base
+                    cont.push(Frame::RecordUpdate {
+                        update_field_names,
+                        remaining_updates: update_exprs,
+                        collected_updates: vec![],
+                        env: env.clone(),
+                    });
+                    StepResult::Continue(State::Eval {
+                        expr: base.clone(),
+                        env,
+                        cont,
+                    })
+                }
+            }
         }
     }
 
@@ -1191,11 +1377,15 @@ impl Interpreter {
         if exprs.is_empty() {
             // No elements - immediately produce the value
             let value = match kind {
-                CollectKind::List => Value::List(vec![]),
+                CollectKind::List => Value::List(im::Vector::new()),
                 CollectKind::Tuple => Value::Tuple(vec![]),
                 CollectKind::Constructor { name } => Value::Constructor {
                     name,
                     fields: vec![],
+                },
+                CollectKind::Record { type_name, .. } => Value::Record {
+                    type_name,
+                    fields: im::HashMap::new(),
                 },
             };
             StepResult::Continue(State::Apply { value, cont })
@@ -1383,10 +1573,20 @@ impl Interpreter {
                 if remaining.is_empty() {
                     // All collected, produce the value
                     let result = match kind {
-                        CollectKind::List => Value::List(acc),
+                        CollectKind::List => Value::List(acc.into_iter().collect()),
                         CollectKind::Tuple => Value::Tuple(acc),
                         CollectKind::Constructor { name } => {
                             Value::Constructor { name, fields: acc }
+                        }
+                        CollectKind::Record {
+                            type_name,
+                            field_names,
+                        } => {
+                            let fields: im::HashMap<String, Value> = field_names
+                                .into_iter()
+                                .zip(acc.into_iter())
+                                .collect();
+                            Value::Record { type_name, fields }
                         }
                     };
                     StepResult::Continue(State::Apply {
@@ -1639,6 +1839,182 @@ impl Interpreter {
                     Err(e) => StepResult::Error(e),
                 }
             }
+
+            // ========================================================================
+            // Record frames
+            // ========================================================================
+            Some(Frame::FieldAccess { field }) => {
+                // Extract field from record value
+                match value {
+                    Value::Record { fields, .. } => {
+                        if let Some(field_value) = fields.get(&field) {
+                            StepResult::Continue(State::Apply {
+                                value: field_value.clone(),
+                                cont,
+                            })
+                        } else {
+                            StepResult::Error(EvalError::RuntimeError(format!(
+                                "record has no field '{}'",
+                                field
+                            )))
+                        }
+                    }
+                    _ => StepResult::Error(EvalError::TypeError(format!(
+                        "field access on non-record value: {}",
+                        value.type_name()
+                    ))),
+                }
+            }
+
+            Some(Frame::RecordUpdate {
+                update_field_names,
+                mut remaining_updates,
+                collected_updates,
+                env,
+            }) => {
+                // We just evaluated the base record
+                // Now evaluate the first update expression
+                if remaining_updates.is_empty() {
+                    // No updates, just return the base (shouldn't happen, handled in eval)
+                    StepResult::Continue(State::Apply { value, cont })
+                } else {
+                    let first_update = remaining_updates.remove(0);
+                    let first_field_name = update_field_names[0].clone();
+                    let remaining_field_names = update_field_names[1..].to_vec();
+
+                    if remaining_updates.is_empty() {
+                        // This is the last update, apply after it's done
+                        cont.push(Frame::RecordUpdateApply {
+                            base: value,
+                            updates: collected_updates,
+                        });
+                        // We also need to capture this field name to pair with value
+                        cont.push(Frame::RecordUpdateCollectLast {
+                            field_name: first_field_name,
+                        });
+                    } else {
+                        // More updates to go
+                        cont.push(Frame::RecordUpdateApply {
+                            base: value,
+                            updates: collected_updates,
+                        });
+                        cont.push(Frame::RecordUpdateContinue {
+                            current_field_name: first_field_name,
+                            remaining_field_names,
+                            remaining_updates: remaining_updates.clone(),
+                            env: env.clone(),
+                        });
+                    }
+                    StepResult::Continue(State::Eval {
+                        expr: Rc::new(first_update),
+                        env,
+                        cont,
+                    })
+                }
+            }
+
+            Some(Frame::RecordUpdateContinue {
+                current_field_name,
+                remaining_field_names,
+                mut remaining_updates,
+                env,
+            }) => {
+                // We just evaluated an update expression
+                // Pop the RecordUpdateApply frame to add this update and push it back
+                if let Some(Frame::RecordUpdateApply { base, mut updates }) = cont.pop() {
+                    updates.push((current_field_name, value));
+
+                    if remaining_updates.is_empty() {
+                        // All updates collected, apply them
+                        cont.push(Frame::RecordUpdateApply { base, updates });
+                        // Return unit to trigger the apply (will be ignored)
+                        StepResult::Continue(State::Apply {
+                            value: Value::Unit,
+                            cont,
+                        })
+                    } else {
+                        let next_update = remaining_updates.remove(0);
+                        let next_field_name = remaining_field_names[0].clone();
+                        let next_remaining_field_names = remaining_field_names[1..].to_vec();
+
+                        cont.push(Frame::RecordUpdateApply { base, updates });
+
+                        if remaining_updates.is_empty() {
+                            // This is the last update
+                            cont.push(Frame::RecordUpdateCollectLast {
+                                field_name: next_field_name,
+                            });
+                        } else {
+                            cont.push(Frame::RecordUpdateContinue {
+                                current_field_name: next_field_name,
+                                remaining_field_names: next_remaining_field_names,
+                                remaining_updates: remaining_updates.clone(),
+                                env: env.clone(),
+                            });
+                        }
+                        StepResult::Continue(State::Eval {
+                            expr: Rc::new(next_update),
+                            env,
+                            cont,
+                        })
+                    }
+                } else {
+                    StepResult::Error(EvalError::RuntimeError(
+                        "RecordUpdateContinue without RecordUpdateApply frame".into(),
+                    ))
+                }
+            }
+
+            Some(Frame::RecordUpdateCollectLast { field_name }) => {
+                // We evaluated the last update field, now pair it and apply
+                if let Some(Frame::RecordUpdateApply { base, mut updates }) = cont.pop() {
+                    updates.push((field_name, value));
+
+                    // Now apply all updates to the base
+                    match base {
+                        Value::Record {
+                            type_name,
+                            mut fields,
+                        } => {
+                            for (field_name, new_value) in updates {
+                                fields.insert(field_name, new_value);
+                            }
+                            StepResult::Continue(State::Apply {
+                                value: Value::Record { type_name, fields },
+                                cont,
+                            })
+                        }
+                        _ => StepResult::Error(EvalError::TypeError(
+                            "record update on non-record value".into(),
+                        )),
+                    }
+                } else {
+                    StepResult::Error(EvalError::RuntimeError(
+                        "RecordUpdateCollectLast without RecordUpdateApply frame".into(),
+                    ))
+                }
+            }
+
+            Some(Frame::RecordUpdateApply { base, updates }) => {
+                // Apply accumulated updates to base record
+                match base {
+                    Value::Record {
+                        type_name,
+                        mut fields,
+                    } => {
+                        for (field_name, new_value) in updates {
+                            fields.insert(field_name, new_value);
+                        }
+                        StepResult::Continue(State::Apply {
+                            value: Value::Record { type_name, fields },
+                            cont,
+                        })
+                    }
+                    _ => StepResult::Error(EvalError::TypeError(
+                        "record update on non-record value".into(),
+                    )),
+                }
+            }
         }
     }
 
@@ -1820,12 +2196,191 @@ impl Interpreter {
                 // Add argument to the partial application
                 args.push(arg);
 
-                // For now, fiber builtins only take 1 arg, so this shouldn't happen
-                // If we add multi-arg effectful builtins, we'd check arity here
-                StepResult::Error(EvalError::RuntimeError(format!(
-                    "BuiltinPartial with {} args not yet supported",
-                    args.len()
-                )))
+                // Check if we have all arguments for known multi-arg builtins
+                match (name.as_str(), args.len()) {
+                    // Dict.insert key value dict -> 3 args
+                    ("Dict.insert", 3) => {
+                        let dict = args.pop().unwrap();
+                        let value = args.pop().unwrap();
+                        let key = args.pop().unwrap();
+                        match (key, dict) {
+                            (Value::String(k), Value::Dictionary(mut d)) => {
+                                d.insert(k, value);
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Dictionary(d),
+                                    cont,
+                                })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Dict.insert: expected Dictionary".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Dict.insert: key must be String".into(),
+                            )),
+                        }
+                    }
+                    // Dict.get key dict -> 2 args
+                    ("Dict.get", 2) => {
+                        let dict = args.pop().unwrap();
+                        let key = args.pop().unwrap();
+                        match (key, dict) {
+                            (Value::String(k), Value::Dictionary(d)) => {
+                                let result = match d.get(&k) {
+                                    Some(v) => Value::Constructor {
+                                        name: "Some".into(),
+                                        fields: vec![v.clone()],
+                                    },
+                                    None => Value::Constructor {
+                                        name: "None".into(),
+                                        fields: vec![],
+                                    },
+                                };
+                                StepResult::Continue(State::Apply { value: result, cont })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Dict.get: expected Dictionary".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Dict.get: key must be String".into(),
+                            )),
+                        }
+                    }
+                    // Dict.remove key dict -> 2 args
+                    ("Dict.remove", 2) => {
+                        let dict = args.pop().unwrap();
+                        let key = args.pop().unwrap();
+                        match (key, dict) {
+                            (Value::String(k), Value::Dictionary(mut d)) => {
+                                d.remove(&k);
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Dictionary(d),
+                                    cont,
+                                })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Dict.remove: expected Dictionary".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Dict.remove: key must be String".into(),
+                            )),
+                        }
+                    }
+                    // Dict.contains key dict -> 2 args
+                    ("Dict.contains", 2) => {
+                        let dict = args.pop().unwrap();
+                        let key = args.pop().unwrap();
+                        match (key, dict) {
+                            (Value::String(k), Value::Dictionary(d)) => {
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Bool(d.contains_key(&k)),
+                                    cont,
+                                })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Dict.contains: expected Dictionary".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Dict.contains: key must be String".into(),
+                            )),
+                        }
+                    }
+                    // Set.insert elem set -> 2 args
+                    ("Set.insert", 2) => {
+                        let set = args.pop().unwrap();
+                        let elem = args.pop().unwrap();
+                        match (elem, set) {
+                            (Value::String(e), Value::Set(mut s)) => {
+                                s.insert(e);
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Set(s),
+                                    cont,
+                                })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Set.insert: expected Set".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Set.insert: element must be String".into(),
+                            )),
+                        }
+                    }
+                    // Set.contains elem set -> 2 args
+                    ("Set.contains", 2) => {
+                        let set = args.pop().unwrap();
+                        let elem = args.pop().unwrap();
+                        match (elem, set) {
+                            (Value::String(e), Value::Set(s)) => {
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Bool(s.contains(&e)),
+                                    cont,
+                                })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Set.contains: expected Set".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Set.contains: element must be String".into(),
+                            )),
+                        }
+                    }
+                    // Set.remove elem set -> 2 args
+                    ("Set.remove", 2) => {
+                        let set = args.pop().unwrap();
+                        let elem = args.pop().unwrap();
+                        match (elem, set) {
+                            (Value::String(e), Value::Set(s)) => {
+                                let new_set = s.without(&e);
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Set(new_set),
+                                    cont,
+                                })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Set.remove: expected Set".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Set.remove: element must be String".into(),
+                            )),
+                        }
+                    }
+                    // Set.union set1 set2 -> 2 args
+                    ("Set.union", 2) => {
+                        let set2 = args.pop().unwrap();
+                        let set1 = args.pop().unwrap();
+                        match (set1, set2) {
+                            (Value::Set(s1), Value::Set(s2)) => {
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Set(s1.union(s2)),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Set.union: expected two Sets".into(),
+                            )),
+                        }
+                    }
+                    // Set.intersect set1 set2 -> 2 args
+                    ("Set.intersect", 2) => {
+                        let set2 = args.pop().unwrap();
+                        let set1 = args.pop().unwrap();
+                        match (set1, set2) {
+                            (Value::Set(s1), Value::Set(s2)) => {
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Set(s1.intersection(s2)),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Set.intersect: expected two Sets".into(),
+                            )),
+                        }
+                    }
+                    // Not enough args yet, return partial
+                    _ => StepResult::Continue(State::Apply {
+                        value: Value::BuiltinPartial { name, args },
+                        cont,
+                    }),
+                }
             }
 
             _ => StepResult::Error(EvalError::TypeError(format!(
@@ -1887,16 +2442,14 @@ impl Interpreter {
             (BinOp::And, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
             (BinOp::Or, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
 
-            // List operations
+            // List operations (using persistent data structure for O(log n) sharing)
             (BinOp::Cons, val, Value::List(list)) => {
-                let mut new_list = vec![val.clone()];
-                new_list.extend(list.clone());
+                let mut new_list = list.clone();
+                new_list.push_front(val.clone());
                 Ok(Value::List(new_list))
             }
             (BinOp::Concat, Value::List(a), Value::List(b)) => {
-                let mut new_list = a.clone();
-                new_list.extend(b.clone());
-                Ok(Value::List(new_list))
+                Ok(Value::List(a.clone() + b.clone()))
             }
             (BinOp::Concat, Value::String(a), Value::String(b)) => {
                 Ok(Value::String(format!("{}{}", a, b)))
@@ -1957,7 +2510,7 @@ impl Interpreter {
             },
             "string_to_chars" => match arg {
                 Value::String(s) => {
-                    let chars: Vec<Value> = s.chars().map(Value::Char).collect();
+                    let chars: im::Vector<Value> = s.chars().map(Value::Char).collect();
                     Ok(Value::List(chars))
                 }
                 _ => Err(EvalError::TypeError("expected string".into())),
@@ -1982,6 +2535,53 @@ impl Interpreter {
             "char_to_int" => match arg {
                 Value::Char(c) => Ok(Value::Int(c as i64)),
                 _ => Err(EvalError::TypeError("expected char".into())),
+            },
+            // Dict builtins
+            "Dict.new" => Ok(Value::Dictionary(im::HashMap::new())),
+            "Dict.keys" => match arg {
+                Value::Dictionary(d) => {
+                    let keys: im::Vector<Value> = d.keys().map(|k| Value::String(k.clone())).collect();
+                    Ok(Value::List(keys))
+                }
+                _ => Err(EvalError::TypeError("Dict.keys: expected Dictionary".into())),
+            },
+            "Dict.values" => match arg {
+                Value::Dictionary(d) => {
+                    let values: im::Vector<Value> = d.values().cloned().collect();
+                    Ok(Value::List(values))
+                }
+                _ => Err(EvalError::TypeError("Dict.values: expected Dictionary".into())),
+            },
+            "Dict.size" => match arg {
+                Value::Dictionary(d) => Ok(Value::Int(d.len() as i64)),
+                _ => Err(EvalError::TypeError("Dict.size: expected Dictionary".into())),
+            },
+            // Multi-arg Dict builtins - return partial with first arg
+            "Dict.insert" | "Dict.get" | "Dict.remove" | "Dict.contains" => {
+                Ok(Value::BuiltinPartial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
+            },
+            // Set builtins
+            "Set.new" => Ok(Value::Set(im::HashSet::new())),
+            "Set.size" => match arg {
+                Value::Set(s) => Ok(Value::Int(s.len() as i64)),
+                _ => Err(EvalError::TypeError("Set.size: expected Set".into())),
+            },
+            "Set.toList" => match arg {
+                Value::Set(s) => {
+                    let list: im::Vector<Value> = s.iter().map(|e| Value::String(e.clone())).collect();
+                    Ok(Value::List(list))
+                }
+                _ => Err(EvalError::TypeError("Set.toList: expected Set".into())),
+            },
+            // Multi-arg Set builtins - return partial with first arg
+            "Set.insert" | "Set.contains" | "Set.remove" | "Set.union" | "Set.intersect" => {
+                Ok(Value::BuiltinPartial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
             },
             _ => Err(EvalError::RuntimeError(format!(
                 "unknown builtin: {}",
@@ -2076,6 +2676,44 @@ impl Interpreter {
             Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
             Value::Fiber(id) => print!("<fiber:{}>", id),
             Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
+            Value::Record { type_name, fields } => {
+                print!("{} {{ ", type_name);
+                let mut first = true;
+                for (field_name, field_value) in fields {
+                    if !first {
+                        print!(", ");
+                    }
+                    first = false;
+                    print!("{} = ", field_name);
+                    self.print_value(field_value);
+                }
+                print!(" }}");
+            }
+            Value::Dictionary(dict) => {
+                print!("{{");
+                let mut first = true;
+                for (key, value) in dict {
+                    if !first {
+                        print!(", ");
+                    }
+                    first = false;
+                    print!("\"{}\": ", key);
+                    self.print_value(value);
+                }
+                print!("}}");
+            }
+            Value::Set(set) => {
+                print!("Set {{");
+                let mut first = true;
+                for elem in set {
+                    if !first {
+                        print!(", ");
+                    }
+                    first = false;
+                    print!("\"{}\"", elem);
+                }
+                print!("}}");
+            }
         }
     }
 
@@ -2146,8 +2784,10 @@ impl Interpreter {
                 .all(|(p, v)| self.try_bind_pattern(env, p, v)),
 
             (PatternKind::Cons { head, tail }, Value::List(vals)) if !vals.is_empty() => {
-                self.try_bind_pattern(env, head, &vals[0])
-                    && self.try_bind_pattern(env, tail, &Value::List(vals[1..].to_vec()))
+                let head_val = vals.front().unwrap();
+                let tail_vals = vals.clone().split_off(1);
+                self.try_bind_pattern(env, head, head_val)
+                    && self.try_bind_pattern(env, tail, &Value::List(tail_vals))
             }
 
             (
@@ -2163,6 +2803,35 @@ impl Interpreter {
                 PatternKind::Constructor { name: pn, args },
                 Value::Constructor { name: vn, fields },
             ) if pn == vn && args.is_empty() && fields.is_empty() => true,
+
+            // Record pattern matching
+            (
+                PatternKind::Record {
+                    name: pn,
+                    fields: pat_fields,
+                },
+                Value::Record {
+                    type_name: vn,
+                    fields: val_fields,
+                },
+            ) if pn == vn => {
+                // All pattern fields must exist in the value and match
+                pat_fields.iter().all(|(field_name, sub_pat_opt)| {
+                    if let Some(field_value) = val_fields.get(field_name.as_str()) {
+                        match sub_pat_opt {
+                            Some(sub_pat) => self.try_bind_pattern(env, sub_pat, field_value),
+                            None => {
+                                // Punned field: { method } binds variable `method` to field value
+                                env.borrow_mut()
+                                    .define(field_name.to_string(), field_value.clone());
+                                true
+                            }
+                        }
+                    } else {
+                        false // Field not found
+                    }
+                })
+            }
 
             _ => false,
         }

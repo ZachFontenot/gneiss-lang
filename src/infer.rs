@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::errors::find_similar;
+use crate::prelude::parse_prelude;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -149,6 +150,34 @@ pub enum TypeError {
         ty: Type,
         span: Option<Span>,
     },
+    #[error("unknown record type: {name}")]
+    UnknownRecordType {
+        name: String,
+        span: Span,
+    },
+    #[error("missing record field: {field}")]
+    MissingRecordField {
+        record_type: String,
+        field: String,
+        span: Span,
+    },
+    #[error("unknown record field: {field}")]
+    UnknownRecordField {
+        record_type: String,
+        field: String,
+        span: Span,
+    },
+    #[error("not a record type: {ty}")]
+    NotARecordType {
+        ty: Type,
+        span: Span,
+    },
+    #[error("cannot infer record type from update expression")]
+    CannotInferRecordType {
+        span: Span,
+    },
+    #[error("{0}")]
+    Other(String),
 }
 
 impl TypeError {
@@ -406,6 +435,12 @@ impl Inferencer {
             // Fibers (typed fiber handles)
             (Type::Fiber(t1), Type::Fiber(t2)) => self.unify_inner(t1, t2, span),
 
+            // Dictionaries (String-keyed maps)
+            (Type::Dict(t1), Type::Dict(t2)) => self.unify_inner(t1, t2, span),
+
+            // Sets (String elements)
+            (Type::Set, Type::Set) => Ok(()),
+
             // Named constructors
             (
                 Type::Constructor { name: n1, args: a1 },
@@ -510,6 +545,7 @@ impl Inferencer {
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
             Type::Channel(t) => Type::Channel(Rc::new(self.substitute(t, subst))),
             Type::Fiber(t) => Type::Fiber(Rc::new(self.substitute(t, subst))),
+            Type::Dict(t) => Type::Dict(Rc::new(self.substitute(t, subst))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
                 args: args.iter().map(|t| self.substitute(t, subst)).collect(),
@@ -699,6 +735,11 @@ impl Inferencer {
                 generics,
                 current_level,
             ))),
+            Type::Dict(t) => Type::Dict(Rc::new(Self::apply_generic_subst_to_type_static(
+                t,
+                generics,
+                current_level,
+            ))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
                 args: args
@@ -744,6 +785,7 @@ impl Inferencer {
             ),
             Type::Channel(t) => Type::Channel(Rc::new(self.generalize_inner(t, generics))),
             Type::Fiber(t) => Type::Fiber(Rc::new(self.generalize_inner(t, generics))),
+            Type::Dict(t) => Type::Dict(Rc::new(self.generalize_inner(t, generics))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
                 args: args
@@ -1647,6 +1689,198 @@ impl Inferencer {
                     answer_after: body_result.ty,
                 })
             }
+
+            // ========================================================================
+            // Records
+            // ========================================================================
+            ExprKind::Record { name, fields } => {
+                // Look up the record type by name
+                if let Some(info) = self.type_ctx.get_record(name).cloned() {
+                    // Create fresh type variables for the type parameters
+                    let mut type_args = Vec::new();
+                    for _ in 0..info.type_params {
+                        type_args.push(self.fresh_var());
+                    }
+
+                    // Build substitution from generic params to fresh type vars
+                    let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
+                    for (i, ty) in type_args.iter().enumerate() {
+                        subst.insert(i as TypeVarId, ty.clone());
+                    }
+
+                    // Check that all required fields are provided
+                    let provided_fields: HashSet<&str> =
+                        fields.iter().map(|(n, _)| n.as_str()).collect();
+                    let required_fields: HashSet<&str> =
+                        info.field_names.iter().map(|s| s.as_str()).collect();
+
+                    for required in &required_fields {
+                        if !provided_fields.contains(required) {
+                            return Err(TypeError::MissingRecordField {
+                                record_type: name.clone(),
+                                field: required.to_string(),
+                                span: expr.span.clone(),
+                            });
+                        }
+                    }
+
+                    // Check for unknown fields
+                    for (field_name, _) in fields {
+                        if !required_fields.contains(field_name.as_str()) {
+                            return Err(TypeError::UnknownRecordField {
+                                record_type: name.clone(),
+                                field: field_name.clone(),
+                                span: expr.span.clone(),
+                            });
+                        }
+                    }
+
+                    // Type check each field value
+                    for (field_name, field_expr) in fields {
+                        if let Some(expected_ty) = info.field_types.get(field_name) {
+                            let expected = self.substitute(expected_ty, &subst);
+                            let actual = self.infer_expr(env, field_expr)?;
+                            self.unify_at(&expected, &actual, &field_expr.span)?;
+                        }
+                    }
+
+                    // The result type is the record type with the inferred type args
+                    let result_ty = Type::Constructor {
+                        name: info.type_name.clone(),
+                        args: type_args,
+                    };
+                    Ok(InferResult::pure(result_ty, ans))
+                } else {
+                    Err(TypeError::UnknownRecordType {
+                        name: name.clone(),
+                        span: expr.span.clone(),
+                    })
+                }
+            }
+
+            ExprKind::FieldAccess { record, field } => {
+                // Check if this is a module-qualified access (Module.name)
+                if let ExprKind::Var(module_name) = &record.node {
+                    // Check if this is a module name (possibly aliased)
+                    let actual_module = self.module_aliases
+                        .get(module_name)
+                        .cloned();
+                    let module_to_check = actual_module.as_deref().unwrap_or(module_name);
+
+                    if let Some(module_env) = self.module_envs.get(module_to_check).cloned() {
+                        if let Some(scheme) = module_env.get(field) {
+                            // Mark module alias as used if one was used
+                            if actual_module.is_some() {
+                                self.used_module_aliases.insert(module_name.clone());
+                            }
+                            let ty = self.instantiate(&scheme);
+                            return Ok(InferResult::pure(ty, ans));
+                        } else {
+                            // Module exists but field doesn't
+                            return Err(TypeError::UnboundVariable {
+                                name: format!("{}.{}", module_name, field),
+                                span: expr.span.clone(),
+                                suggestions: vec![],
+                            });
+                        }
+                    }
+                    // Not a module - fall through to record field access
+                }
+
+                // Regular record field access
+                let record_ty = self.infer_expr(env, record)?;
+                let record_ty_resolved = record_ty.resolve();
+
+                // The record type must be a Constructor type
+                match &record_ty_resolved {
+                    Type::Constructor { name, args } => {
+                        // Look up the record info
+                        if let Some(info) = self.type_ctx.get_record(name).cloned() {
+                            // Build substitution from the record's type args
+                            let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
+                            for (i, ty) in args.iter().enumerate() {
+                                subst.insert(i as TypeVarId, ty.clone());
+                            }
+
+                            // Look up the field type
+                            if let Some(field_ty) = info.field_types.get(field) {
+                                let result_ty = self.substitute(field_ty, &subst);
+                                Ok(InferResult::pure(result_ty, ans))
+                            } else {
+                                Err(TypeError::UnknownRecordField {
+                                    record_type: name.clone(),
+                                    field: field.clone(),
+                                    span: expr.span.clone(),
+                                })
+                            }
+                        } else {
+                            Err(TypeError::NotARecordType {
+                                ty: record_ty_resolved,
+                                span: expr.span.clone(),
+                            })
+                        }
+                    }
+                    Type::Var(_) => {
+                        // Record type not yet known - could add deferred constraint
+                        // For now, require the type to be known
+                        Err(TypeError::CannotInferRecordType {
+                            span: expr.span.clone(),
+                        })
+                    }
+                    _ => Err(TypeError::NotARecordType {
+                        ty: record_ty_resolved,
+                        span: expr.span.clone(),
+                    }),
+                }
+            }
+
+            ExprKind::RecordUpdate { base, updates } => {
+                // Infer the type of the base record
+                let base_ty = self.infer_expr(env, base)?;
+                let base_ty_resolved = base_ty.resolve();
+
+                match &base_ty_resolved {
+                    Type::Constructor { name, args } => {
+                        if let Some(info) = self.type_ctx.get_record(name).cloned() {
+                            // Build substitution from the record's type args
+                            let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
+                            for (i, ty) in args.iter().enumerate() {
+                                subst.insert(i as TypeVarId, ty.clone());
+                            }
+
+                            // Type check each update field
+                            for (field_name, field_expr) in updates {
+                                if let Some(expected_ty) = info.field_types.get(field_name) {
+                                    let expected = self.substitute(expected_ty, &subst);
+                                    let actual = self.infer_expr(env, field_expr)?;
+                                    self.unify_at(&expected, &actual, &field_expr.span)?;
+                                } else {
+                                    return Err(TypeError::UnknownRecordField {
+                                        record_type: name.clone(),
+                                        field: field_name.clone(),
+                                        span: field_expr.span.clone(),
+                                    });
+                                }
+                            }
+
+                            // Result has same type as base
+                            Ok(InferResult::pure(base_ty, ans))
+                        } else {
+                            Err(TypeError::NotARecordType {
+                                ty: base_ty_resolved,
+                                span: expr.span.clone(),
+                            })
+                        }
+                    }
+                    Type::Var(_) => Err(TypeError::CannotInferRecordType {
+                        span: expr.span.clone(),
+                    }),
+                    _ => Err(TypeError::NotARecordType {
+                        ty: base_ty_resolved,
+                        span: expr.span.clone(),
+                    }),
+                }
+            }
         }
     }
 
@@ -1740,6 +1974,62 @@ impl Inferencer {
                         name: name.clone(),
                         span: pattern.span.clone(),
                         suggestions,
+                    })
+                }
+            }
+
+            PatternKind::Record { name, fields } => {
+                if let Some(info) = self.type_ctx.get_record(name).cloned() {
+                    // Create fresh type variables for type parameters
+                    let mut type_args = Vec::new();
+                    for _ in 0..info.type_params {
+                        type_args.push(self.fresh_var());
+                    }
+
+                    // The record type is represented as a Constructor type
+                    let record_ty = Type::Constructor {
+                        name: info.type_name.clone(),
+                        args: type_args.clone(),
+                    };
+                    self.unify_at(ty, &record_ty, &pattern.span)?;
+
+                    // Build substitution map for type parameters
+                    let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
+                    for (i, ty) in type_args.iter().enumerate() {
+                        subst.insert(i as TypeVarId, ty.clone());
+                    }
+
+                    // Bind each field pattern
+                    for (field_name, sub_pat_opt) in fields {
+                        let field_name_str = field_name.as_str();
+                        if let Some(field_ty) = info.field_types.get(field_name_str) {
+                            let expected_ty = self.substitute(field_ty, &subst);
+                            match sub_pat_opt {
+                                Some(sub_pat) => {
+                                    // Explicit pattern: { method = m }
+                                    self.bind_pattern(env, sub_pat, &expected_ty)?;
+                                }
+                                None => {
+                                    // Punned field: { method } binds variable `method`
+                                    env.insert(
+                                        field_name_str.to_string(),
+                                        Scheme::mono(expected_ty),
+                                    );
+                                }
+                            }
+                        } else {
+                            return Err(TypeError::UnknownRecordField {
+                                record_type: name.clone(),
+                                field: field_name_str.to_string(),
+                                span: pattern.span.clone(),
+                            });
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(TypeError::UnknownRecordType {
+                        name: name.clone(),
+                        span: pattern.span.clone(),
                     })
                 }
             }
@@ -1879,6 +2169,43 @@ impl Inferencer {
 
                 self.type_ctx.add_constructor(ctor.name.clone(), info);
             }
+        }
+    }
+
+    /// Register a record type declaration
+    pub fn register_record_decl(&mut self, decl: &Decl) {
+        if let Decl::Record {
+            name,
+            params,
+            fields,
+            ..
+        } = decl
+        {
+            // Map type parameter names to generic variable IDs
+            let param_map: HashMap<String, TypeVarId> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), i as TypeVarId))
+                .collect();
+
+            let mut field_names = Vec::new();
+            let mut field_types = HashMap::new();
+
+            for field in fields {
+                field_names.push(field.name.clone());
+                if let Ok(ty) = self.type_expr_to_type(&field.ty, &param_map) {
+                    field_types.insert(field.name.clone(), ty);
+                }
+            }
+
+            let info = RecordInfo {
+                type_name: name.clone(),
+                type_params: params.len() as u32,
+                field_names,
+                field_types,
+            };
+
+            self.type_ctx.add_record(name.clone(), info);
         }
     }
 
@@ -2096,29 +2423,301 @@ impl Inferencer {
         };
         env.insert("Fiber.yield".into(), fiber_yield_scheme);
 
-        // First pass: register all type declarations
-        for item in &program.items {
+        // Dict.new : forall a t. () -> Dict a
+        let dict_new_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Unit),
+                ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.new".into(), dict_new_scheme);
+
+        // Dict.insert : forall a t. String -> a -> Dict a -> Dict a
+        let dict_insert_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::new_generic(0)),
+                    ret: Rc::new(Type::Arrow {
+                        arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                        ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                        ans_in: Rc::new(Type::new_generic(1)),
+                        ans_out: Rc::new(Type::new_generic(1)),
+                    }),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.insert".into(), dict_insert_scheme);
+
+        // Dict.get : forall a t. String -> Dict a -> Option a
+        let dict_get_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                    ret: Rc::new(Type::Constructor {
+                        name: "Option".into(),
+                        args: vec![Type::new_generic(0)],
+                    }),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.get".into(), dict_get_scheme);
+
+        // Dict.remove : forall a t. String -> Dict a -> Dict a
+        let dict_remove_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                    ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.remove".into(), dict_remove_scheme);
+
+        // Dict.contains : forall a t. String -> Dict a -> Bool
+        let dict_contains_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                    ret: Rc::new(Type::Bool),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.contains".into(), dict_contains_scheme);
+
+        // Dict.keys : forall a t. Dict a -> [String]
+        let dict_keys_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::list(Type::String)),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.keys".into(), dict_keys_scheme);
+
+        // Dict.values : forall a t. Dict a -> [a]
+        let dict_values_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::list(Type::new_generic(0))),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.values".into(), dict_values_scheme);
+
+        // Dict.size : forall a t. Dict a -> Int
+        let dict_size_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::Int),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.size".into(), dict_size_scheme);
+
+        // Set.new : forall t. () -> Set
+        let set_new_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Unit),
+                ret: Rc::new(Type::Set),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.new".into(), set_new_scheme);
+
+        // Set.insert : forall t. String -> Set -> Set
+        let set_insert_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Set),
+                    ret: Rc::new(Type::Set),
+                    ans_in: Rc::new(Type::new_generic(0)),
+                    ans_out: Rc::new(Type::new_generic(0)),
+                }),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.insert".into(), set_insert_scheme);
+
+        // Set.contains : forall t. String -> Set -> Bool
+        let set_contains_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Set),
+                    ret: Rc::new(Type::Bool),
+                    ans_in: Rc::new(Type::new_generic(0)),
+                    ans_out: Rc::new(Type::new_generic(0)),
+                }),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.contains".into(), set_contains_scheme);
+
+        // Set.remove : forall t. String -> Set -> Set
+        let set_remove_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Set),
+                    ret: Rc::new(Type::Set),
+                    ans_in: Rc::new(Type::new_generic(0)),
+                    ans_out: Rc::new(Type::new_generic(0)),
+                }),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.remove".into(), set_remove_scheme);
+
+        // Set.union : forall t. Set -> Set -> Set
+        let set_union_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Set),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Set),
+                    ret: Rc::new(Type::Set),
+                    ans_in: Rc::new(Type::new_generic(0)),
+                    ans_out: Rc::new(Type::new_generic(0)),
+                }),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.union".into(), set_union_scheme);
+
+        // Set.intersect : forall t. Set -> Set -> Set
+        let set_intersect_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Set),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Set),
+                    ret: Rc::new(Type::Set),
+                    ans_in: Rc::new(Type::new_generic(0)),
+                    ans_out: Rc::new(Type::new_generic(0)),
+                }),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.intersect".into(), set_intersect_scheme);
+
+        // Set.size : forall t. Set -> Int
+        let set_size_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Set),
+                ret: Rc::new(Type::Int),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.size".into(), set_size_scheme);
+
+        // Set.toList : forall t. Set -> [String]
+        let set_tolist_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Set),
+                ret: Rc::new(Type::list(Type::String)),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("Set.toList".into(), set_tolist_scheme);
+
+        // Parse and inject prelude (Option, Result, id, const, flip)
+        let prelude = parse_prelude().map_err(|e| TypeError::Other(e))?;
+
+        // Collect all items: prelude first, then user program
+        let all_items: Vec<&Item> = prelude
+            .items
+            .iter()
+            .chain(program.items.iter())
+            .collect();
+
+        // First pass: register all type declarations (ADTs and records)
+        for item in &all_items {
             if let Item::Decl(decl) = item {
                 self.register_type_decl(decl);
+                self.register_record_decl(decl);
             }
         }
 
         // Second pass: register all trait declarations
-        for item in &program.items {
+        for item in &all_items {
             if let Item::Decl(decl @ Decl::Trait { .. }) = item {
                 self.register_trait_decl(decl)?;
             }
         }
 
         // Third pass: register all instance declarations
-        for item in &program.items {
+        for item in &all_items {
             if let Item::Decl(decl @ Decl::Instance { .. }) = item {
                 self.register_instance_decl(decl)?;
             }
         }
 
         // Fourth pass: infer types for let declarations and top-level expressions
-        for item in &program.items {
+        for item in &all_items {
             match item {
                 Item::Decl(Decl::Let {
                     name, params, body, ..
@@ -2192,8 +2791,8 @@ impl Inferencer {
                     let scheme = self.generalize(&func_ty);
                     env.insert(name.clone(), scheme);
                 }
-                Item::Decl(Decl::Type { .. } | Decl::TypeAlias { .. }) => {
-                    // Already handled in first pass
+                Item::Decl(Decl::Type { .. } | Decl::TypeAlias { .. } | Decl::Record { .. }) => {
+                    // Already handled in first pass (type registration)
                 }
                 Item::Decl(Decl::Trait { .. } | Decl::Instance { .. }) => {
                     // Already handled in second/third pass

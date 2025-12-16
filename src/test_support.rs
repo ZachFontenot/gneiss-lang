@@ -510,8 +510,8 @@ mod tests {
         assert!(values_equal(&Value::Int(42), &Value::Int(42)));
         assert!(!values_equal(&Value::Int(42), &Value::Int(43)));
         assert!(values_equal(
-            &Value::List(vec![Value::Int(1), Value::Int(2)]),
-            &Value::List(vec![Value::Int(1), Value::Int(2)])
+            &Value::List(im::vector![Value::Int(1), Value::Int(2)]),
+            &Value::List(im::vector![Value::Int(1), Value::Int(2)])
         ));
     }
 

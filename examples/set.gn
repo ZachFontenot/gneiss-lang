@@ -1,0 +1,112 @@
+-- Set - String-element persistent hashset
+-- Demonstrating all Set builtins
+
+-- Create an empty set
+let empty = Set.new ()
+
+-- Insert elements (returns new set, original unchanged)
+let s1 = Set.insert "apple" empty
+let s2 = Set.insert "banana" s1
+let s3 = Set.insert "cherry" s2
+
+-- Inserting duplicates has no effect
+let s4 = Set.insert "apple" s3
+
+let _ = print "=== Basic Operations ==="
+let _ = print "Set with fruits:"
+let _ = print s3
+
+let _ = print "Size:"
+let _ = print (Set.size s3)
+
+let _ = print "After inserting duplicate 'apple':"
+let _ = print s4
+let _ = print "Size still:"
+let _ = print (Set.size s4)
+
+-- Set.contains - membership test
+let _ = print ""
+let _ = print "=== Membership Tests ==="
+let _ = print "Contains 'banana':"
+let _ = print (Set.contains "banana" s3)
+let _ = print "Contains 'grape':"
+let _ = print (Set.contains "grape" s3)
+
+-- Set.remove - remove an element
+let _ = print ""
+let _ = print "=== Remove Element ==="
+let s5 = Set.remove "banana" s3
+let _ = print "After removing 'banana':"
+let _ = print s5
+let _ = print "Size:"
+let _ = print (Set.size s5)
+
+-- Set.union - combine two sets
+let _ = print ""
+let _ = print "=== Set Union ==="
+let colors1 = Set.insert "red" (Set.insert "green" (Set.new ()))
+let colors2 = Set.insert "green" (Set.insert "blue" (Set.new ()))
+
+let _ = print "Set 1:"
+let _ = print colors1
+let _ = print "Set 2:"
+let _ = print colors2
+
+let all_colors = Set.union colors1 colors2
+let _ = print "Union:"
+let _ = print all_colors
+let _ = print "Size:"
+let _ = print (Set.size all_colors)
+
+-- Set.intersect - common elements
+let _ = print ""
+let _ = print "=== Set Intersection ==="
+let common = Set.intersect colors1 colors2
+let _ = print "Intersection:"
+let _ = print common
+let _ = print "Size:"
+let _ = print (Set.size common)
+
+-- Set.toList - convert to list
+let _ = print ""
+let _ = print "=== Convert to List ==="
+let fruit_list = Set.toList s3
+let _ = print "As list:"
+let _ = print fruit_list
+
+-- Practical example: tracking unique visitors
+let _ = print ""
+let _ = print "=== Practical Example: Unique Visitors ==="
+
+let add_visitor = fun visitor visitors ->
+    Set.insert visitor visitors
+
+let visitors = Set.new ()
+let v1 = add_visitor "user_123" visitors
+let v2 = add_visitor "user_456" v1
+let v3 = add_visitor "user_123" v2  -- Duplicate, won't increase count
+let v4 = add_visitor "user_789" v3
+
+let _ = print "Unique visitors:"
+let _ = print v4
+let _ = print "Total unique:"
+let _ = print (Set.size v4)
+
+-- Check if user has visited
+let has_visited = fun user visitors ->
+    if Set.contains user visitors
+    then "Welcome back!"
+    else "First visit!"
+
+let _ = print "user_123:"
+let _ = print (has_visited "user_123" v4)
+let _ = print "user_999:"
+let _ = print (has_visited "user_999" v4)
+
+let _ = print ""
+let _ = print "=== Immutability Demo ==="
+let _ = print "Original set unchanged:"
+let _ = print s3
+
+let _ = print ""
+let _ = print "Done!"

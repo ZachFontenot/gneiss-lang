@@ -781,8 +781,17 @@ impl Parser {
 
         self.consume(Token::Eq)?;
 
-        // Check if it's a variant type or alias
-        if self.check(&Token::Pipe) || self.peek_is_upper_ident() {
+        // Check if it's a variant type, record type, or alias
+        if self.check(&Token::LBrace) {
+            // Record type: type Request = { method : String, path : String }
+            let fields = self.parse_record_fields()?;
+            Ok(Decl::Record {
+                visibility: Visibility::Private,
+                name,
+                params,
+                fields,
+            })
+        } else if self.check(&Token::Pipe) || self.peek_is_upper_ident() {
             // Variant type
             let constructors = self.parse_constructors()?;
             Ok(Decl::Type {
@@ -801,6 +810,116 @@ impl Parser {
                 body,
             })
         }
+    }
+
+    /// Parse record field declarations: { field1 : Type1, field2 : Type2, ... }
+    fn parse_record_fields(&mut self) -> Result<Vec<RecordField>, ParseError> {
+        self.consume(Token::LBrace)?;
+        let mut fields = Vec::new();
+
+        if !self.check(&Token::RBrace) {
+            loop {
+                let field_name = self.parse_ident()?;
+                self.consume(Token::Colon)?;
+                let field_ty = self.parse_type_expr()?;
+                fields.push(RecordField {
+                    name: field_name,
+                    ty: field_ty,
+                });
+
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(Token::RBrace)?;
+        Ok(fields)
+    }
+
+    /// Parse record literal fields: { field1 = expr1, field2 = expr2, ... }
+    fn parse_record_literal_fields(&mut self) -> Result<Vec<(Ident, Expr)>, ParseError> {
+        self.consume(Token::LBrace)?;
+        let mut fields = Vec::new();
+
+        if !self.check(&Token::RBrace) {
+            loop {
+                let field_name = self.parse_ident()?;
+                self.consume(Token::Eq)?;
+                let field_value = self.parse_expr()?;
+                fields.push((field_name, field_value));
+
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+                // Allow trailing comma
+                if self.check(&Token::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(Token::RBrace)?;
+        Ok(fields)
+    }
+
+    /// Parse record update fields: field1 = expr1, field2 = expr2, ...
+    /// Note: The '{' and 'with' are already consumed, this just parses the field updates
+    fn parse_record_update_fields(&mut self) -> Result<Vec<(Ident, Expr)>, ParseError> {
+        let mut updates = Vec::new();
+
+        if !self.check(&Token::RBrace) {
+            loop {
+                let field_name = self.parse_ident()?;
+                self.consume(Token::Eq)?;
+                let field_value = self.parse_expr()?;
+                updates.push((field_name, field_value));
+
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+                // Allow trailing comma
+                if self.check(&Token::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        Ok(updates)
+    }
+
+    /// Parse record pattern fields: { field1, field2 = pat, ... }
+    /// Each field is either:
+    /// - Just a name (shorthand): { method } binds 'method' to the field value
+    /// - Name with pattern: { method = m } binds 'm' to the field value
+    fn parse_record_pattern_fields(&mut self) -> Result<Vec<(Ident, Option<Pattern>)>, ParseError> {
+        self.consume(Token::LBrace)?;
+        let mut fields = Vec::new();
+
+        if !self.check(&Token::RBrace) {
+            loop {
+                let field_name = self.parse_ident()?;
+                let pattern = if self.match_token(&Token::Eq) {
+                    // Explicit pattern binding: field = pattern
+                    Some(self.parse_pattern()?)
+                } else {
+                    // Shorthand: just field name, binds to same name
+                    None
+                };
+                fields.push((field_name, pattern));
+
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+                // Allow trailing comma
+                if self.check(&Token::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(Token::RBrace)?;
+        Ok(fields)
     }
 
     fn parse_constructors(&mut self) -> Result<Vec<Constructor>, ParseError> {
@@ -1582,10 +1701,10 @@ impl Parser {
     // Function application
     fn parse_expr_app(&mut self) -> Result<Expr, ParseError> {
         let start = self.current_span();
-        let mut func = self.parse_expr_atom()?;
+        let mut func = self.parse_expr_postfix()?;
 
         while self.is_atom_start() {
-            let arg = self.parse_expr_atom()?;
+            let arg = self.parse_expr_postfix()?;
             let span = start.merge(&arg.span);
             func = Spanned::new(
                 ExprKind::App {
@@ -1597,6 +1716,28 @@ impl Parser {
         }
 
         Ok(func)
+    }
+
+    /// Parse postfix operations (field access): expr.field.another_field
+    fn parse_expr_postfix(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current_span();
+        let mut expr = self.parse_expr_atom()?;
+
+        // Handle chained field access: expr.field1.field2
+        while self.check(&Token::Dot) {
+            self.advance(); // consume '.'
+            let field = self.parse_ident()?;
+            let span = start.merge(&self.current_span());
+            expr = Spanned::new(
+                ExprKind::FieldAccess {
+                    record: Rc::new(expr),
+                    field,
+                },
+                span,
+            );
+        }
+
+        Ok(expr)
     }
 
     fn is_atom_start(&self) -> bool {
@@ -1647,24 +1788,21 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.advance();
-                // Check for qualified access: Module.func
-                if self.check(&Token::Dot) {
-                    self.advance();
-                    let field = self.parse_ident()?;
-                    // For now, treat Module.func as just "Module.func" identifier
-                    let span = start.merge(&self.current_span());
-                    Ok(Spanned::new(
-                        ExprKind::Var(format!("{}.{}", name, field)),
-                        span,
-                    ))
-                } else {
-                    Ok(Spanned::new(ExprKind::Var(name), start))
-                }
+                // Just return the variable - field access (expr.field) is handled by parse_expr_postfix
+                Ok(Spanned::new(ExprKind::Var(name), start))
             }
             Token::UpperIdent(name) => {
                 self.advance();
-                // Constructor or Module access
-                if self.check(&Token::Dot) {
+                // Constructor, Record literal, or Module access
+                if self.check(&Token::LBrace) {
+                    // Record literal: TypeName { field = expr, ... }
+                    let fields = self.parse_record_literal_fields()?;
+                    let span = start.merge(&self.current_span());
+                    Ok(Spanned::new(
+                        ExprKind::Record { name, fields },
+                        span,
+                    ))
+                } else if self.check(&Token::Dot) {
                     self.advance();
                     match self.peek().clone() {
                         Token::Ident(field) => {
@@ -1804,6 +1942,22 @@ impl Parser {
                 let span = start.merge(&self.current_span());
                 Ok(Spanned::new(ExprKind::List(exprs), span))
             }
+            Token::LBrace => {
+                // Record update: { base_expr with field1 = val1, ... }
+                self.advance(); // consume '{'
+                let base = self.parse_expr()?;
+                self.consume(Token::With)?;
+                let updates = self.parse_record_update_fields()?;
+                self.consume(Token::RBrace)?;
+                let span = start.merge(&self.current_span());
+                Ok(Spanned::new(
+                    ExprKind::RecordUpdate {
+                        base: Rc::new(base),
+                        updates,
+                    },
+                    span,
+                ))
+            }
             _ => Err(self.unexpected_token("expression")),
         }
     }
@@ -1896,7 +2050,12 @@ impl Parser {
             }
             Token::UpperIdent(name) => {
                 self.advance();
-                if allow_constructor_args {
+                // Check for record pattern: Request { field1, field2 = pat }
+                if self.check(&Token::LBrace) {
+                    let fields = self.parse_record_pattern_fields()?;
+                    let span = start.merge(&self.current_span());
+                    Ok(Spanned::new(PatternKind::Record { name, fields }, span))
+                } else if allow_constructor_args {
                     // Constructor with args: "Some x" or "Pair a b"
                     let mut args = Vec::new();
                     while self.is_pattern_atom() {
@@ -1997,6 +2156,10 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
                 Ok(name)
+            }
+            Token::Underscore => {
+                self.advance();
+                Ok("_".to_string())
             }
             _ => Err(self.unexpected_token("identifier")),
         }
@@ -2587,6 +2750,149 @@ mod tests {
                 assert_eq!(*visibility, Visibility::Private);
             }
             _ => panic!("expected let"),
+        }
+    }
+
+    // ========================================================================
+    // Record type tests
+    // ========================================================================
+
+    #[test]
+    fn test_record_type_decl() {
+        let prog = parse("type Request = { method : String, path : String }");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Record { name, params, fields, .. }) => {
+                assert_eq!(name, "Request");
+                assert!(params.is_empty());
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "method");
+                assert_eq!(fields[1].name, "path");
+            }
+            _ => panic!("expected record type declaration"),
+        }
+    }
+
+    #[test]
+    fn test_record_type_with_params() {
+        let prog = parse("type Pair a = { fst : a, snd : a }");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Decl(Decl::Record { name, params, fields, .. }) => {
+                assert_eq!(name, "Pair");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0], "a");
+                assert_eq!(fields.len(), 2);
+            }
+            _ => panic!("expected record type declaration"),
+        }
+    }
+
+    #[test]
+    fn test_record_literal() {
+        let prog = parse("Request { method = \"GET\", path = \"/\" }");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::Record { name, fields } => {
+                    assert_eq!(name, "Request");
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].0, "method");
+                    assert_eq!(fields[1].0, "path");
+                }
+                _ => panic!("expected record literal"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_field_access() {
+        let prog = parse("req.method");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::FieldAccess { record, field } => {
+                    assert_eq!(field, "method");
+                    match &record.node {
+                        ExprKind::Var(name) => assert_eq!(name, "req"),
+                        _ => panic!("expected variable"),
+                    }
+                }
+                _ => panic!("expected field access"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_chained_field_access() {
+        let prog = parse("config.server.port");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::FieldAccess { record, field } => {
+                    assert_eq!(field, "port");
+                    match &record.node {
+                        ExprKind::FieldAccess { record: inner, field: mid } => {
+                            assert_eq!(mid, "server");
+                            match &inner.node {
+                                ExprKind::Var(name) => assert_eq!(name, "config"),
+                                _ => panic!("expected variable"),
+                            }
+                        }
+                        _ => panic!("expected nested field access"),
+                    }
+                }
+                _ => panic!("expected field access"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_record_update() {
+        let prog = parse("{ req with method = \"POST\" }");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::RecordUpdate { base, updates } => {
+                    match &base.node {
+                        ExprKind::Var(name) => assert_eq!(name, "req"),
+                        _ => panic!("expected variable"),
+                    }
+                    assert_eq!(updates.len(), 1);
+                    assert_eq!(updates[0].0, "method");
+                }
+                _ => panic!("expected record update"),
+            },
+            _ => panic!("expected expression"),
+        }
+    }
+
+    #[test]
+    fn test_record_pattern() {
+        let prog = parse("match req with | Request { method, path } -> method");
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Expr(expr) => match &expr.node {
+                ExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 1);
+                    match &arms[0].pattern.node {
+                        PatternKind::Record { name, fields } => {
+                            assert_eq!(name, "Request");
+                            assert_eq!(fields.len(), 2);
+                            assert_eq!(fields[0].0, "method");
+                            assert!(fields[0].1.is_none()); // shorthand
+                            assert_eq!(fields[1].0, "path");
+                            assert!(fields[1].1.is_none()); // shorthand
+                        }
+                        _ => panic!("expected record pattern"),
+                    }
+                }
+                _ => panic!("expected match expression"),
+            },
+            _ => panic!("expected expression"),
         }
     }
 }

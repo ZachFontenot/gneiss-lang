@@ -261,8 +261,20 @@ impl ModuleResolver {
             self.load_order.push(id);
         }
 
-        // The entry module is the last one loaded
-        Ok(self.load_order.last().copied().unwrap())
+        // Reverse load_order so dependencies come before dependents
+        // (the worklist algorithm naturally produces dependents-first order)
+        self.load_order.reverse();
+
+        // Return the ID of the entry module (looked up by path)
+        let canonical_entry = entry_path.canonicalize()
+            .unwrap_or_else(|_| entry_path.to_path_buf());
+        self.graph.by_path.get(&canonical_entry)
+            .or_else(|| self.graph.by_path.get(entry_path))
+            .copied()
+            .ok_or_else(|| ModuleError::NotFound {
+                module_path: entry_path.display().to_string(),
+                search_paths: self.search_paths.clone(),
+            })
     }
 
     /// Topologically sort modules by dependencies

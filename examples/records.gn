@@ -1,0 +1,54 @@
+-- Record type declarations
+type Point = {
+    x : Int,
+    y : Int
+}
+
+type Request = {
+    method : String,
+    path : String
+}
+
+-- Record literal construction
+let origin = Point { x = 0, y = 0 }
+let p = Point { x = 3, y = 4 }
+
+-- Field access
+let px = p.x
+let py = p.y
+
+-- Record update
+let moved = { p with x = 10 }
+
+-- Multiple field update
+let req = Request { method = "GET", path = "/" }
+let updated_req = { req with method = "POST", path = "/api" }
+
+-- Pattern matching on records
+let describe_point = fun pt ->
+    match pt with
+    | Point { x, y } -> x + y
+
+-- Polymorphic records
+type Pair a = {
+    first : a,
+    second : a
+}
+
+let int_pair = Pair { first = 1, second = 2 }
+let sum_pair = int_pair.first + int_pair.second
+
+-- Output results
+let test1 = print "Point x:"
+let test2 = print px
+let test3 = print "Point y:"
+let test4 = print py
+let test5 = print "Moved x:"
+let test6 = print moved.x
+let test7 = print "Describe origin:"
+let test8 = print (describe_point origin)
+let test9 = print "Sum pair:"
+let test10 = print sum_pair
+let test11 = print "Request method:"
+let test12 = print updated_req.method
+let test13 = print "Done!"

@@ -8,6 +8,7 @@ pub mod lexer;
 pub mod module;
 pub mod operators;
 pub mod parser;
+pub mod prelude;
 pub mod runtime;
 pub mod test_support;
 pub mod types;

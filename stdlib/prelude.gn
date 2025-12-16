@@ -1,0 +1,15 @@
+-- Gneiss Prelude
+-- Auto-imported into every program
+
+-- Core sum types
+type Option a = | Some a | None
+type Result e a = | Ok a | Err e
+
+-- Identity combinator
+let id x = x
+
+-- Constant combinator (returns first argument, ignores second)
+let const x _ = x
+
+-- Flip argument order
+let flip f x y = f y x

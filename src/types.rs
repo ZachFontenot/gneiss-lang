@@ -50,6 +50,12 @@ pub enum Type {
     /// Fiber type: Fiber a (typed fiber handle, result of spawning)
     /// The type parameter is the result type when joined
     Fiber(Rc<Type>),
+
+    /// Dictionary type: Dict v (String-keyed dictionary with value type v)
+    Dict(Rc<Type>),
+
+    /// Set type: Set (String elements)
+    Set,
 }
 
 /// A type variable that may or may not be bound
@@ -111,13 +117,15 @@ impl Type {
             Type::Constructor { args, .. } => args.iter().any(|t| t.occurs(id)),
             Type::Channel(t) => t.occurs(id),
             Type::Fiber(t) => t.occurs(id),
+            Type::Dict(t) => t.occurs(id),
             Type::Int
             | Type::Float
             | Type::Bool
             | Type::String
             | Type::Char
             | Type::Unit
-            | Type::Pid => false,
+            | Type::Pid
+            | Type::Set => false,
         }
     }
 
@@ -325,6 +333,13 @@ impl Type {
                     t.display_with_map(var_map, next_var, hide_answer_types)
                 )
             }
+            Type::Dict(t) => {
+                format!(
+                    "Dict {}",
+                    t.display_with_map(var_map, next_var, hide_answer_types)
+                )
+            }
+            Type::Set => "Set".to_string(),
         }
     }
 }
@@ -402,6 +417,8 @@ impl fmt::Display for Type {
             }
             Type::Channel(t) => write!(f, "Channel {}", t),
             Type::Fiber(t) => write!(f, "Fiber {}", t),
+            Type::Dict(t) => write!(f, "Dict {}", t),
+            Type::Set => write!(f, "Set"),
         }
     }
 }
@@ -567,11 +584,26 @@ pub struct ConstructorInfo {
     pub field_types: Vec<Type>,
 }
 
+/// Information about a record type
+#[derive(Debug, Clone)]
+pub struct RecordInfo {
+    /// The type name (e.g., "Request")
+    pub type_name: String,
+    /// Number of type parameters the type takes
+    pub type_params: u32,
+    /// Field names in declaration order
+    pub field_names: Vec<String>,
+    /// Field types indexed by name (may contain generic type vars)
+    pub field_types: HashMap<String, Type>,
+}
+
 /// Stores information about declared data types
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
     /// Maps constructor names to their info
     pub constructors: HashMap<String, ConstructorInfo>,
+    /// Maps record type names to their info
+    pub records: HashMap<String, RecordInfo>,
 }
 
 impl TypeContext {
@@ -590,6 +622,19 @@ impl TypeContext {
     /// Get an iterator over all constructor names
     pub fn constructor_names(&self) -> impl Iterator<Item = &str> {
         self.constructors.keys().map(|s| s.as_str())
+    }
+
+    pub fn add_record(&mut self, name: String, info: RecordInfo) {
+        self.records.insert(name, info);
+    }
+
+    pub fn get_record(&self, name: &str) -> Option<&RecordInfo> {
+        self.records.get(name)
+    }
+
+    /// Get an iterator over all record type names
+    pub fn record_names(&self) -> impl Iterator<Item = &str> {
+        self.records.keys().map(|s| s.as_str())
     }
 }
 
