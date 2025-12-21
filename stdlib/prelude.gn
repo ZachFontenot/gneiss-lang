@@ -13,3 +13,74 @@ let const x _ = x
 
 -- Flip argument order
 let flip f x y = f y x
+
+-- List operations
+let rec map f xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> f x :: map f rest
+
+let rec filter p xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> if p x then x :: filter p rest else filter p rest
+
+let rec foldl f acc xs =
+    match xs with
+    | [] -> acc
+    | x :: rest -> foldl f (f acc x) rest
+
+let rec foldr f acc xs =
+    match xs with
+    | [] -> acc
+    | x :: rest -> f x (foldr f acc rest)
+
+let null xs = match xs with | [] -> true | _ -> false
+let rec length xs = match xs with | [] -> 0 | _ :: rest -> 1 + length rest
+let rec reverse xs = foldl (fun acc x -> x :: acc) [] xs
+let head xs = match xs with | [] -> None | x :: _ -> Some x
+let tail xs = match xs with | [] -> None | _ :: rest -> Some rest
+
+let rec drop_while p xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> if p x then drop_while p rest else xs
+
+-- String operations (built on primitives)
+let string_to_lower s = chars_to_string (map char_to_lower (string_to_chars s))
+let string_to_upper s = chars_to_string (map char_to_upper (string_to_chars s))
+
+let string_trim s =
+    let chars = string_to_chars s in
+    chars_to_string (reverse (drop_while char_is_whitespace
+                     (reverse (drop_while char_is_whitespace chars))))
+
+let string_contains needle haystack =
+    match string_index_of needle haystack with
+    | Some _ -> true
+    | None -> false
+
+let string_starts_with prefix s =
+    string_substring 0 (string_length prefix) s == prefix
+
+let string_ends_with suffix s =
+    let slen = string_length s in
+    let suflen = string_length suffix in
+    if suflen > slen then false
+    else string_substring (slen - suflen) slen s == suffix
+
+let rec string_split delim s =
+    match string_index_of delim s with
+    | None -> [s]
+    | Some i ->
+        let before = string_substring 0 i s in
+        let after = string_substring (i + string_length delim) (string_length s) s in
+        before :: string_split delim after
+
+let rec string_join delim xs =
+    match xs with
+    | [] -> ""
+    | [x] -> x
+    | x :: rest -> x ++ delim ++ string_join delim rest
+
+let string_replace from to s = string_join to (string_split from s)

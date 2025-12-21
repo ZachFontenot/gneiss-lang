@@ -1,0 +1,57 @@
+-- String Operations Example
+-- Demonstrates the string library functions in stdlib/prelude.gn
+
+-- Case conversion
+let _ = print "=== Case Conversion ==="
+let _ = print (string_to_upper "hello world")    -- HELLO WORLD
+let _ = print (string_to_lower "HELLO WORLD")    -- hello world
+
+-- Trimming whitespace
+let _ = print "=== Trim ==="
+let _ = print (string_trim "  hello  ")          -- "hello"
+let _ = print (string_trim "\t\ntabs\n\t")       -- "tabs"
+
+-- Searching
+let _ = print "=== Search ==="
+let _ = print (string_contains "ell" "hello")    -- true
+let _ = print (string_contains "xyz" "hello")    -- false
+let _ = print (string_index_of "ll" "hello")     -- Some 2
+let _ = print (string_index_of "xy" "hello")     -- None
+
+-- Prefix/suffix checking
+let _ = print "=== Prefix/Suffix ==="
+let _ = print (string_starts_with "he" "hello")  -- true
+let _ = print (string_starts_with "lo" "hello")  -- false
+let _ = print (string_ends_with "lo" "hello")    -- true
+let _ = print (string_ends_with "he" "hello")    -- false
+
+-- Splitting and joining
+let _ = print "=== Split/Join ==="
+let _ = print (string_split "," "a,b,c,d")       -- ["a", "b", "c", "d"]
+let _ = print (string_split "/" "/usr/local/bin")-- ["", "usr", "local", "bin"]
+let _ = print (string_join "-" ["2024", "01", "15"]) -- "2024-01-15"
+let _ = print (string_join "" ["a", "b", "c"])   -- "abc"
+
+-- Substring extraction
+let _ = print "=== Substring ==="
+let _ = print (string_substring 0 5 "hello world") -- "hello"
+let _ = print (string_substring 6 11 "hello world") -- "world"
+let _ = print (string_substring 0 0 "hello")      -- ""
+
+-- Replacement
+let _ = print "=== Replace ==="
+let _ = print (string_replace "o" "0" "hello world")     -- "hell0 w0rld"
+let _ = print (string_replace "ll" "LL" "hello")         -- "heLLo"
+let _ = print (string_replace " " "_" "hello world")     -- "hello_world"
+
+-- Practical example: URL path parsing
+let _ = print "=== Practical: URL Parsing ==="
+let path = "/api/users/123/profile"
+let segments = string_split "/" path
+let _ = print segments  -- ["", "api", "users", "123", "profile"]
+
+-- Practical example: CSV parsing
+let _ = print "=== Practical: CSV Line ==="
+let csv_line = "Alice,30,Engineer"
+let fields = string_split "," csv_line
+let _ = print fields    -- ["Alice", "30", "Engineer"]

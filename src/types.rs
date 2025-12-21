@@ -88,6 +88,14 @@ impl Type {
         }
     }
 
+    /// Create an option type: Option elem
+    pub fn option(elem: Type) -> Type {
+        Type::Constructor {
+            name: "Option".to_string(),
+            args: vec![elem],
+        }
+    }
+
     /// Follow all links to get the actual type
     pub fn resolve(&self) -> Type {
         match self {
