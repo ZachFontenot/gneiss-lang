@@ -1,0 +1,258 @@
+-- HTML Module
+-- Type-safe HTML templating
+
+-- HTML node type
+type Html =
+    | Text String           -- Escaped text content
+    | Raw String            -- Raw unescaped HTML
+    | Element String (List (String, String)) (List Html)  -- tag, attrs, children
+    | Empty                 -- Nothing to render
+
+-- ============================================================================
+-- Core Constructors
+-- ============================================================================
+
+-- Create escaped text node
+let Html.text s = Text (html_escape s)
+
+-- Create raw HTML (not escaped - use with caution!)
+let Html.raw s = Raw s
+
+-- Create an element
+let Html.el tag attrs children = Element tag attrs children
+
+-- Empty node (renders nothing)
+let Html.empty = Empty
+
+-- ============================================================================
+-- Common Elements
+-- ============================================================================
+
+-- Document structure
+let Html.html attrs children = Html.el "html" attrs children
+let Html.head attrs children = Html.el "head" attrs children
+let Html.body attrs children = Html.el "body" attrs children
+let Html.title text = Html.el "title" [] [Html.text text]
+let Html.meta attrs = Html.el "meta" attrs []
+let Html.link attrs = Html.el "link" attrs []
+let Html.script attrs content = Html.el "script" attrs [Html.raw content]
+let Html.style attrs content = Html.el "style" attrs [Html.raw content]
+
+-- Container elements
+let Html.div attrs children = Html.el "div" attrs children
+let Html.span attrs children = Html.el "span" attrs children
+let Html.section attrs children = Html.el "section" attrs children
+let Html.article attrs children = Html.el "article" attrs children
+let Html.header attrs children = Html.el "header" attrs children
+let Html.footer attrs children = Html.el "footer" attrs children
+let Html.nav attrs children = Html.el "nav" attrs children
+let Html.main attrs children = Html.el "main" attrs children
+let Html.aside attrs children = Html.el "aside" attrs children
+
+-- Text elements
+let Html.h1 attrs children = Html.el "h1" attrs children
+let Html.h2 attrs children = Html.el "h2" attrs children
+let Html.h3 attrs children = Html.el "h3" attrs children
+let Html.h4 attrs children = Html.el "h4" attrs children
+let Html.h5 attrs children = Html.el "h5" attrs children
+let Html.h6 attrs children = Html.el "h6" attrs children
+let Html.p attrs children = Html.el "p" attrs children
+let Html.pre attrs children = Html.el "pre" attrs children
+let Html.code attrs children = Html.el "code" attrs children
+let Html.blockquote attrs children = Html.el "blockquote" attrs children
+let Html.em attrs children = Html.el "em" attrs children
+let Html.strong attrs children = Html.el "strong" attrs children
+let Html.small attrs children = Html.el "small" attrs children
+
+-- Lists
+let Html.ul attrs children = Html.el "ul" attrs children
+let Html.ol attrs children = Html.el "ol" attrs children
+let Html.li attrs children = Html.el "li" attrs children
+
+-- Links and media
+let Html.a attrs children = Html.el "a" attrs children
+let Html.img attrs = Html.el "img" attrs []
+let Html.video attrs children = Html.el "video" attrs children
+let Html.audio attrs children = Html.el "audio" attrs children
+
+-- Forms
+let Html.form attrs children = Html.el "form" attrs children
+let Html.input attrs = Html.el "input" attrs []
+let Html.button attrs children = Html.el "button" attrs children
+let Html.textarea attrs content = Html.el "textarea" attrs [Html.text content]
+let Html.select attrs children = Html.el "select" attrs children
+let Html.option attrs text = Html.el "option" attrs [Html.text text]
+let Html.label attrs children = Html.el "label" attrs children
+
+-- Table elements
+let Html.table attrs children = Html.el "table" attrs children
+let Html.thead attrs children = Html.el "thead" attrs children
+let Html.tbody attrs children = Html.el "tbody" attrs children
+let Html.tfoot attrs children = Html.el "tfoot" attrs children
+let Html.tr attrs children = Html.el "tr" attrs children
+let Html.th attrs children = Html.el "th" attrs children
+let Html.td attrs children = Html.el "td" attrs children
+
+-- Other
+let Html.br = Html.el "br" [] []
+let Html.hr = Html.el "hr" [] []
+
+-- ============================================================================
+-- Attribute Helpers
+-- ============================================================================
+
+-- Common attribute builders
+let attr name value = (name, value)
+let class_ c = ("class", c)
+let id_ i = ("id", i)
+let href h = ("href", h)
+let src s = ("src", s)
+let alt a = ("alt", a)
+let type_ t = ("type", t)
+let name n = ("name", n)
+let value v = ("value", v)
+let placeholder p = ("placeholder", p)
+let disabled = ("disabled", "disabled")
+let checked = ("checked", "checked")
+let required = ("required", "required")
+let readonly = ("readonly", "readonly")
+
+-- Style attribute
+let style s = ("style", s)
+
+-- Data attributes
+let data name value = ("data-" ++ name, value)
+
+-- Event handlers (for client-side JS)
+let onClick handler = ("onclick", handler)
+let onSubmit handler = ("onsubmit", handler)
+let onChange handler = ("onchange", handler)
+
+-- ============================================================================
+-- Rendering
+-- ============================================================================
+
+-- Self-closing tags
+let is_void_element tag =
+    match tag with
+    | "area" -> true
+    | "base" -> true
+    | "br" -> true
+    | "col" -> true
+    | "embed" -> true
+    | "hr" -> true
+    | "img" -> true
+    | "input" -> true
+    | "link" -> true
+    | "meta" -> true
+    | "param" -> true
+    | "source" -> true
+    | "track" -> true
+    | "wbr" -> true
+    | _ -> false
+
+-- Render attributes to string
+let render_attrs attrs =
+    if null attrs then ""
+    else
+        let render_attr (name, value) =
+            " " ++ name ++ "=\"" ++ html_escape value ++ "\""
+        in
+        string_join "" (map render_attr attrs)
+
+-- Render HTML to string
+let rec Html.render html =
+    match html with
+    | Empty -> ""
+    | Text s -> s
+    | Raw s -> s
+    | Element tag attrs children ->
+        let attrs_str = render_attrs attrs in
+        if is_void_element tag then
+            "<" ++ tag ++ attrs_str ++ " />"
+        else
+            let children_str = string_join "" (map Html.render children) in
+            "<" ++ tag ++ attrs_str ++ ">" ++ children_str ++ "</" ++ tag ++ ">"
+
+-- Render with doctype
+let Html.renderDocument html =
+    "<!DOCTYPE html>\n" ++ Html.render html
+
+-- ============================================================================
+-- Higher-Order Helpers
+-- ============================================================================
+
+-- Map a function over items, creating HTML for each
+let Html.mapItems f items =
+    map f items
+
+-- Create a list from items
+let Html.list tag attrs items toHtml =
+    Html.el tag attrs (map toHtml items)
+
+-- Conditional rendering
+let Html.when condition html =
+    if condition then html else Empty
+
+-- Render one of two options
+let Html.ifThenElse condition thenHtml elseHtml =
+    if condition then thenHtml else elseHtml
+
+-- Maybe render
+let Html.maybe opt toHtml =
+    match opt with
+    | Some x -> toHtml x
+    | None -> Empty
+
+-- ============================================================================
+-- Common Patterns
+-- ============================================================================
+
+-- Simple link
+let Html.link_ href_ text = Html.a [href href_] [Html.text text]
+
+-- Image with alt text
+let Html.img_ src_ alt_ = Html.img [src src_, alt alt_]
+
+-- Button with text
+let Html.button_ attrs text = Html.button attrs [Html.text text]
+
+-- Input with common attributes
+let Html.textInput name_ placeholder_ =
+    Html.input [type_ "text", name name_, placeholder placeholder_]
+
+let Html.passwordInput name_ placeholder_ =
+    Html.input [type_ "password", name name_, placeholder placeholder_]
+
+let Html.emailInput name_ placeholder_ =
+    Html.input [type_ "email", name name_, placeholder placeholder_]
+
+let Html.submitButton text =
+    Html.input [type_ "submit", value text]
+
+-- ============================================================================
+-- Page Templates
+-- ============================================================================
+
+-- Basic HTML5 page structure
+let Html.page title_ bodyContent =
+    Html.html [] [
+        Html.head [] [
+            Html.meta [("charset", "UTF-8")],
+            Html.meta [("name", "viewport"), ("content", "width=device-width, initial-scale=1.0")],
+            Html.title title_
+        ],
+        Html.body [] bodyContent
+    ]
+
+-- Page with inline styles
+let Html.styledPage title_ styles bodyContent =
+    Html.html [] [
+        Html.head [] [
+            Html.meta [("charset", "UTF-8")],
+            Html.meta [("name", "viewport"), ("content", "width=device-width, initial-scale=1.0")],
+            Html.title title_,
+            Html.style [] styles
+        ],
+        Html.body [] bodyContent
+    ]

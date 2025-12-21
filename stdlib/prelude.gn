@@ -59,14 +59,9 @@ let rec drop_while p xs =
     | [] -> []
     | x :: rest -> if p x then drop_while p rest else xs
 
--- String operations (built on primitives)
-let string_to_lower s = chars_to_string (map char_to_lower (string_to_chars s))
-let string_to_upper s = chars_to_string (map char_to_upper (string_to_chars s))
-
-let string_trim s =
-    let chars = string_to_chars s in
-    chars_to_string (reverse (drop_while char_is_whitespace
-                     (reverse (drop_while char_is_whitespace chars))))
+-- String operations
+-- Note: string_to_lower, string_to_upper, string_trim, string_split, string_join
+-- are now native builtins for performance
 
 let string_contains needle haystack =
     match string_index_of needle haystack with
@@ -81,19 +76,5 @@ let string_ends_with suffix s =
     let suflen = string_length suffix in
     if suflen > slen then false
     else string_substring (slen - suflen) slen s == suffix
-
-let rec string_split delim s =
-    match string_index_of delim s with
-    | None -> [s]
-    | Some i ->
-        let before = string_substring 0 i s in
-        let after = string_substring (i + string_length delim) (string_length s) s in
-        before :: string_split delim after
-
-let rec string_join delim xs =
-    match xs with
-    | [] -> ""
-    | [x] -> x
-    | x :: rest -> x ++ delim ++ string_join delim rest
 
 let string_replace from to s = string_join to (string_split from s)

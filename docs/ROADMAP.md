@@ -27,6 +27,33 @@
 - **Dictionary Passing**: Runtime method dispatch
 - **Instance Resolution**: Constraint propagation and overlap detection
 
+### Module System ✓
+- **Module Declarations**: `module List`
+- **Import Statements**: `import List`, `import List as L`, `import List (foo, bar)`
+- **Module Resolution**: File discovery and path mapping
+- **Dependency Graph**: Topological sort, circular dependency detection
+- **Multi-Module Type Checking**: Shared TypeEnv across modules
+
+### Record Types ✓
+- **Type Declarations**: `type Person = { name : String, age : Int }`
+- **Record Literals**: `Person { name = "Alice", age = 30 }`
+- **Field Access**: `person.name`, `person.age`
+- **Record Update**: `{ person with age = 31 }`
+- **Structural Typing**: Records unify based on field types
+
+### I/O and Async ✓
+- **File Operations**: `file_open`, `file_read_line`, `file_read_all`, `file_write`, `file_close`
+- **TCP Sockets**: `tcp_connect`, `tcp_listen`, `tcp_accept`, `tcp_send`, `tcp_recv`, `tcp_close`
+- **Bytes Type**: Binary data type for protocol parsing
+- **IoError Type**: Error handling for I/O operations
+- **Async Integration**: Non-blocking I/O with mio event loop
+- **Handle Registry**: Safe resource management across Rust/Gneiss boundary
+
+### Standard Library (Partial) ✓
+- **List Operations**: `List.map`, `List.filter`, `List.fold_left`, `List.length`, `List.concat`, etc.
+- **String Operations**: `String.split`, `String.concat`, `string_to_chars`, `chars_to_string`, etc.
+- **Option/Result**: Basic pattern matching support
+
 ---
 
 ## Dogfooding Goal: Web Server
@@ -49,16 +76,18 @@ let main () =
 
 ### Required Features (Priority Order)
 
-| Priority | Feature | Why |
-|----------|---------|-----|
-| P1 | Module System | Can't build real projects without imports |
-| P1 | Record Types | Request/Response/Config structs |
-| P1 | Standard Library | String ops, Option, Result, Map |
-| P2 | I/O Primitives | File handles, sockets, read/write |
-| P2 | Bytes Type | Binary protocol parsing |
-| P2 | Async I/O | Hook scheduler into epoll/kqueue |
-| P3 | String Interpolation | Response generation, logging |
-| P3 | JSON | Data interchange |
+| Priority | Feature | Status |
+|----------|---------|--------|
+| P1 | Module System | ✓ Complete |
+| P1 | Record Types | ✓ Complete |
+| P1 | Standard Library | Partial - need Map/Dict |
+| P2 | I/O Primitives | ✓ Complete |
+| P2 | Bytes Type | ✓ Complete |
+| P2 | Async I/O | ✓ Complete |
+| P3 | Map/Dict Type | **Next** - key-value storage for headers, routing |
+| P3 | JSON | Needed for API responses |
+| P3 | HTTP Parsing | Request/response parsing over TCP |
+| P4 | String Interpolation | Nice-to-have for response generation |
 
 ### Type System Opportunities
 
@@ -69,81 +98,114 @@ let main () =
 
 ---
 
-## Next Up: Module System
+## Next Up: Map/Dict Type
 
-**Goal:** Multi-file projects with imports and exports.
-
-```gneiss
--- File: List.gn
-module List
-
-let map f xs = ...
-let filter p xs = ...
-
--- File: Main.gn
-module Main
-
-import List
-import List (map, filter)  -- selective
-import List as L           -- qualified
-
-let main () = List.map double [1, 2, 3]
-```
-
-### Tasks
-- [ ] Tokens: `module`, `import`, `export`, `as`
-- [ ] AST nodes for module/import declarations
-- [ ] Module name resolution (file → module)
-- [ ] Import resolution and name binding
-- [ ] Circular dependency detection
-- [ ] Visibility controls (public/private)
-
----
-
-## Then: Record Types
-
-**Goal:** Named product types with field access.
+**Goal:** Key-value data structure for headers, routing tables, caches.
 
 ```gneiss
+-- Create and use maps
+let headers = Map.empty ()
+    |> Map.insert "Content-Type" "text/html"
+    |> Map.insert "X-Request-Id" "abc123"
+
+let content_type = Map.get "Content-Type" headers  -- Some "text/html"
+
+-- Use in HTTP handling
 type Request = {
     method : String,
     path : String,
-    headers : List (String, String),
-    body : Bytes
+    headers : Map String String,
+    body : String
 }
-
-let handler req =
-    match req.method with
-    | "GET" -> handle_get req.path
-    | "POST" -> handle_post req.body
-    | _ -> error "unsupported"
 ```
 
-### Design Questions
-- Structural vs nominal typing?
-- Row polymorphism for extensible records?
-- Field access syntax: `req.path` vs `path req`?
-- Record update syntax?
+### Implementation Options
+1. **Hash Map** - O(1) average, needs hash function
+2. **Tree Map** - O(log n), needs Ord typeclass
+3. **Association List** - Simple, O(n) lookup
+
+### Tasks
+- [ ] Decide on implementation (tree map for now?)
+- [ ] Add Map type to type system
+- [ ] Implement core operations: empty, insert, get, remove, contains
+- [ ] Add iteration: keys, values, entries, fold
+- [ ] Consider Ord typeclass for tree map ordering
 
 ---
 
-## Future: I/O and Runtime
+## Then: JSON Support
 
-### I/O Primitives
-- File operations (open, read, write, close)
-- Socket operations (listen, accept, connect)
-- Integration with Result type for errors
+**Goal:** Parse and serialize JSON for API data interchange.
 
-### Async I/O Integration
-- Hook fiber scheduler into system event loop
-- `FiberEffect::IO` for non-blocking operations
-- epoll (Linux), kqueue (macOS), io_uring (modern Linux)
+```gneiss
+-- Parse JSON
+let data = Json.parse "{\"name\": \"Alice\", \"age\": 30}"
 
-### Standard Library
-- Core: Option, Result, List, Map, Set
-- String: split, join, trim, format
-- Bytes: slicing, parsing combinators
-- JSON: encode/decode with typeclass derivation
+-- Access fields
+match data with
+| JsonObject obj -> Map.get "name" obj
+| _ -> None
+
+-- Serialize
+let response = Json.object [
+    ("status", Json.string "ok"),
+    ("count", Json.int 42)
+]
+print (Json.encode response)  -- {"status":"ok","count":42}
+```
+
+### Tasks
+- [ ] Define Json ADT (JsonNull, JsonBool, JsonInt, JsonFloat, JsonString, JsonArray, JsonObject)
+- [ ] Implement JSON parser
+- [ ] Implement JSON encoder
+- [ ] Consider typeclass-based encoding (ToJson, FromJson)
+
+---
+
+## Then: HTTP Protocol
+
+**Goal:** Parse HTTP requests and generate responses over TCP.
+
+```gneiss
+-- Low-level: parse raw HTTP
+let parse_request raw_bytes =
+    let lines = String.split "\r\n" raw_bytes in
+    let request_line = List.head lines in
+    -- Parse "GET /path HTTP/1.1"
+    ...
+
+-- High-level: server abstraction
+let handler request =
+    Response.html 200 "<h1>Hello</h1>"
+
+let main () =
+    Server.listen 8080 handler
+```
+
+### Tasks
+- [ ] HTTP request parser (method, path, headers, body)
+- [ ] HTTP response builder
+- [ ] Content-Type handling
+- [ ] Chunked transfer encoding (optional)
+- [ ] High-level Server.listen abstraction
+
+---
+
+## Remaining Standard Library Work
+
+### Core Data Structures
+- Map/Dict (priority - see above)
+- Set (can build on Map)
+
+### Bytes Operations
+- Slicing and indexing
+- Parsing combinators for binary protocols
+- Conversion to/from String (UTF-8)
+
+### Additional String Operations
+- `String.trim`, `String.replace`
+- `String.starts_with`, `String.ends_with`
+- Format/interpolation (P4)
 
 ---
 

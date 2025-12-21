@@ -1,0 +1,286 @@
+-- HTTP Module
+-- Types and parsing for HTTP protocol
+
+-- HTTP Method
+type HttpMethod =
+    | GET
+    | POST
+    | PUT
+    | DELETE
+    | PATCH
+    | HEAD
+    | OPTIONS
+    | CONNECT
+    | TRACE
+
+-- HTTP Version
+type HttpVersion =
+    | Http10
+    | Http11
+
+-- HTTP Request
+type HttpRequest = {
+    method : HttpMethod,
+    path : String,
+    version : HttpVersion,
+    headers : List (String, String),
+    body : String
+}
+
+-- HTTP Response
+type HttpResponse = {
+    version : HttpVersion,
+    status : Int,
+    reason : String,
+    headers : List (String, String),
+    body : String
+}
+
+-- ============================================================================
+-- HTTP Parsing
+-- ============================================================================
+
+-- Parse HTTP method from string
+let parse_method s =
+    match s with
+    | "GET" -> Some GET
+    | "POST" -> Some POST
+    | "PUT" -> Some PUT
+    | "DELETE" -> Some DELETE
+    | "PATCH" -> Some PATCH
+    | "HEAD" -> Some HEAD
+    | "OPTIONS" -> Some OPTIONS
+    | "CONNECT" -> Some CONNECT
+    | "TRACE" -> Some TRACE
+    | _ -> None
+
+-- Parse HTTP version
+let parse_version s =
+    match s with
+    | "HTTP/1.0" -> Some Http10
+    | "HTTP/1.1" -> Some Http11
+    | _ -> None
+
+-- Split string on first occurrence of delimiter
+let split_first delim s =
+    match string_index_of delim s with
+    | None -> None
+    | Some idx ->
+        let before = string_substring 0 idx s in
+        let after = string_substring (idx + string_length delim) (string_length s) s in
+        Some (before, after)
+
+-- Parse a single header line "Key: Value"
+let parse_header_line line =
+    match split_first ": " line with
+    | None ->
+        (match split_first ":" line with
+        | None -> None
+        | Some (key, value) -> Some (string_trim key, string_trim value))
+    | Some (key, value) -> Some (key, string_trim value)
+
+-- Parse headers from lines
+let rec parse_headers lines =
+    match lines with
+    | [] -> []
+    | line :: rest ->
+        if string_length (string_trim line) == 0 then
+            []  -- Empty line ends headers
+        else
+            (match parse_header_line line with
+            | None -> parse_headers rest
+            | Some header -> header :: parse_headers rest)
+
+-- Parse HTTP request from raw string
+let Http.parseRequest raw =
+    -- Split into lines
+    let lines = string_split "\r\n" raw in
+    (match lines with
+    | [] -> None
+    | request_line :: rest ->
+        -- Parse request line: "GET /path HTTP/1.1"
+        let parts = string_split " " request_line in
+        (match parts with
+        | [method_str, path, version_str] ->
+            (match parse_method method_str with
+            | None -> None
+            | Some method ->
+                (match parse_version version_str with
+                | None -> None
+                | Some version ->
+                    -- Find the blank line separating headers from body
+                    let rec split_headers_body acc remaining =
+                        (match remaining with
+                        | [] -> (reverse acc, "")
+                        | line :: rest2 ->
+                            if string_length (string_trim line) == 0 then
+                                (reverse acc, string_join "\r\n" rest2)
+                            else
+                                split_headers_body (line :: acc) rest2)
+                    in
+                    let (header_lines, body) = split_headers_body [] rest in
+                    let headers = parse_headers header_lines in
+                    Some (HttpRequest {
+                        method = method,
+                        path = path,
+                        version = version,
+                        headers = headers,
+                        body = body
+                    })))
+        | _ -> None))
+
+-- ============================================================================
+-- HTTP Formatting
+-- ============================================================================
+
+-- Format method as string
+let format_method m =
+    match m with
+    | GET -> "GET"
+    | POST -> "POST"
+    | PUT -> "PUT"
+    | DELETE -> "DELETE"
+    | PATCH -> "PATCH"
+    | HEAD -> "HEAD"
+    | OPTIONS -> "OPTIONS"
+    | CONNECT -> "CONNECT"
+    | TRACE -> "TRACE"
+
+-- Format version as string
+let format_version v =
+    match v with
+    | Http10 -> "HTTP/1.0"
+    | Http11 -> "HTTP/1.1"
+
+-- Format headers
+let format_headers headers =
+    let format_header (name, value) = name ++ ": " ++ value in
+    string_join "\r\n" (map format_header headers)
+
+-- Format HTTP response as string
+let Http.formatResponse response =
+    let status_line = format_version response.version ++ " "
+        ++ int_to_string response.status ++ " "
+        ++ response.reason in
+    let headers_str = format_headers response.headers in
+    status_line ++ "\r\n" ++ headers_str ++ "\r\n\r\n" ++ response.body
+
+-- Format HTTP request as string
+let Http.formatRequest request =
+    let request_line = format_method request.method ++ " "
+        ++ request.path ++ " "
+        ++ format_version request.version in
+    let headers_str = format_headers request.headers in
+    request_line ++ "\r\n" ++ headers_str ++ "\r\n\r\n" ++ request.body
+
+-- ============================================================================
+-- Response Builders
+-- ============================================================================
+
+-- Create a basic response
+let Response.new status reason body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = reason,
+        headers = [("Content-Length", int_to_string (string_length body))],
+        body = body
+    }
+
+-- Text response
+let Response.text status body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = "OK",
+        headers = [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Length", int_to_string (string_length body))
+        ],
+        body = body
+    }
+
+-- HTML response
+let Response.html status body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = "OK",
+        headers = [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Length", int_to_string (string_length body))
+        ],
+        body = body
+    }
+
+-- JSON response
+let Response.json status body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = "OK",
+        headers = [
+            ("Content-Type", "application/json"),
+            ("Content-Length", int_to_string (string_length body))
+        ],
+        body = body
+    }
+
+-- Common responses
+let Response.ok body = Response.text 200 body
+let Response.notFound = Response.text 404 "Not Found"
+let Response.badRequest msg = Response.text 400 msg
+let Response.internalError msg = Response.text 500 msg
+
+-- Add header to response
+let Response.withHeader name value response =
+    HttpResponse {
+        version = response.version,
+        status = response.status,
+        reason = response.reason,
+        headers = (name, value) :: response.headers,
+        body = response.body
+    }
+
+-- ============================================================================
+-- Request Helpers
+-- ============================================================================
+
+-- Get a header value by name (case-sensitive for now)
+let Request.getHeader name request =
+    let rec find headers =
+        (match headers with
+        | [] -> None
+        | (key, value) :: rest ->
+            if key == name then Some value else find rest)
+    in
+    find request.headers
+
+-- Check if request is a specific method
+let Request.isGet request =
+    match request.method with | GET -> true | _ -> false
+let Request.isPost request =
+    match request.method with | POST -> true | _ -> false
+let Request.isPut request =
+    match request.method with | PUT -> true | _ -> false
+let Request.isDelete request =
+    match request.method with | DELETE -> true | _ -> false
+
+-- Parse query string from path
+let Request.parseQuery path =
+    match split_first "?" path with
+    | None -> []
+    | Some (_, query_str) ->
+        let pairs = string_split "&" query_str in
+        let parse_pair p =
+            (match split_first "=" p with
+            | None -> (p, "")
+            | Some (k, v) -> (k, v))
+        in
+        map parse_pair pairs
+
+-- Get path without query string
+let Request.pathWithoutQuery path =
+    match split_first "?" path with
+    | None -> path
+    | Some (p, _) -> p

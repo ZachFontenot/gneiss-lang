@@ -2412,6 +2412,94 @@ impl Inferencer {
             )),
         );
 
+        // Native string operations (replacing Gneiss implementations)
+        // string_to_lower : String -> String
+        env.insert(
+            "string_to_lower".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // string_to_upper : String -> String
+        env.insert(
+            "string_to_upper".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // string_trim : String -> String
+        env.insert(
+            "string_trim".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // string_trim_start : String -> String
+        env.insert(
+            "string_trim_start".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // string_trim_end : String -> String
+        env.insert(
+            "string_trim_end".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // string_reverse : String -> String
+        env.insert(
+            "string_reverse".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // string_is_empty : String -> Bool
+        env.insert(
+            "string_is_empty".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::Bool)),
+        );
+
+        // string_split : String -> String -> List String
+        env.insert(
+            "string_split".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::String, Type::list(Type::String)),
+            )),
+        );
+
+        // string_join : String -> List String -> String
+        env.insert(
+            "string_join".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::list(Type::String), Type::String),
+            )),
+        );
+
+        // string_char_at : Int -> String -> Option Char
+        env.insert(
+            "string_char_at".into(),
+            Scheme::mono(Type::arrow(
+                Type::Int,
+                Type::arrow(Type::String, Type::option(Type::Char)),
+            )),
+        );
+
+        // string_concat : String -> String -> String
+        env.insert(
+            "string_concat".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::String, Type::String),
+            )),
+        );
+
+        // string_repeat : Int -> String -> String
+        env.insert(
+            "string_repeat".into(),
+            Scheme::mono(Type::arrow(
+                Type::Int,
+                Type::arrow(Type::String, Type::String),
+            )),
+        );
+
         // Bytes builtins
         // bytes_to_string : Bytes -> String
         env.insert(
@@ -2718,6 +2806,104 @@ impl Inferencer {
             },
         };
         env.insert("Dict.size".into(), dict_size_scheme);
+
+        // Dict.isEmpty : forall a t. Dict a -> Bool
+        let dict_is_empty_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::Bool),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.isEmpty".into(), dict_is_empty_scheme);
+
+        // Dict.toList : forall a t. Dict a -> [(String, a)]
+        let dict_to_list_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::list(Type::Tuple(vec![
+                    Type::String,
+                    Type::new_generic(0),
+                ]))),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.toList".into(), dict_to_list_scheme);
+
+        // Dict.fromList : forall a t. [(String, a)] -> Dict a
+        let dict_from_list_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::list(Type::Tuple(vec![
+                    Type::String,
+                    Type::new_generic(0),
+                ]))),
+                ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.fromList".into(), dict_from_list_scheme);
+
+        // Dict.merge : forall a t. Dict a -> Dict a -> Dict a
+        let dict_merge_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                    ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.merge".into(), dict_merge_scheme);
+
+        // Dict.getOrDefault : forall a t. a -> String -> Dict a -> a
+        let dict_get_or_default_scheme = Scheme {
+            num_generics: 2,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::new_generic(0)),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::String),
+                    ret: Rc::new(Type::Arrow {
+                        arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
+                        ret: Rc::new(Type::new_generic(0)),
+                        ans_in: Rc::new(Type::new_generic(1)),
+                        ans_out: Rc::new(Type::new_generic(1)),
+                    }),
+                    ans_in: Rc::new(Type::new_generic(1)),
+                    ans_out: Rc::new(Type::new_generic(1)),
+                }),
+                ans_in: Rc::new(Type::new_generic(1)),
+                ans_out: Rc::new(Type::new_generic(1)),
+            },
+        };
+        env.insert("Dict.getOrDefault".into(), dict_get_or_default_scheme);
+
+        // html_escape : String -> String
+        env.insert(
+            "html_escape".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
+
+        // json_escape_string : String -> String
+        env.insert(
+            "json_escape_string".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::String)),
+        );
 
         // Set.new : forall t. () -> Set
         let set_new_scheme = Scheme {

@@ -876,6 +876,56 @@ impl Interpreter {
                 Value::Builtin("string_substring".into()),
             );
 
+            // Native string operations
+            env.define(
+                "string_to_lower".into(),
+                Value::Builtin("string_to_lower".into()),
+            );
+            env.define(
+                "string_to_upper".into(),
+                Value::Builtin("string_to_upper".into()),
+            );
+            env.define(
+                "string_trim".into(),
+                Value::Builtin("string_trim".into()),
+            );
+            env.define(
+                "string_trim_start".into(),
+                Value::Builtin("string_trim_start".into()),
+            );
+            env.define(
+                "string_trim_end".into(),
+                Value::Builtin("string_trim_end".into()),
+            );
+            env.define(
+                "string_reverse".into(),
+                Value::Builtin("string_reverse".into()),
+            );
+            env.define(
+                "string_is_empty".into(),
+                Value::Builtin("string_is_empty".into()),
+            );
+            env.define(
+                "string_split".into(),
+                Value::Builtin("string_split".into()),
+            );
+            env.define(
+                "string_join".into(),
+                Value::Builtin("string_join".into()),
+            );
+            env.define(
+                "string_char_at".into(),
+                Value::Builtin("string_char_at".into()),
+            );
+            env.define(
+                "string_concat".into(),
+                Value::Builtin("string_concat".into()),
+            );
+            env.define(
+                "string_repeat".into(),
+                Value::Builtin("string_repeat".into()),
+            );
+
             // Bytes builtins
             env.define(
                 "bytes_to_string".into(),
@@ -933,6 +983,15 @@ impl Interpreter {
             env.define("Dict.keys".into(), Value::Builtin("Dict.keys".into()));
             env.define("Dict.values".into(), Value::Builtin("Dict.values".into()));
             env.define("Dict.size".into(), Value::Builtin("Dict.size".into()));
+            env.define("Dict.isEmpty".into(), Value::Builtin("Dict.isEmpty".into()));
+            env.define("Dict.toList".into(), Value::Builtin("Dict.toList".into()));
+            env.define("Dict.fromList".into(), Value::Builtin("Dict.fromList".into()));
+            env.define("Dict.merge".into(), Value::Builtin("Dict.merge".into()));
+            env.define("Dict.getOrDefault".into(), Value::Builtin("Dict.getOrDefault".into()));
+
+            // String escape builtins
+            env.define("html_escape".into(), Value::Builtin("html_escape".into()));
+            env.define("json_escape_string".into(), Value::Builtin("json_escape_string".into()));
 
             // Set builtins (String-element set)
             env.define("Set.new".into(), Value::Builtin("Set.new".into()));
@@ -2760,6 +2819,42 @@ impl Interpreter {
                             )),
                         }
                     }
+                    // Dict.merge d1 d2 -> 2 args (d2 values override d1)
+                    ("Dict.merge", 2) => {
+                        let d2 = args.pop().unwrap();
+                        let d1 = args.pop().unwrap();
+                        match (d1, d2) {
+                            (Value::Dictionary(d1), Value::Dictionary(d2)) => {
+                                // d2 entries override d1
+                                let merged = d1.union(d2);
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Dictionary(merged),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Dict.merge: expected two Dictionaries".into(),
+                            )),
+                        }
+                    }
+                    // Dict.getOrDefault default key dict -> 3 args
+                    ("Dict.getOrDefault", 3) => {
+                        let dict = args.pop().unwrap();
+                        let key = args.pop().unwrap();
+                        let default = args.pop().unwrap();
+                        match (key, dict) {
+                            (Value::String(k), Value::Dictionary(d)) => {
+                                let result = d.get(&k).cloned().unwrap_or(default);
+                                StepResult::Continue(State::Apply { value: result, cont })
+                            }
+                            (Value::String(_), _) => StepResult::Error(EvalError::TypeError(
+                                "Dict.getOrDefault: expected Dictionary".into(),
+                            )),
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "Dict.getOrDefault: key must be String".into(),
+                            )),
+                        }
+                    }
                     // Set.insert elem set -> 2 args
                     ("Set.insert", 2) => {
                         let set = args.pop().unwrap();
@@ -2904,6 +2999,116 @@ impl Interpreter {
                             }
                             _ => StepResult::Error(EvalError::TypeError(
                                 "string_substring: expected (Int, Int, String)".into(),
+                            )),
+                        }
+                    }
+                    // string_split delim str -> 2 args, returns List String
+                    ("string_split", 2) => {
+                        let s = args.pop().unwrap();
+                        let delim = args.pop().unwrap();
+                        match (delim, s) {
+                            (Value::String(delim), Value::String(s)) => {
+                                let parts: im::Vector<Value> = s
+                                    .split(&delim)
+                                    .map(|p| Value::String(p.to_string()))
+                                    .collect();
+                                StepResult::Continue(State::Apply {
+                                    value: Value::List(parts),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_split: expected (String, String)".into(),
+                            )),
+                        }
+                    }
+                    // string_join sep list -> 2 args, returns String
+                    ("string_join", 2) => {
+                        let list = args.pop().unwrap();
+                        let sep = args.pop().unwrap();
+                        match (sep, list) {
+                            (Value::String(sep), Value::List(items)) => {
+                                let mut strings = Vec::with_capacity(items.len());
+                                for item in items {
+                                    match item {
+                                        Value::String(s) => strings.push(s),
+                                        _ => {
+                                            return StepResult::Error(EvalError::TypeError(
+                                                "string_join: list must contain strings".into(),
+                                            ))
+                                        }
+                                    }
+                                }
+                                StepResult::Continue(State::Apply {
+                                    value: Value::String(strings.join(&sep)),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_join: expected (String, List String)".into(),
+                            )),
+                        }
+                    }
+                    // string_char_at idx str -> 2 args, returns Option Char
+                    ("string_char_at", 2) => {
+                        let s = args.pop().unwrap();
+                        let idx = args.pop().unwrap();
+                        match (idx, s) {
+                            (Value::Int(idx), Value::String(s)) => {
+                                let result = if idx < 0 {
+                                    Value::Constructor {
+                                        name: "None".into(),
+                                        fields: vec![],
+                                    }
+                                } else {
+                                    match s.chars().nth(idx as usize) {
+                                        Some(c) => Value::Constructor {
+                                            name: "Some".into(),
+                                            fields: vec![Value::Char(c)],
+                                        },
+                                        None => Value::Constructor {
+                                            name: "None".into(),
+                                            fields: vec![],
+                                        },
+                                    }
+                                };
+                                StepResult::Continue(State::Apply { value: result, cont })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_char_at: expected (Int, String)".into(),
+                            )),
+                        }
+                    }
+                    // string_concat s1 s2 -> 2 args, returns String
+                    ("string_concat", 2) => {
+                        let s2 = args.pop().unwrap();
+                        let s1 = args.pop().unwrap();
+                        match (s1, s2) {
+                            (Value::String(s1), Value::String(s2)) => {
+                                StepResult::Continue(State::Apply {
+                                    value: Value::String(s1 + &s2),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_concat: expected (String, String)".into(),
+                            )),
+                        }
+                    }
+                    // string_repeat n str -> 2 args, returns String
+                    ("string_repeat", 2) => {
+                        let s = args.pop().unwrap();
+                        let n = args.pop().unwrap();
+                        match (n, s) {
+                            (Value::Int(n), Value::String(s)) => {
+                                let n = n.max(0) as usize;
+                                StepResult::Continue(State::Apply {
+                                    value: Value::String(s.repeat(n)),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_repeat: expected (Int, String)".into(),
                             )),
                         }
                     }
@@ -3251,8 +3456,38 @@ impl Interpreter {
                 Value::Char(c) => Ok(Value::Bool(c.is_whitespace())),
                 _ => Err(EvalError::TypeError("char_is_whitespace: expected char".into())),
             },
+            // Native string operations (single-arg)
+            "string_to_lower" => match arg {
+                Value::String(s) => Ok(Value::String(s.to_lowercase())),
+                _ => Err(EvalError::TypeError("string_to_lower: expected String".into())),
+            },
+            "string_to_upper" => match arg {
+                Value::String(s) => Ok(Value::String(s.to_uppercase())),
+                _ => Err(EvalError::TypeError("string_to_upper: expected String".into())),
+            },
+            "string_trim" => match arg {
+                Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                _ => Err(EvalError::TypeError("string_trim: expected String".into())),
+            },
+            "string_trim_start" => match arg {
+                Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
+                _ => Err(EvalError::TypeError("string_trim_start: expected String".into())),
+            },
+            "string_trim_end" => match arg {
+                Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
+                _ => Err(EvalError::TypeError("string_trim_end: expected String".into())),
+            },
+            "string_reverse" => match arg {
+                Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                _ => Err(EvalError::TypeError("string_reverse: expected String".into())),
+            },
+            "string_is_empty" => match arg {
+                Value::String(s) => Ok(Value::Bool(s.is_empty())),
+                _ => Err(EvalError::TypeError("string_is_empty: expected String".into())),
+            },
             // Multi-arg string builtins - return partial with first arg
-            "string_index_of" | "string_substring" => {
+            "string_index_of" | "string_substring" | "string_split" | "string_join"
+            | "string_char_at" | "string_concat" | "string_repeat" => {
                 Ok(Value::BuiltinPartial {
                     name: name.to_string(),
                     args: vec![arg],
@@ -3303,8 +3538,80 @@ impl Interpreter {
                 Value::Dictionary(d) => Ok(Value::Int(d.len() as i64)),
                 _ => Err(EvalError::TypeError("Dict.size: expected Dictionary".into())),
             },
+            "Dict.isEmpty" => match arg {
+                Value::Dictionary(d) => Ok(Value::Bool(d.is_empty())),
+                _ => Err(EvalError::TypeError("Dict.isEmpty: expected Dictionary".into())),
+            },
+            "Dict.toList" => match arg {
+                Value::Dictionary(d) => {
+                    let pairs: im::Vector<Value> = d
+                        .iter()
+                        .map(|(k, v)| Value::Tuple(vec![Value::String(k.clone()), v.clone()]))
+                        .collect();
+                    Ok(Value::List(pairs))
+                }
+                _ => Err(EvalError::TypeError("Dict.toList: expected Dictionary".into())),
+            },
+            "Dict.fromList" => match arg {
+                Value::List(items) => {
+                    let mut dict = im::HashMap::new();
+                    for item in items {
+                        match item {
+                            Value::Tuple(ref fields) if fields.len() == 2 => {
+                                match (&fields[0], &fields[1]) {
+                                    (Value::String(k), v) => {
+                                        dict.insert(k.clone(), v.clone());
+                                    }
+                                    _ => return Err(EvalError::TypeError(
+                                        "Dict.fromList: expected (String, a) pairs".into(),
+                                    )),
+                                }
+                            }
+                            _ => return Err(EvalError::TypeError(
+                                "Dict.fromList: expected list of (String, a) pairs".into(),
+                            )),
+                        }
+                    }
+                    Ok(Value::Dictionary(dict))
+                }
+                _ => Err(EvalError::TypeError("Dict.fromList: expected List".into())),
+            },
+            // String escape builtins
+            "html_escape" => match arg {
+                Value::String(s) => {
+                    let escaped = s
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;")
+                        .replace('\'', "&#39;");
+                    Ok(Value::String(escaped))
+                }
+                _ => Err(EvalError::TypeError("html_escape: expected String".into())),
+            },
+            "json_escape_string" => match arg {
+                Value::String(s) => {
+                    let mut escaped = String::with_capacity(s.len());
+                    for c in s.chars() {
+                        match c {
+                            '"' => escaped.push_str("\\\""),
+                            '\\' => escaped.push_str("\\\\"),
+                            '\n' => escaped.push_str("\\n"),
+                            '\r' => escaped.push_str("\\r"),
+                            '\t' => escaped.push_str("\\t"),
+                            c if c.is_control() => {
+                                escaped.push_str(&format!("\\u{:04x}", c as u32));
+                            }
+                            c => escaped.push(c),
+                        }
+                    }
+                    Ok(Value::String(escaped))
+                }
+                _ => Err(EvalError::TypeError("json_escape_string: expected String".into())),
+            },
             // Multi-arg Dict builtins - return partial with first arg
-            "Dict.insert" | "Dict.get" | "Dict.remove" | "Dict.contains" => {
+            "Dict.insert" | "Dict.get" | "Dict.remove" | "Dict.contains"
+            | "Dict.merge" | "Dict.getOrDefault" => {
                 Ok(Value::BuiltinPartial {
                     name: name.to_string(),
                     args: vec![arg],
