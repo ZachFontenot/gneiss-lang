@@ -23,6 +23,8 @@ pub enum EvalError {
     MatchFailed,
     #[error("division by zero")]
     DivisionByZero,
+    #[error("integer overflow")]
+    IntegerOverflow,
     #[error("runtime error: {0}")]
     RuntimeError(String),
     #[error("deadlock detected")]
@@ -422,6 +424,12 @@ pub enum Value {
     /// A suspended fiber effect awaiting runtime/scheduler handling
     FiberEffect(FiberEffect),
 
+    /// A composed function (f >> g or f << g)
+    ComposedFn {
+        first: Box<Value>,
+        second: Box<Value>,
+    },
+
     /// A record value with named fields (persistent hashmap for O(log m) updates)
     Record {
         type_name: String,
@@ -455,6 +463,7 @@ impl Value {
             Value::Continuation { .. } => "Continuation",
             Value::Fiber(_) => "Fiber",
             Value::FiberEffect(_) => "FiberEffect",
+            Value::ComposedFn { .. } => "Function",
             Value::Dict { .. } => "Dict",
             Value::Record { .. } => "Record",
             Value::Dictionary(_) => "Dictionary",
@@ -643,6 +652,20 @@ impl Interpreter {
                 Value::Builtin("char_to_string".into()),
             );
             env.define("char_to_int".into(), Value::Builtin("char_to_int".into()));
+            env.define("char_to_lower".into(), Value::Builtin("char_to_lower".into()));
+            env.define("char_to_upper".into(), Value::Builtin("char_to_upper".into()));
+            env.define(
+                "char_is_whitespace".into(),
+                Value::Builtin("char_is_whitespace".into()),
+            );
+            env.define(
+                "string_index_of".into(),
+                Value::Builtin("string_index_of".into()),
+            );
+            env.define(
+                "string_substring".into(),
+                Value::Builtin("string_substring".into()),
+            );
 
             // spawn : (() -> a) -> Pid (backwards compatibility with old spawn keyword)
             env.define("spawn".into(), Value::Builtin("spawn".into()));
@@ -2375,12 +2398,75 @@ impl Interpreter {
                             )),
                         }
                     }
+                    // string_index_of needle haystack -> 2 args, returns Option Int
+                    ("string_index_of", 2) => {
+                        let haystack = args.pop().unwrap();
+                        let needle = args.pop().unwrap();
+                        match (needle, haystack) {
+                            (Value::String(needle), Value::String(haystack)) => {
+                                let result = match haystack.find(&needle) {
+                                    Some(idx) => {
+                                        // Convert byte index to char index
+                                        let char_idx = haystack[..idx].chars().count() as i64;
+                                        Value::Constructor {
+                                            name: "Some".into(),
+                                            fields: vec![Value::Int(char_idx)],
+                                        }
+                                    }
+                                    None => Value::Constructor {
+                                        name: "None".into(),
+                                        fields: vec![],
+                                    },
+                                };
+                                StepResult::Continue(State::Apply { value: result, cont })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_index_of: expected two strings".into(),
+                            )),
+                        }
+                    }
+                    // string_substring start end str -> 3 args
+                    ("string_substring", 3) => {
+                        let s = args.pop().unwrap();
+                        let end = args.pop().unwrap();
+                        let start = args.pop().unwrap();
+                        match (start, end, s) {
+                            (Value::Int(start), Value::Int(end), Value::String(s)) => {
+                                let start = start.max(0) as usize;
+                                let end = end.max(0) as usize;
+                                // Work with char indices, not byte indices
+                                let chars: Vec<char> = s.chars().collect();
+                                let len = chars.len();
+                                let start = start.min(len);
+                                let end = end.min(len);
+                                let result: String = if start <= end {
+                                    chars[start..end].iter().collect()
+                                } else {
+                                    String::new()
+                                };
+                                StepResult::Continue(State::Apply {
+                                    value: Value::String(result),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "string_substring: expected (Int, Int, String)".into(),
+                            )),
+                        }
+                    }
                     // Not enough args yet, return partial
                     _ => StepResult::Continue(State::Apply {
                         value: Value::BuiltinPartial { name, args },
                         cont,
                     }),
                 }
+            }
+
+            Value::ComposedFn { first, second } => {
+                // (f >> g) x = g (f x)
+                // Push frame to apply second when first returns, then apply first
+                cont.push(Frame::AppArg { func: *second });
+                self.do_apply(*first, arg, cont)
             }
 
             _ => StepResult::Error(EvalError::TypeError(format!(
@@ -2403,13 +2489,29 @@ impl Interpreter {
 
     fn eval_binop(&self, op: &BinOp, left: Value, right: Value) -> Result<Value, EvalError> {
         match (op, &left, &right) {
-            // Arithmetic
-            (BinOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
-            (BinOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
-            (BinOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+            // Arithmetic (checked to prevent overflow panics)
+            (BinOp::Add, Value::Int(a), Value::Int(b)) => a
+                .checked_add(*b)
+                .map(Value::Int)
+                .ok_or(EvalError::IntegerOverflow),
+            (BinOp::Sub, Value::Int(a), Value::Int(b)) => a
+                .checked_sub(*b)
+                .map(Value::Int)
+                .ok_or(EvalError::IntegerOverflow),
+            (BinOp::Mul, Value::Int(a), Value::Int(b)) => a
+                .checked_mul(*b)
+                .map(Value::Int)
+                .ok_or(EvalError::IntegerOverflow),
             (BinOp::Div, Value::Int(_), Value::Int(0)) => Err(EvalError::DivisionByZero),
-            (BinOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
-            (BinOp::Mod, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+            (BinOp::Div, Value::Int(a), Value::Int(b)) => a
+                .checked_div(*b)
+                .map(Value::Int)
+                .ok_or(EvalError::IntegerOverflow),
+            (BinOp::Mod, Value::Int(_), Value::Int(0)) => Err(EvalError::DivisionByZero),
+            (BinOp::Mod, Value::Int(a), Value::Int(b)) => a
+                .checked_rem(*b)
+                .map(Value::Int)
+                .ok_or(EvalError::IntegerOverflow),
 
             // Float arithmetic
             (BinOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
@@ -2433,6 +2535,11 @@ impl Interpreter {
             (BinOp::Lte, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
             (BinOp::Gte, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
 
+            (BinOp::Lt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
+            (BinOp::Gt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
+            (BinOp::Lte, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
+            (BinOp::Gte, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
+
             (BinOp::Lt, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a < b)),
             (BinOp::Gt, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a > b)),
             (BinOp::Lte, Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a <= b)),
@@ -2455,10 +2562,17 @@ impl Interpreter {
                 Ok(Value::String(format!("{}{}", a, b)))
             }
 
-            // Compose - create a new closure
-            (BinOp::Compose, _, _) | (BinOp::ComposeBack, _, _) => Err(EvalError::RuntimeError(
-                "function composition not yet implemented".into(),
-            )),
+            // Compose - create a composed function value
+            // f >> g means apply f first, then g: (f >> g) x = g (f x)
+            (BinOp::Compose, f, g) => Ok(Value::ComposedFn {
+                first: Box::new(f.clone()),
+                second: Box::new(g.clone()),
+            }),
+            // f << g means apply g first, then f: (f << g) x = f (g x)
+            (BinOp::ComposeBack, f, g) => Ok(Value::ComposedFn {
+                first: Box::new(g.clone()),
+                second: Box::new(f.clone()),
+            }),
 
             // Pipe should be desugared
             (BinOp::Pipe, _, _) | (BinOp::PipeBack, _, _) => {
@@ -2482,7 +2596,10 @@ impl Interpreter {
 
     fn eval_unaryop(&self, op: UnaryOp, val: Value) -> Result<Value, EvalError> {
         match (op, &val) {
-            (UnaryOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+            (UnaryOp::Neg, Value::Int(n)) => n
+                .checked_neg()
+                .map(Value::Int)
+                .ok_or(EvalError::IntegerOverflow),
             (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             _ => Err(EvalError::TypeError(format!(
@@ -2536,6 +2653,33 @@ impl Interpreter {
                 Value::Char(c) => Ok(Value::Int(c as i64)),
                 _ => Err(EvalError::TypeError("expected char".into())),
             },
+            "char_to_lower" => match arg {
+                Value::Char(c) => {
+                    // to_lowercase returns an iterator for multi-char mappings (e.g., German ß)
+                    // We take the first char for simplicity
+                    let lower = c.to_lowercase().next().unwrap_or(c);
+                    Ok(Value::Char(lower))
+                }
+                _ => Err(EvalError::TypeError("char_to_lower: expected char".into())),
+            },
+            "char_to_upper" => match arg {
+                Value::Char(c) => {
+                    let upper = c.to_uppercase().next().unwrap_or(c);
+                    Ok(Value::Char(upper))
+                }
+                _ => Err(EvalError::TypeError("char_to_upper: expected char".into())),
+            },
+            "char_is_whitespace" => match arg {
+                Value::Char(c) => Ok(Value::Bool(c.is_whitespace())),
+                _ => Err(EvalError::TypeError("char_is_whitespace: expected char".into())),
+            },
+            // Multi-arg string builtins - return partial with first arg
+            "string_index_of" | "string_substring" => {
+                Ok(Value::BuiltinPartial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
+            }
             // Dict builtins
             "Dict.new" => Ok(Value::Dictionary(im::HashMap::new())),
             "Dict.keys" => match arg {
@@ -2659,6 +2803,7 @@ impl Interpreter {
                 print!(")");
             }
             Value::Closure { .. } => print!("<function>"),
+            Value::ComposedFn { .. } => print!("<function>"),
             Value::Constructor { name, fields } => {
                 print!("{}", name);
                 for field in fields {

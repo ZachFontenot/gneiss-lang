@@ -4,8 +4,8 @@ test.gn:1:13
 
 I found a type mismatch.
 
-  One part has type:    String
-  Another part has:     Int
+  One part has type:    Int
+  Another part has:     String
 
   These types are not compatible.
 

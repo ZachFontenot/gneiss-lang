@@ -1405,9 +1405,21 @@ impl Inferencer {
 
                 let result_ty = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                        self.unify_at(&left_result.ty, &Type::Int, &left.span)?;
-                        self.unify_at(&right_result.ty, &Type::Int, &right.span)?;
-                        Type::Int
+                        // Arithmetic works on Int or Float (ad-hoc polymorphism)
+                        self.unify_at(&left_result.ty, &right_result.ty, &right.span)?;
+                        let resolved = left_result.ty.resolve();
+                        match &resolved {
+                            Type::Int | Type::Float => resolved,
+                            Type::Var(_) => Type::Int, // Default unresolved to Int
+                            _ => {
+                                return Err(TypeError::TypeMismatch {
+                                    expected: Type::Int,
+                                    found: resolved,
+                                    span: Some(left.span.clone()),
+                                    context: None,
+                                });
+                            }
+                        }
                     }
                     BinOp::Eq | BinOp::Neq => {
                         self.unify_at(&left_result.ty, &right_result.ty, &right.span)?;
@@ -2358,6 +2370,42 @@ impl Inferencer {
         env.insert(
             "char_to_int".into(),
             Scheme::mono(Type::arrow(Type::Char, Type::Int)),
+        );
+
+        // char_to_lower : Char -> Char
+        env.insert(
+            "char_to_lower".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Char)),
+        );
+
+        // char_to_upper : Char -> Char
+        env.insert(
+            "char_to_upper".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Char)),
+        );
+
+        // char_is_whitespace : Char -> Bool
+        env.insert(
+            "char_is_whitespace".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Bool)),
+        );
+
+        // string_index_of : String -> String -> Option Int
+        env.insert(
+            "string_index_of".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::String, Type::option(Type::Int)),
+            )),
+        );
+
+        // string_substring : Int -> Int -> String -> String
+        env.insert(
+            "string_substring".into(),
+            Scheme::mono(Type::arrow(
+                Type::Int,
+                Type::arrow(Type::Int, Type::arrow(Type::String, Type::String)),
+            )),
         );
 
         // spawn : forall a. (() -> a) -> Pid (backwards compatibility)

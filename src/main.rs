@@ -426,6 +426,7 @@ fn print_value(val: &gneiss::Value) {
             print!(")");
         }
         gneiss::Value::Closure { .. } => print!("<function>"),
+        gneiss::Value::ComposedFn { .. } => print!("<function>"),
         gneiss::Value::Constructor { name, fields } => {
             print!("{}", name);
             for field in fields {
