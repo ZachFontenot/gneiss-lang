@@ -1,9 +1,11 @@
 //! Gneiss - A statically-typed functional language with actors and channels
 
 pub mod ast;
+pub mod blocking_pool;
 pub mod errors;
 pub mod eval;
 pub mod infer;
+pub mod io_reactor;
 pub mod lexer;
 pub mod module;
 pub mod operators;

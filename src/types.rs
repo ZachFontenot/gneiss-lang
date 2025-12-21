@@ -23,6 +23,11 @@ pub enum Type {
     Unit,
     Bytes,
 
+    /// I/O handle types (opaque handles for file/socket operations)
+    FileHandle,
+    TcpSocket,
+    TcpListener,
+
     /// Function type with answer-type modification: σ/α → τ/β
     /// "Function from σ to τ that changes answer type from α to β"
     /// For pure functions, ans_in == ans_out (same type variable)
@@ -134,6 +139,9 @@ impl Type {
             | Type::Char
             | Type::Unit
             | Type::Bytes
+            | Type::FileHandle
+            | Type::TcpSocket
+            | Type::TcpListener
             | Type::Pid
             | Type::Set => false,
         }
@@ -247,6 +255,9 @@ impl Type {
             Type::Char => "Char".to_string(),
             Type::Unit => "()".to_string(),
             Type::Bytes => "Bytes".to_string(),
+            Type::FileHandle => "FileHandle".to_string(),
+            Type::TcpSocket => "TcpSocket".to_string(),
+            Type::TcpListener => "TcpListener".to_string(),
             Type::Pid => "Pid".to_string(),
             Type::Arrow {
                 arg,
@@ -370,6 +381,9 @@ impl fmt::Display for Type {
             Type::Char => write!(f, "Char"),
             Type::Unit => write!(f, "()"),
             Type::Bytes => write!(f, "Bytes"),
+            Type::FileHandle => write!(f, "FileHandle"),
+            Type::TcpSocket => write!(f, "TcpSocket"),
+            Type::TcpListener => write!(f, "TcpListener"),
             Type::Pid => write!(f, "Pid"),
             Type::Arrow {
                 arg,

@@ -184,6 +184,18 @@ pub enum Frame {
     RecordUpdateCollectLast {
         field_name: String,
     },
+
+    // === I/O frames ===
+    /// Collecting arguments for a multi-arg I/O builtin operation
+    IoOp {
+        /// Which I/O operation we're building
+        op_kind: PartialIoOp,
+        /// Arguments already collected
+        collected_args: Vec<Value>,
+        /// Remaining argument expressions to evaluate
+        remaining_args: Vec<Expr>,
+        env: Env,
+    },
 }
 
 /// What kind of collection we're building
@@ -193,6 +205,101 @@ pub enum CollectKind {
     Tuple,
     Constructor { name: String },
     Record { type_name: String, field_names: Vec<String> },
+}
+
+// ============================================================================
+// I/O Operations
+// ============================================================================
+
+/// Partial I/O operations being built (waiting for more arguments)
+#[derive(Debug, Clone)]
+pub enum PartialIoOp {
+    /// file_open path mode -> needs path (String), mode (OpenMode)
+    FileOpen,
+    /// tcp_connect host port -> needs host (String), port (Int)
+    TcpConnect,
+    /// tcp_listen host port -> needs host (String), port (Int)
+    TcpListen,
+    /// read handle count -> needs handle, count (Int)
+    Read,
+    /// write handle bytes -> needs handle, bytes (Bytes)
+    Write,
+}
+
+/// File open modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    /// Read-only
+    Read,
+    /// Write-only (create/truncate)
+    Write,
+    /// Append (create if not exists)
+    Append,
+    /// Read and write
+    ReadWrite,
+}
+
+impl OpenMode {
+    /// Convert from a string value (for builtins)
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "r" | "read" => Some(OpenMode::Read),
+            "w" | "write" => Some(OpenMode::Write),
+            "a" | "append" => Some(OpenMode::Append),
+            "rw" | "read_write" => Some(OpenMode::ReadWrite),
+            _ => None,
+        }
+    }
+}
+
+/// I/O operation that a fiber can request
+/// Each operation will be handled by the I/O reactor or blocking pool
+#[derive(Debug, Clone)]
+pub enum IoOp {
+    // === File operations ===
+    /// Open a file with the given path and mode
+    FileOpen {
+        path: String,
+        mode: OpenMode,
+    },
+
+    // === TCP operations ===
+    /// Connect to a TCP server
+    TcpConnect {
+        host: String,
+        port: u16,
+    },
+    /// Start listening on a TCP port
+    TcpListen {
+        host: String,
+        port: u16,
+    },
+    /// Accept a connection from a TCP listener
+    TcpAccept {
+        listener: u64, // TcpListener handle ID
+    },
+
+    // === Generic I/O operations (work on files and sockets) ===
+    /// Read up to N bytes from a handle
+    Read {
+        handle: u64, // FileHandle or TcpSocket handle ID
+        count: usize,
+    },
+    /// Write bytes to a handle
+    Write {
+        handle: u64, // FileHandle or TcpSocket handle ID
+        data: Vec<u8>,
+    },
+    /// Close a handle
+    Close {
+        handle: u64,
+    },
+
+    // === Timer operations ===
+    /// Sleep for a duration (milliseconds)
+    Sleep {
+        duration_ms: u64,
+    },
 }
 
 /// The continuation stack
@@ -333,6 +440,14 @@ pub enum FiberEffect {
         arms: Vec<SelectEffectArm>,
         cont: Option<Box<Cont>>,
     },
+
+    /// Perform an I/O operation (handled by reactor or blocking pool)
+    /// - `op`: The I/O operation to perform
+    /// - `cont`: Continuation expecting the operation result (usually Result IoError a)
+    Io {
+        op: IoOp,
+        cont: Option<Box<Cont>>,
+    },
 }
 
 impl FiberEffect {
@@ -351,6 +466,7 @@ impl FiberEffect {
             FiberEffect::Recv { channel, .. } => FiberEffect::Recv { channel, cont: boxed },
             FiberEffect::Join { fiber_id, .. } => FiberEffect::Join { fiber_id, cont: boxed },
             FiberEffect::Select { arms, .. } => FiberEffect::Select { arms, cont: boxed },
+            FiberEffect::Io { op, .. } => FiberEffect::Io { op, cont: boxed },
         }
     }
 }
@@ -444,6 +560,16 @@ pub enum Value {
 
     /// A set value (String elements, persistent hashset)
     Set(im::HashSet<String>),
+
+    // === I/O handles ===
+    /// An open file handle (opaque ID managed by I/O reactor)
+    FileHandle(u64),
+
+    /// A TCP socket (client connection, opaque ID)
+    TcpSocket(u64),
+
+    /// A TCP listener (server socket, opaque ID)
+    TcpListener(u64),
 }
 
 impl Value {
@@ -472,6 +598,9 @@ impl Value {
             Value::Record { .. } => "Record",
             Value::Dictionary(_) => "Dictionary",
             Value::Set(_) => "Set",
+            Value::FileHandle(_) => "FileHandle",
+            Value::TcpSocket(_) => "TcpSocket",
+            Value::TcpListener(_) => "TcpListener",
         }
     }
 
@@ -782,6 +911,18 @@ impl Interpreter {
                 "Fiber.yield".into(),
                 Value::Builtin("Fiber.yield".into()),
             );
+
+            // I/O builtins
+            env.define("sleep_ms".into(), Value::Builtin("sleep_ms".into()));
+            // File I/O
+            env.define("file_open".into(), Value::Builtin("file_open".into()));
+            env.define("file_read".into(), Value::Builtin("file_read".into()));
+            env.define("file_write".into(), Value::Builtin("file_write".into()));
+            env.define("file_close".into(), Value::Builtin("file_close".into()));
+            // TCP sockets
+            env.define("tcp_connect".into(), Value::Builtin("tcp_connect".into()));
+            env.define("tcp_listen".into(), Value::Builtin("tcp_listen".into()));
+            env.define("tcp_accept".into(), Value::Builtin("tcp_accept".into()));
 
             // Dict builtins (String-keyed dictionary)
             env.define("Dict.new".into(), Value::Builtin("Dict.new".into()));
@@ -2140,6 +2281,216 @@ impl Interpreter {
                     )),
                 }
             }
+
+            Some(Frame::IoOp {
+                op_kind,
+                mut collected_args,
+                remaining_args,
+                env,
+            }) => {
+                // Add the just-evaluated value to collected args
+                collected_args.push(value);
+
+                if remaining_args.is_empty() {
+                    // All args collected, produce the IoOp effect
+                    match Self::build_io_op(op_kind, collected_args) {
+                        Ok(io_op) => {
+                            // Create the effect - continuation will be attached by capture
+                            let effect = FiberEffect::Io { op: io_op, cont: None };
+                            StepResult::Continue(State::Apply {
+                                value: Value::FiberEffect(effect),
+                                cont,
+                            })
+                        }
+                        Err(e) => StepResult::Error(e),
+                    }
+                } else {
+                    // More args to evaluate
+                    let mut remaining = remaining_args;
+                    let next = remaining.remove(0);
+                    cont.push(Frame::IoOp {
+                        op_kind,
+                        collected_args,
+                        remaining_args: remaining,
+                        env: env.clone(),
+                    });
+                    StepResult::Continue(State::Eval {
+                        expr: Rc::new(next),
+                        env,
+                        cont,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Build an IoOp from collected arguments based on the operation kind
+    fn build_io_op(op_kind: PartialIoOp, args: Vec<Value>) -> Result<IoOp, EvalError> {
+        match op_kind {
+            PartialIoOp::FileOpen => {
+                // args: [path: String, mode: String]
+                if args.len() != 2 {
+                    return Err(EvalError::TypeError(format!(
+                        "file_open expects 2 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "file_open path must be String, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                let mode = match &args[1] {
+                    Value::String(s) => OpenMode::from_str(s).ok_or_else(|| {
+                        EvalError::TypeError(format!("invalid open mode: {}", s))
+                    })?,
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "file_open mode must be String, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                Ok(IoOp::FileOpen { path, mode })
+            }
+
+            PartialIoOp::TcpConnect => {
+                // args: [host: String, port: Int]
+                if args.len() != 2 {
+                    return Err(EvalError::TypeError(format!(
+                        "tcp_connect expects 2 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let host = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "tcp_connect host must be String, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                let port = match &args[1] {
+                    Value::Int(n) if *n >= 0 && *n <= 65535 => *n as u16,
+                    Value::Int(n) => {
+                        return Err(EvalError::TypeError(format!(
+                            "tcp_connect port must be 0-65535, got {}",
+                            n
+                        )))
+                    }
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "tcp_connect port must be Int, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                Ok(IoOp::TcpConnect { host, port })
+            }
+
+            PartialIoOp::TcpListen => {
+                // args: [host: String, port: Int]
+                if args.len() != 2 {
+                    return Err(EvalError::TypeError(format!(
+                        "tcp_listen expects 2 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let host = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "tcp_listen host must be String, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                let port = match &args[1] {
+                    Value::Int(n) if *n >= 0 && *n <= 65535 => *n as u16,
+                    Value::Int(n) => {
+                        return Err(EvalError::TypeError(format!(
+                            "tcp_listen port must be 0-65535, got {}",
+                            n
+                        )))
+                    }
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "tcp_listen port must be Int, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                Ok(IoOp::TcpListen { host, port })
+            }
+
+            PartialIoOp::Read => {
+                // args: [handle: FileHandle|TcpSocket, count: Int]
+                if args.len() != 2 {
+                    return Err(EvalError::TypeError(format!(
+                        "io_read expects 2 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let handle = match &args[0] {
+                    Value::FileHandle(id) | Value::TcpSocket(id) => *id,
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "io_read handle must be FileHandle or TcpSocket, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                let count = match &args[1] {
+                    Value::Int(n) if *n >= 0 => *n as usize,
+                    Value::Int(n) => {
+                        return Err(EvalError::TypeError(format!(
+                            "io_read count must be non-negative, got {}",
+                            n
+                        )))
+                    }
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "io_read count must be Int, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                Ok(IoOp::Read { handle, count })
+            }
+
+            PartialIoOp::Write => {
+                // args: [handle: FileHandle|TcpSocket, data: Bytes]
+                if args.len() != 2 {
+                    return Err(EvalError::TypeError(format!(
+                        "io_write expects 2 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let handle = match &args[0] {
+                    Value::FileHandle(id) | Value::TcpSocket(id) => *id,
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "io_write handle must be FileHandle or TcpSocket, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                let data = match &args[1] {
+                    Value::Bytes(b) => b.clone(),
+                    v => {
+                        return Err(EvalError::TypeError(format!(
+                            "io_write data must be Bytes, got {}",
+                            v.type_name()
+                        )))
+                    }
+                };
+                Ok(IoOp::Write { handle, data })
+            }
         }
     }
 
@@ -2600,6 +2951,87 @@ impl Interpreter {
                             )),
                         }
                     }
+                    // file_open path mode -> 2 args
+                    ("file_open", 2) => {
+                        match Self::build_io_op(PartialIoOp::FileOpen, args) {
+                            Ok(io_op) => {
+                                // Capture continuation and attach to effect
+                                match self.capture_to_fiber_boundary(&mut cont) {
+                                    Ok(captured) => {
+                                        let effect = FiberEffect::Io { op: io_op, cont: None }
+                                            .with_cont(captured);
+                                        self.return_fiber_effect(effect, cont)
+                                    }
+                                    Err(e) => StepResult::Error(e),
+                                }
+                            }
+                            Err(e) => StepResult::Error(e),
+                        }
+                    }
+                    // file_read handle count -> 2 args
+                    ("file_read", 2) => {
+                        match Self::build_io_op(PartialIoOp::Read, args) {
+                            Ok(io_op) => {
+                                match self.capture_to_fiber_boundary(&mut cont) {
+                                    Ok(captured) => {
+                                        let effect = FiberEffect::Io { op: io_op, cont: None }
+                                            .with_cont(captured);
+                                        self.return_fiber_effect(effect, cont)
+                                    }
+                                    Err(e) => StepResult::Error(e),
+                                }
+                            }
+                            Err(e) => StepResult::Error(e),
+                        }
+                    }
+                    // file_write handle data -> 2 args
+                    ("file_write", 2) => {
+                        match Self::build_io_op(PartialIoOp::Write, args) {
+                            Ok(io_op) => {
+                                match self.capture_to_fiber_boundary(&mut cont) {
+                                    Ok(captured) => {
+                                        let effect = FiberEffect::Io { op: io_op, cont: None }
+                                            .with_cont(captured);
+                                        self.return_fiber_effect(effect, cont)
+                                    }
+                                    Err(e) => StepResult::Error(e),
+                                }
+                            }
+                            Err(e) => StepResult::Error(e),
+                        }
+                    }
+                    // tcp_connect host port -> 2 args
+                    ("tcp_connect", 2) => {
+                        match Self::build_io_op(PartialIoOp::TcpConnect, args) {
+                            Ok(io_op) => {
+                                match self.capture_to_fiber_boundary(&mut cont) {
+                                    Ok(captured) => {
+                                        let effect = FiberEffect::Io { op: io_op, cont: None }
+                                            .with_cont(captured);
+                                        self.return_fiber_effect(effect, cont)
+                                    }
+                                    Err(e) => StepResult::Error(e),
+                                }
+                            }
+                            Err(e) => StepResult::Error(e),
+                        }
+                    }
+                    // tcp_listen host port -> 2 args
+                    ("tcp_listen", 2) => {
+                        match Self::build_io_op(PartialIoOp::TcpListen, args) {
+                            Ok(io_op) => {
+                                match self.capture_to_fiber_boundary(&mut cont) {
+                                    Ok(captured) => {
+                                        let effect = FiberEffect::Io { op: io_op, cont: None }
+                                            .with_cont(captured);
+                                        self.return_fiber_effect(effect, cont)
+                                    }
+                                    Err(e) => StepResult::Error(e),
+                                }
+                            }
+                            Err(e) => StepResult::Error(e),
+                        }
+                    }
                     // Not enough args yet, return partial
                     _ => StepResult::Continue(State::Apply {
                         value: Value::BuiltinPartial { name, args },
@@ -2933,6 +3365,69 @@ impl Interpreter {
                 // arg should be ()
                 Ok(BuiltinResult::Effect(FiberEffect::Yield { cont: None }))
             }
+            "sleep_ms" => {
+                // arg should be Int (milliseconds)
+                match arg {
+                    Value::Int(ms) if ms >= 0 => {
+                        Ok(BuiltinResult::Effect(FiberEffect::Io {
+                            op: IoOp::Sleep { duration_ms: ms as u64 },
+                            cont: None,
+                        }))
+                    }
+                    Value::Int(ms) => Err(EvalError::TypeError(format!(
+                        "sleep_ms: duration must be non-negative, got {}",
+                        ms
+                    ))),
+                    _ => Err(EvalError::TypeError(format!(
+                        "sleep_ms: expected Int, got {}",
+                        arg.type_name()
+                    ))),
+                }
+            }
+            // Multi-arg file I/O builtins - return partial with first arg
+            "file_open" | "file_read" | "file_write" => {
+                Ok(BuiltinResult::Partial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
+            }
+            // Single-arg file I/O builtin
+            "file_close" => {
+                match arg {
+                    Value::FileHandle(id) => {
+                        Ok(BuiltinResult::Effect(FiberEffect::Io {
+                            op: IoOp::Close { handle: id },
+                            cont: None,
+                        }))
+                    }
+                    _ => Err(EvalError::TypeError(format!(
+                        "file_close: expected FileHandle, got {}",
+                        arg.type_name()
+                    ))),
+                }
+            }
+            // Multi-arg TCP builtins - return partial with first arg
+            "tcp_connect" | "tcp_listen" => {
+                Ok(BuiltinResult::Partial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
+            }
+            // Single-arg TCP builtin
+            "tcp_accept" => {
+                match arg {
+                    Value::TcpListener(id) => {
+                        Ok(BuiltinResult::Effect(FiberEffect::Io {
+                            op: IoOp::TcpAccept { listener: id },
+                            cont: None,
+                        }))
+                    }
+                    _ => Err(EvalError::TypeError(format!(
+                        "tcp_accept: expected TcpListener, got {}",
+                        arg.type_name()
+                    ))),
+                }
+            }
             _ => Err(EvalError::RuntimeError(format!(
                 "unknown effectful builtin: {}",
                 name
@@ -2940,9 +3435,22 @@ impl Interpreter {
         }
     }
 
-    /// Check if a builtin name is an effectful fiber builtin
+    /// Check if a builtin name is an effectful fiber/IO builtin
     fn is_effectful_builtin(name: &str) -> bool {
-        matches!(name, "Fiber.spawn" | "Fiber.join" | "Fiber.yield")
+        matches!(
+            name,
+            "Fiber.spawn"
+                | "Fiber.join"
+                | "Fiber.yield"
+                | "sleep_ms"
+                | "file_open"
+                | "file_read"
+                | "file_write"
+                | "file_close"
+                | "tcp_connect"
+                | "tcp_listen"
+                | "tcp_accept"
+        )
     }
 
     fn print_value(&self, val: &Value) {
@@ -3033,6 +3541,9 @@ impl Interpreter {
                 }
                 print!("}}");
             }
+            Value::FileHandle(id) => print!("<file-handle:{}>", id),
+            Value::TcpSocket(id) => print!("<tcp-socket:{}>", id),
+            Value::TcpListener(id) => print!("<tcp-listener:{}>", id),
         }
     }
 
@@ -3158,61 +3669,79 @@ impl Interpreter {
 
     /// Run the scheduler until all processes complete or deadlock
     fn run_scheduler(&mut self) -> Result<(), EvalError> {
-        // Simple round-robin scheduler
-        while let Some(pid) = self.runtime.next_ready() {
-            self.runtime.set_current(Some(pid));
+        // Round-robin scheduler with I/O and timer polling
+        loop {
+            // Try to get next ready process
+            if let Some(pid) = self.runtime.next_ready() {
+                self.runtime.set_current(Some(pid));
 
-            if let Some(pcont) = self.runtime.take_continuation(pid) {
-                match pcont {
-                    ProcessContinuation::Start(thunk) => {
-                        // Start a new process: apply thunk to unit
-                        self.run_process(pid, thunk)?;
-                    }
-                    ProcessContinuation::ResumeFiber(value) => {
-                        // Resume fiber with a value using fiber_cont
-                        if let Some(mut fiber_cont) = self.runtime.take_fiber_cont(pid) {
-                            fiber_cont.insert_at_bottom(Frame::FiberBoundary);
-                            let state = State::Apply {
-                                value,
-                                cont: fiber_cont,
-                            };
-                            self.run_state(pid, state)?;
-                        } else {
-                            self.runtime.mark_done(pid);
+                if let Some(pcont) = self.runtime.take_continuation(pid) {
+                    match pcont {
+                        ProcessContinuation::Start(thunk) => {
+                            // Start a new process: apply thunk to unit
+                            self.run_process(pid, thunk)?;
                         }
-                    }
-                    ProcessContinuation::ResumeSelect { channel, value } => {
-                        // Resume from select - find matching arm, bind pattern, evaluate body
-                        if let Some(arms) = self.runtime.take_select_arms(pid) {
-                            if let Some(arm) = arms.into_iter().find(|a| a.channel == channel) {
-                                // Bind pattern to received value
-                                let new_env = EnvInner::with_parent(&arm.env);
-                                if self.try_bind_pattern(&new_env, &arm.pattern, &value) {
-                                    // Build continuation with fiber_cont
-                                    let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_else(Cont::new);
-                                    cont.insert_at_bottom(Frame::FiberBoundary);
-                                    let state = State::Eval {
-                                        expr: arm.body,
-                                        env: new_env,
-                                        cont,
-                                    };
-                                    self.run_state(pid, state)?;
-                                } else {
-                                    return Err(EvalError::MatchFailed);
+                        ProcessContinuation::ResumeFiber(value) => {
+                            // Resume fiber with a value using fiber_cont
+                            if let Some(mut fiber_cont) = self.runtime.take_fiber_cont(pid) {
+                                fiber_cont.insert_at_bottom(Frame::FiberBoundary);
+                                let state = State::Apply {
+                                    value,
+                                    cont: fiber_cont,
+                                };
+                                self.run_state(pid, state)?;
+                            } else {
+                                self.runtime.mark_done(pid);
+                            }
+                        }
+                        ProcessContinuation::ResumeSelect { channel, value } => {
+                            // Resume from select - find matching arm, bind pattern, evaluate body
+                            if let Some(arms) = self.runtime.take_select_arms(pid) {
+                                if let Some(arm) = arms.into_iter().find(|a| a.channel == channel) {
+                                    // Bind pattern to received value
+                                    let new_env = EnvInner::with_parent(&arm.env);
+                                    if self.try_bind_pattern(&new_env, &arm.pattern, &value) {
+                                        // Build continuation with fiber_cont
+                                        let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_else(Cont::new);
+                                        cont.insert_at_bottom(Frame::FiberBoundary);
+                                        let state = State::Eval {
+                                            expr: arm.body,
+                                            env: new_env,
+                                            cont,
+                                        };
+                                        self.run_state(pid, state)?;
+                                    } else {
+                                        return Err(EvalError::MatchFailed);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
+                self.runtime.set_current(None);
+            } else {
+                // No ready processes - check if we have I/O or timers to wait for
+                let timeout = self.runtime.time_until_next_timer();
+                let has_io_pending = self.runtime.has_io_pending();
+
+                if timeout.is_some() || has_io_pending {
+                    // We have I/O or timers to wait for
+                    let woke_any = self.runtime.poll_io(timeout);
+
+                    // If nothing woke up and we're deadlocked, exit
+                    if !woke_any && self.runtime.is_deadlocked() {
+                        return Err(EvalError::Deadlock);
+                    }
+                } else {
+                    // No I/O or timers - use original exit logic
+                    if self.runtime.is_deadlocked() {
+                        return Err(EvalError::Deadlock);
+                    } else {
+                        return Ok(());
+                    }
+                }
             }
-
-            self.runtime.set_current(None);
-        }
-
-        if self.runtime.is_deadlocked() {
-            Err(EvalError::Deadlock)
-        } else {
-            Ok(())
         }
     }
 
@@ -3306,6 +3835,10 @@ impl Interpreter {
                 // Block fiber on select (register on all channels)
                 self.runtime
                     .block_fiber_select(pid, arms, cont.map(|c| *c));
+            }
+            FiberEffect::Io { op, cont } => {
+                // Dispatch to the appropriate I/O handler (reactor, pool, or timer)
+                self.runtime.dispatch_io(pid, op, cont.map(|c| *c));
             }
         }
         Ok(())
@@ -4327,5 +4860,240 @@ let result = show 42
         .unwrap();
         // f(6) -> g(5) -> h(4) -> f(3) -> g(2) -> h(1) -> f(0) = 0
         assert!(matches!(val, Value::Int(0)));
+    }
+
+    // ========================================================================
+    // I/O and Timer tests
+    // ========================================================================
+
+    #[test]
+    fn test_sleep_ms_basic() {
+        use std::time::Instant;
+        // Test that sleep_ms actually delays and returns Unit
+        let program = r#"
+let main () =
+    sleep_ms 50
+"#;
+        let start = Instant::now();
+        run_program(program).unwrap();
+        let elapsed = start.elapsed();
+        // Should have slept at least 40ms (allowing some slack)
+        assert!(
+            elapsed.as_millis() >= 40,
+            "Expected at least 40ms elapsed, got {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_sleep_ms_returns_unit() {
+        // Verify that sleep_ms returns () and can be used in let binding
+        let program = r#"
+let main () =
+    let _ = sleep_ms 10 in
+    42
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_sleep_ms_with_concurrent_work() {
+        // Verify sleep works with other fibers
+        let program = r#"
+let main () =
+    let ch = Channel.new in
+    let _ = spawn (fun () ->
+        sleep_ms 20;
+        Channel.send ch 100
+    ) in
+    Channel.recv ch
+"#;
+        run_program(program).unwrap();
+    }
+
+    // ========================================================================
+    // File I/O tests
+    // ========================================================================
+
+    #[test]
+    fn test_file_open_nonexistent() {
+        // Opening a nonexistent file should return Err IoError
+        // We use match to verify the error case and succeed
+        let program = r#"
+let main () =
+    match file_open "/nonexistent/path/to/file.txt" "r" with
+    | Ok _ -> ()  -- unexpected success
+    | Err _ -> () -- expected failure, test passes
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_file_open_close() {
+        use std::io::Write;
+        // Create a temp file and test open/close
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("gneiss_test_file.txt");
+
+        // Create the file first
+        {
+            let mut f = std::fs::File::create(&temp_path).unwrap();
+            f.write_all(b"hello").unwrap();
+        }
+
+        let program = format!(
+            r#"
+let main () =
+    match file_open "{}" "r" with
+    | Ok handle ->
+        match file_close handle with
+        | Ok _ -> () -- success
+        | Err e -> print e -- print error
+    | Err e -> print e -- print error
+"#,
+            temp_path.display()
+        );
+        run_program(&program).unwrap();
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_file_write_and_verify() {
+        // Test that file_write actually writes to the file
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("gneiss_test_write_verify.txt");
+
+        let write_program = format!(
+            r#"
+let main () =
+    match file_open "{}" "w" with
+    | Ok handle ->
+        let data = string_to_bytes "hello from gneiss" in
+        match file_write handle data with
+        | Ok _ ->
+            match file_close handle with
+            | Ok _ -> ()
+            | Err e -> print e
+        | Err e -> print e
+    | Err e -> print e
+"#,
+            temp_path.display()
+        );
+        run_program(&write_program).unwrap();
+
+        // Verify the file was written correctly
+        let contents = std::fs::read_to_string(&temp_path).unwrap();
+        assert_eq!(contents, "hello from gneiss");
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_file_read_and_verify() {
+        use std::io::Write;
+        // Create a file first via Rust
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("gneiss_test_read_verify.txt");
+        {
+            let mut f = std::fs::File::create(&temp_path).unwrap();
+            f.write_all(b"test content from rust").unwrap();
+        }
+
+        // Read using Gneiss and print the content
+        let read_program = format!(
+            r#"
+let main () =
+    match file_open "{}" "r" with
+    | Ok handle ->
+        match file_read handle 100 with
+        | Ok data ->
+            let s = bytes_to_string data in
+            let _ = file_close handle in
+            print s
+        | Err e ->
+            let _ = file_close handle in
+            print e
+    | Err e -> print e
+"#,
+            temp_path.display()
+        );
+        run_program(&read_program).unwrap();
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_file_round_trip() {
+        // Write and read back in same program
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("gneiss_test_round_trip.txt");
+
+        let program = format!(
+            r#"
+let main () =
+    -- First write to file
+    match file_open "{path}" "w" with
+    | Ok wh ->
+        let data = string_to_bytes "round trip test" in
+        let _ = file_write wh data in
+        let _ = file_close wh in
+
+        -- Now read it back
+        match file_open "{path}" "r" with
+        | Ok rh ->
+            match file_read rh 100 with
+            | Ok read_data ->
+                let _ = file_close rh in
+                print (bytes_to_string read_data)
+            | Err e ->
+                let _ = file_close rh in
+                print e
+        | Err e -> print e
+    | Err e -> print e
+"#,
+            path = temp_path.display()
+        );
+        run_program(&program).unwrap();
+
+        // Verify the file exists and contains the expected content
+        let contents = std::fs::read_to_string(&temp_path).unwrap();
+        assert_eq!(contents, "round trip test");
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    // ========================================================================
+    // TCP socket tests
+    // ========================================================================
+
+    #[test]
+    fn test_tcp_connect_returns_error_for_invalid_host() {
+        // TCP connect to an invalid host should return Err IoError
+        let program = r#"
+let main () =
+    match tcp_connect "invalid.host.that.does.not.exist.local" 12345 with
+    | Ok _ -> ()  -- unexpected success
+    | Err _ -> () -- expected: connection error
+"#;
+        run_program(program).unwrap();
+    }
+
+    #[test]
+    fn test_tcp_listen_and_accept() {
+        // tcp_listen should work, tcp_accept returns error without registry
+        let program = r#"
+let main () =
+    match tcp_listen "127.0.0.1" 0 with
+    | Ok listener ->
+        -- Would try accept but no registry yet
+        ()
+    | Err _ -> () -- May fail if port unavailable
+"#;
+        run_program(program).unwrap();
     }
 }

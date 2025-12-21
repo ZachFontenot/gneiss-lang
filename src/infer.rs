@@ -2443,6 +2443,84 @@ impl Inferencer {
             Scheme::mono(Type::arrow(Type::Bytes, Type::arrow(Type::Bytes, Type::Bytes))),
         );
 
+        // I/O builtins
+        // sleep_ms : Int -> ()
+        env.insert(
+            "sleep_ms".into(),
+            Scheme::mono(Type::arrow(Type::Int, Type::Unit)),
+        );
+
+        // Helper: Result IoError T
+        let io_error_type = Type::Constructor {
+            name: "IoError".to_string(),
+            args: vec![],
+        };
+        let result_io_error = |t: Type| -> Type {
+            Type::Constructor {
+                name: "Result".to_string(),
+                args: vec![io_error_type.clone(), t],
+            }
+        };
+
+        // File I/O builtins
+        // file_open : String -> String -> Result IoError FileHandle
+        env.insert(
+            "file_open".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::String, result_io_error(Type::FileHandle)),
+            )),
+        );
+
+        // file_read : FileHandle -> Int -> Result IoError Bytes
+        env.insert(
+            "file_read".into(),
+            Scheme::mono(Type::arrow(
+                Type::FileHandle,
+                Type::arrow(Type::Int, result_io_error(Type::Bytes)),
+            )),
+        );
+
+        // file_write : FileHandle -> Bytes -> Result IoError Int
+        env.insert(
+            "file_write".into(),
+            Scheme::mono(Type::arrow(
+                Type::FileHandle,
+                Type::arrow(Type::Bytes, result_io_error(Type::Int)),
+            )),
+        );
+
+        // file_close : FileHandle -> Result IoError ()
+        env.insert(
+            "file_close".into(),
+            Scheme::mono(Type::arrow(Type::FileHandle, result_io_error(Type::Unit))),
+        );
+
+        // TCP socket builtins
+        // tcp_connect : String -> Int -> Result IoError TcpSocket
+        env.insert(
+            "tcp_connect".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::Int, result_io_error(Type::TcpSocket)),
+            )),
+        );
+
+        // tcp_listen : String -> Int -> Result IoError TcpListener
+        env.insert(
+            "tcp_listen".into(),
+            Scheme::mono(Type::arrow(
+                Type::String,
+                Type::arrow(Type::Int, result_io_error(Type::TcpListener)),
+            )),
+        );
+
+        // tcp_accept : TcpListener -> Result IoError TcpSocket
+        env.insert(
+            "tcp_accept".into(),
+            Scheme::mono(Type::arrow(Type::TcpListener, result_io_error(Type::TcpSocket))),
+        );
+
         // spawn : forall a. (() -> a) -> Pid (backwards compatibility)
         // Note: This is the old spawn syntax, returns Pid not Fiber
         let spawn_scheme = Scheme {

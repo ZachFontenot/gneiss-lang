@@ -114,6 +114,7 @@ pub enum FiberEffectTrace {
     Recv { channel: u64 },
     Join { fiber_id: u64 },
     Select { channel_count: usize },
+    Io { op_name: String },
 }
 
 impl From<&FiberEffect> for FiberEffectTrace {
@@ -128,6 +129,9 @@ impl From<&FiberEffect> for FiberEffectTrace {
             FiberEffect::Join { fiber_id, .. } => FiberEffectTrace::Join { fiber_id: *fiber_id },
             FiberEffect::Select { arms, .. } => FiberEffectTrace::Select {
                 channel_count: arms.len(),
+            },
+            FiberEffect::Io { op, .. } => FiberEffectTrace::Io {
+                op_name: format!("{:?}", op).split('{').next().unwrap_or("Io").trim().to_string(),
             },
         }
     }

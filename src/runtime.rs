@@ -2,8 +2,11 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
-use crate::eval::{Cont, FiberId, SelectEffectArm, Value};
+use crate::blocking_pool::{BlockingPool, BlockingTask, BlockingOpResult};
+use crate::eval::{Cont, FiberId, IoOp, SelectEffectArm, Value};
+use crate::io_reactor::{IoReactor, IoToken};
 
 /// Unique process identifier
 pub type Pid = u64;
@@ -44,6 +47,12 @@ pub enum ProcessState {
     BlockedSelect(Vec<ChannelId>),
     /// Blocked waiting for another fiber to complete (Phase 7)
     BlockedJoin(FiberId),
+    /// Blocked waiting for I/O (reactor will wake when ready)
+    BlockedIo(IoToken),
+    /// Blocked waiting for a timer to expire
+    BlockedSleep(Instant),
+    /// Blocked waiting for a blocking pool operation
+    BlockedBlocking,
     /// Terminated
     Done,
 }
@@ -90,6 +99,12 @@ pub struct Runtime {
     current_pid: Option<Pid>,
     /// The main process PID (first spawned)
     main_pid: Option<Pid>,
+    /// I/O reactor for non-blocking I/O (optional, created on first use)
+    io_reactor: Option<IoReactor>,
+    /// Blocking thread pool for blocking operations (optional, created on first use)
+    blocking_pool: Option<BlockingPool>,
+    /// Timers: (deadline, fiber_id) sorted by deadline
+    timers: Vec<(Instant, Pid)>,
 }
 
 impl Runtime {
@@ -102,6 +117,9 @@ impl Runtime {
             next_channel_id: 1,
             current_pid: None,
             main_pid: None,
+            io_reactor: None,
+            blocking_pool: None,
+            timers: Vec::new(),
         }
     }
 
@@ -180,14 +198,25 @@ impl Runtime {
     }
 
     /// Check if we're in a true deadlock situation
-    /// A deadlock is when the main process is blocked (or there are only blocked processes left)
+    /// A deadlock is when the main process is blocked on channels/joins (not I/O)
     /// Spawned processes being blocked after main completes is not deadlock
+    /// Note: BlockedIo, BlockedSleep, BlockedBlocking are NOT deadlock - they will complete
     pub fn is_deadlocked(&self) -> bool {
         if !self.ready_queue.is_empty() {
             return false; // Still have work to do
         }
 
-        // Check if main is blocked
+        // If there are pending timers or I/O, not deadlocked
+        if !self.timers.is_empty() {
+            return false;
+        }
+        if let Some(ref reactor) = self.io_reactor {
+            if !reactor.is_empty() {
+                return false;
+            }
+        }
+
+        // Check if main is blocked on channels/joins (real deadlock)
         if let Some(main_pid) = self.main_pid {
             if let Some(main_process) = self.processes.get(&main_pid) {
                 let state = &main_process.borrow().state;
@@ -198,9 +227,9 @@ impl Runtime {
                         | ProcessState::BlockedSelect(_)
                         | ProcessState::BlockedJoin(_)
                 ) {
-                    return true; // Main is blocked = deadlock
+                    return true; // Main is blocked on channels = deadlock
                 }
-                // Main is Done or Ready - not deadlock
+                // Main is Done, Ready, or blocked on I/O - not deadlock
                 return false;
             }
         }
@@ -244,6 +273,9 @@ impl Runtime {
                         | ProcessState::BlockedRecv(_)
                         | ProcessState::BlockedSelect(_)
                         | ProcessState::BlockedJoin(_)
+                        | ProcessState::BlockedIo(_)
+                        | ProcessState::BlockedSleep(_)
+                        | ProcessState::BlockedBlocking
                 )
             })
             .count()
@@ -487,6 +519,209 @@ impl Runtime {
         self.processes
             .get(&pid)
             .and_then(|p| p.borrow_mut().select_arms.take())
+    }
+
+    // ========================================================================
+    // I/O Integration
+    // ========================================================================
+
+    /// Get or create the I/O reactor
+    fn ensure_reactor(&mut self) -> &mut IoReactor {
+        if self.io_reactor.is_none() {
+            self.io_reactor = Some(IoReactor::new().expect("failed to create I/O reactor"));
+        }
+        self.io_reactor.as_mut().unwrap()
+    }
+
+    /// Get or create the blocking pool
+    fn ensure_blocking_pool(&mut self) -> &mut BlockingPool {
+        if self.blocking_pool.is_none() {
+            self.blocking_pool = Some(BlockingPool::new());
+        }
+        self.blocking_pool.as_mut().unwrap()
+    }
+
+    /// Block a fiber waiting for a sleep timer
+    pub fn block_fiber_sleep(&mut self, pid: Pid, duration_ms: u64, cont: Option<Cont>) {
+        if let Some(c) = cont {
+            self.store_fiber_cont(pid, c);
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(duration_ms);
+
+        // Insert timer sorted by deadline
+        let pos = self.timers.iter().position(|(d, _)| *d > deadline).unwrap_or(self.timers.len());
+        self.timers.insert(pos, (deadline, pid));
+
+        if let Some(process) = self.processes.get(&pid) {
+            process.borrow_mut().state = ProcessState::BlockedSleep(deadline);
+        }
+    }
+
+    /// Block a fiber waiting for a blocking pool operation
+    pub fn block_fiber_blocking(&mut self, pid: Pid, op: IoOp, cont: Option<Cont>) {
+        if let Some(c) = cont {
+            self.store_fiber_cont(pid, c);
+        }
+
+        // Submit to blocking pool
+        let pool = self.ensure_blocking_pool();
+        let task = BlockingTask { fiber_id: pid, op };
+        let _ = pool.submit(task);
+
+        if let Some(process) = self.processes.get(&pid) {
+            process.borrow_mut().state = ProcessState::BlockedBlocking;
+        }
+    }
+
+    /// Check timers and wake any fibers whose deadlines have passed
+    pub fn check_timers(&mut self) {
+        let now = Instant::now();
+
+        // Collect expired timers
+        let mut expired = Vec::new();
+        while let Some(&(deadline, pid)) = self.timers.first() {
+            if deadline <= now {
+                expired.push(pid);
+                self.timers.remove(0);
+            } else {
+                break;
+            }
+        }
+
+        // Wake expired fibers
+        for pid in expired {
+            self.resume_fiber_with(pid, Value::Unit);
+        }
+    }
+
+    /// Check the blocking pool for completed operations and wake fibers
+    pub fn check_blocking_pool(&mut self) {
+        if let Some(ref pool) = self.blocking_pool {
+            let results = pool.drain_results();
+            for result in results {
+                let value = self.blocking_result_to_value(result.result);
+                self.resume_fiber_with(result.fiber_id, value);
+            }
+        }
+    }
+
+    /// Convert a BlockingOpResult to a Value (Result type)
+    fn blocking_result_to_value(&self, result: BlockingOpResult) -> Value {
+        match result {
+            BlockingOpResult::FileOpened(id) => {
+                Value::ok(Value::FileHandle(id))
+            }
+            BlockingOpResult::TcpConnected(id) => {
+                Value::ok(Value::TcpSocket(id))
+            }
+            BlockingOpResult::TcpListening(id) => {
+                Value::ok(Value::TcpListener(id))
+            }
+            BlockingOpResult::TcpAccepted(id) => {
+                Value::ok(Value::TcpSocket(id))
+            }
+            BlockingOpResult::Read(bytes) => {
+                Value::ok(Value::Bytes(bytes))
+            }
+            BlockingOpResult::Written(count) => {
+                Value::ok(Value::Int(count as i64))
+            }
+            BlockingOpResult::Closed => {
+                Value::ok(Value::Unit)
+            }
+            BlockingOpResult::Slept => {
+                Value::Unit
+            }
+            BlockingOpResult::Error(e) => {
+                Value::from_io_result::<(), _>(Err(e), |_| Value::Unit)
+            }
+        }
+    }
+
+    /// Get time until next timer fires (for poll timeout)
+    pub fn time_until_next_timer(&self) -> Option<Duration> {
+        self.timers.first().map(|(deadline, _)| {
+            let now = Instant::now();
+            if *deadline <= now {
+                Duration::ZERO
+            } else {
+                *deadline - now
+            }
+        })
+    }
+
+    /// Check if there's any I/O or blocking work pending
+    pub fn has_io_pending(&self) -> bool {
+        // Check if there are any fibers blocked on I/O, sleep, or blocking pool
+        self.processes.values().any(|p| {
+            let state = &p.borrow().state;
+            matches!(
+                state,
+                ProcessState::BlockedIo(_)
+                    | ProcessState::BlockedSleep(_)
+                    | ProcessState::BlockedBlocking
+            )
+        })
+    }
+
+    /// Poll I/O and timers, waking any ready fibers
+    /// Returns true if any fibers were woken
+    pub fn poll_io(&mut self, timeout: Option<Duration>) -> bool {
+        let mut woke_any = false;
+
+        // Check timers first
+        self.check_timers();
+        if !self.ready_queue.is_empty() {
+            woke_any = true;
+        }
+
+        // Check blocking pool
+        self.check_blocking_pool();
+        if !self.ready_queue.is_empty() {
+            woke_any = true;
+        }
+
+        // If nothing is ready yet and we have a timeout, wait before checking again
+        // This handles the case where we're waiting for timers but have no reactor
+        if !woke_any {
+            if let Some(ref mut reactor) = self.io_reactor {
+                // Poll I/O reactor with the timeout
+                if let Ok(events) = reactor.poll(timeout) {
+                    for event in events {
+                        // For now, just wake the fiber - actual I/O handling
+                        // will be done when the builtin is implemented
+                        self.resume_fiber_with(event.fiber_id, Value::Unit);
+                        woke_any = true;
+                    }
+                }
+            } else if let Some(duration) = timeout {
+                // No reactor but we have a timeout - sleep to wait for timers
+                std::thread::sleep(duration);
+                // Check timers again after sleeping
+                self.check_timers();
+                if !self.ready_queue.is_empty() {
+                    woke_any = true;
+                }
+            }
+        }
+
+        woke_any
+    }
+
+    /// Dispatch an I/O operation to the appropriate handler
+    /// Called from eval.rs when handling FiberEffect::Io
+    pub fn dispatch_io(&mut self, pid: Pid, op: IoOp, cont: Option<Cont>) {
+        match &op {
+            IoOp::Sleep { duration_ms } => {
+                self.block_fiber_sleep(pid, *duration_ms, cont);
+            }
+            // All other ops go to blocking pool for now
+            // Later, socket ops will use the reactor for non-blocking I/O
+            _ => {
+                self.block_fiber_blocking(pid, op, cont);
+            }
+        }
     }
 }
 

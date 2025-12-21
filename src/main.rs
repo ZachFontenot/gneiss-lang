@@ -483,6 +483,9 @@ fn print_value(val: &gneiss::Value) {
             }
             print!("}}");
         }
+        gneiss::Value::FileHandle(id) => print!("<file-handle:{}>", id),
+        gneiss::Value::TcpSocket(id) => print!("<tcp-socket:{}>", id),
+        gneiss::Value::TcpListener(id) => print!("<tcp-listener:{}>", id),
     }
 }
 
