@@ -376,6 +376,9 @@ pub enum Value {
     Char(char),
     Unit,
 
+    /// Binary data (for I/O operations)
+    Bytes(Vec<u8>),
+
     /// A list (persistent/immutable vector for O(log n) operations)
     List(im::Vector<Value>),
 
@@ -452,6 +455,7 @@ impl Value {
             Value::String(_) => "String",
             Value::Char(_) => "Char",
             Value::Unit => "()",
+            Value::Bytes(_) => "Bytes",
             Value::List(_) => "List",
             Value::Tuple(_) => "Tuple",
             Value::Closure { .. } => "Function",
@@ -480,6 +484,7 @@ impl Value {
             Value::String(_) => Type::String,
             Value::Char(_) => Type::Char,
             Value::Unit => Type::Unit,
+            Value::Bytes(_) => Type::Bytes,
             Value::List(items) => {
                 // Infer element type from first item, or use a fresh var
                 let elem_ty = items.front().map(|v| v.to_type()).unwrap_or(Type::Unit);
@@ -515,6 +520,7 @@ impl Value {
             Value::String(_) => Type::String,
             Value::Char(_) => Type::Char,
             Value::Unit => Type::Unit,
+            Value::Bytes(_) => Type::Bytes,
             Value::List(items) => {
                 let elem_ty = items
                     .front()
@@ -553,6 +559,80 @@ impl Value {
             }
             Value::Set(_) => Type::Set,
             _ => Type::Unit,
+        }
+    }
+
+    /// Create an IoError constructor value from a std::io::Error
+    pub fn from_io_error(err: std::io::Error) -> Value {
+        use std::io::ErrorKind;
+        match err.kind() {
+            ErrorKind::NotFound => Value::Constructor {
+                name: "NotFound".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::PermissionDenied => Value::Constructor {
+                name: "PermissionDenied".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::ConnectionRefused => Value::Constructor {
+                name: "ConnectionRefused".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::ConnectionReset => Value::Constructor {
+                name: "ConnectionReset".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::BrokenPipe => Value::Constructor {
+                name: "BrokenPipe".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::TimedOut => Value::Constructor {
+                name: "TimedOut".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::AddrInUse => Value::Constructor {
+                name: "AddrInUse".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::AddrNotAvailable => Value::Constructor {
+                name: "AddrNotAvailable".to_string(),
+                fields: vec![],
+            },
+            ErrorKind::InvalidInput => Value::Constructor {
+                name: "InvalidInput".to_string(),
+                fields: vec![Value::String(err.to_string())],
+            },
+            _ => Value::Constructor {
+                name: "IoOther".to_string(),
+                fields: vec![Value::String(err.to_string())],
+            },
+        }
+    }
+
+    /// Wrap a value in Ok
+    pub fn ok(value: Value) -> Value {
+        Value::Constructor {
+            name: "Ok".to_string(),
+            fields: vec![value],
+        }
+    }
+
+    /// Wrap an IoError in Err
+    pub fn io_err(io_error: Value) -> Value {
+        Value::Constructor {
+            name: "Err".to_string(),
+            fields: vec![io_error],
+        }
+    }
+
+    /// Create Result IoError a from std::io::Error
+    pub fn from_io_result<T, F>(result: std::io::Result<T>, success_fn: F) -> Value
+    where
+        F: FnOnce(T) -> Value,
+    {
+        match result {
+            Ok(v) => Value::ok(success_fn(v)),
+            Err(e) => Value::io_err(Value::from_io_error(e)),
         }
     }
 }
@@ -665,6 +745,28 @@ impl Interpreter {
             env.define(
                 "string_substring".into(),
                 Value::Builtin("string_substring".into()),
+            );
+
+            // Bytes builtins
+            env.define(
+                "bytes_to_string".into(),
+                Value::Builtin("bytes_to_string".into()),
+            );
+            env.define(
+                "string_to_bytes".into(),
+                Value::Builtin("string_to_bytes".into()),
+            );
+            env.define(
+                "bytes_length".into(),
+                Value::Builtin("bytes_length".into()),
+            );
+            env.define(
+                "bytes_slice".into(),
+                Value::Builtin("bytes_slice".into()),
+            );
+            env.define(
+                "bytes_concat".into(),
+                Value::Builtin("bytes_concat".into()),
             );
 
             // spawn : (() -> a) -> Pid (backwards compatibility with old spawn keyword)
@@ -2454,6 +2556,50 @@ impl Interpreter {
                             )),
                         }
                     }
+                    // bytes_slice start end bytes -> 3 args
+                    ("bytes_slice", 3) => {
+                        let bytes = args.pop().unwrap();
+                        let end = args.pop().unwrap();
+                        let start = args.pop().unwrap();
+                        match (start, end, bytes) {
+                            (Value::Int(start), Value::Int(end), Value::Bytes(bytes)) => {
+                                let start = start.max(0) as usize;
+                                let end = end.max(0) as usize;
+                                let len = bytes.len();
+                                let start = start.min(len);
+                                let end = end.min(len);
+                                let result: Vec<u8> = if start <= end {
+                                    bytes[start..end].to_vec()
+                                } else {
+                                    Vec::new()
+                                };
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Bytes(result),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "bytes_slice: expected (Int, Int, Bytes)".into(),
+                            )),
+                        }
+                    }
+                    // bytes_concat bytes1 bytes2 -> 2 args
+                    ("bytes_concat", 2) => {
+                        let b2 = args.pop().unwrap();
+                        let b1 = args.pop().unwrap();
+                        match (b1, b2) {
+                            (Value::Bytes(mut b1), Value::Bytes(b2)) => {
+                                b1.extend(b2);
+                                StepResult::Continue(State::Apply {
+                                    value: Value::Bytes(b1),
+                                    cont,
+                                })
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "bytes_concat: expected (Bytes, Bytes)".into(),
+                            )),
+                        }
+                    }
                     // Not enough args yet, return partial
                     _ => StepResult::Continue(State::Apply {
                         value: Value::BuiltinPartial { name, args },
@@ -2680,6 +2826,31 @@ impl Interpreter {
                     args: vec![arg],
                 })
             }
+            // Bytes builtins
+            "bytes_to_string" => match arg {
+                Value::Bytes(bytes) => {
+                    match String::from_utf8(bytes) {
+                        Ok(s) => Ok(Value::String(s)),
+                        Err(_) => Err(EvalError::TypeError("bytes_to_string: invalid UTF-8".into())),
+                    }
+                }
+                _ => Err(EvalError::TypeError("bytes_to_string: expected Bytes".into())),
+            },
+            "string_to_bytes" => match arg {
+                Value::String(s) => Ok(Value::Bytes(s.into_bytes())),
+                _ => Err(EvalError::TypeError("string_to_bytes: expected String".into())),
+            },
+            "bytes_length" => match arg {
+                Value::Bytes(bytes) => Ok(Value::Int(bytes.len() as i64)),
+                _ => Err(EvalError::TypeError("bytes_length: expected Bytes".into())),
+            },
+            // Multi-arg bytes builtins - return partial with first arg
+            "bytes_slice" | "bytes_concat" => {
+                Ok(Value::BuiltinPartial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
+            }
             // Dict builtins
             "Dict.new" => Ok(Value::Dictionary(im::HashMap::new())),
             "Dict.keys" => match arg {
@@ -2782,6 +2953,9 @@ impl Interpreter {
             Value::String(s) => print!("{}", s),
             Value::Char(c) => print!("{}", c),
             Value::Unit => print!("()"),
+            Value::Bytes(bytes) => {
+                print!("<bytes:{} bytes>", bytes.len());
+            }
             Value::List(items) => {
                 print!("[");
                 for (i, item) in items.iter().enumerate() {

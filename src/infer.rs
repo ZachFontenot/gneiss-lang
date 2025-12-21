@@ -367,6 +367,7 @@ impl Inferencer {
             (Type::String, Type::String) => Ok(()),
             (Type::Char, Type::Char) => Ok(()),
             (Type::Unit, Type::Unit) => Ok(()),
+            (Type::Bytes, Type::Bytes) => Ok(()),
             (Type::Pid, Type::Pid) => Ok(()),
 
             // Type variables
@@ -2406,6 +2407,40 @@ impl Inferencer {
                 Type::Int,
                 Type::arrow(Type::Int, Type::arrow(Type::String, Type::String)),
             )),
+        );
+
+        // Bytes builtins
+        // bytes_to_string : Bytes -> String
+        env.insert(
+            "bytes_to_string".into(),
+            Scheme::mono(Type::arrow(Type::Bytes, Type::String)),
+        );
+
+        // string_to_bytes : String -> Bytes
+        env.insert(
+            "string_to_bytes".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::Bytes)),
+        );
+
+        // bytes_length : Bytes -> Int
+        env.insert(
+            "bytes_length".into(),
+            Scheme::mono(Type::arrow(Type::Bytes, Type::Int)),
+        );
+
+        // bytes_slice : Int -> Int -> Bytes -> Bytes
+        env.insert(
+            "bytes_slice".into(),
+            Scheme::mono(Type::arrow(
+                Type::Int,
+                Type::arrow(Type::Int, Type::arrow(Type::Bytes, Type::Bytes)),
+            )),
+        );
+
+        // bytes_concat : Bytes -> Bytes -> Bytes
+        env.insert(
+            "bytes_concat".into(),
+            Scheme::mono(Type::arrow(Type::Bytes, Type::arrow(Type::Bytes, Type::Bytes))),
         );
 
         // spawn : forall a. (() -> a) -> Pid (backwards compatibility)

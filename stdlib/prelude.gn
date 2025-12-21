@@ -5,6 +5,19 @@
 type Option a = | Some a | None
 type Result e a = | Ok a | Err e
 
+-- I/O Error type
+type IoError =
+    | NotFound
+    | PermissionDenied
+    | ConnectionRefused
+    | ConnectionReset
+    | BrokenPipe
+    | TimedOut
+    | AddrInUse
+    | AddrNotAvailable
+    | InvalidInput String
+    | IoOther String
+
 -- Identity combinator
 let id x = x
 

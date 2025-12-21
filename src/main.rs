@@ -405,6 +405,7 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::String(s) => print!("\"{}\"", s),
         gneiss::Value::Char(c) => print!("'{}'", c),
         gneiss::Value::Unit => print!("()"),
+        gneiss::Value::Bytes(bytes) => print!("<bytes:{} bytes>", bytes.len()),
         gneiss::Value::List(items) => {
             print!("[");
             for (i, item) in items.iter().enumerate() {

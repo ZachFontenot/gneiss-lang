@@ -21,6 +21,7 @@ pub enum Type {
     String,
     Char,
     Unit,
+    Bytes,
 
     /// Function type with answer-type modification: σ/α → τ/β
     /// "Function from σ to τ that changes answer type from α to β"
@@ -132,6 +133,7 @@ impl Type {
             | Type::String
             | Type::Char
             | Type::Unit
+            | Type::Bytes
             | Type::Pid
             | Type::Set => false,
         }
@@ -244,6 +246,7 @@ impl Type {
             Type::String => "String".to_string(),
             Type::Char => "Char".to_string(),
             Type::Unit => "()".to_string(),
+            Type::Bytes => "Bytes".to_string(),
             Type::Pid => "Pid".to_string(),
             Type::Arrow {
                 arg,
@@ -366,6 +369,7 @@ impl fmt::Display for Type {
             Type::String => write!(f, "String"),
             Type::Char => write!(f, "Char"),
             Type::Unit => write!(f, "()"),
+            Type::Bytes => write!(f, "Bytes"),
             Type::Pid => write!(f, "Pid"),
             Type::Arrow {
                 arg,
