@@ -1,0 +1,71 @@
+-- Advent of Code 2023 Day 01
+-- Translated from Haskell to Gneiss
+
+-- Helper: check if char is digit (ASCII 48-57)
+let char_is_digit c =
+    let code = char_to_int c in
+    code >= 48 && code <= 57
+
+-- Helper: convert digit char to int
+let digit_to_int c = char_to_int c - 48
+
+-- Get first element of list (returns char for our use)
+let first xs = match xs with | x :: _ -> x | [] -> '0'
+
+-- Get last element of list
+let rec last xs = match xs with
+    | [x] -> x
+    | _ :: rest -> last rest
+    | [] -> '0'
+
+-- Filter string to digits only
+let filter_digits s =
+    chars_to_string (filter char_is_digit (string_to_chars s))
+
+-- Parse first and last digit to 2-digit number
+let get_calibration_value s =
+    let digits = string_to_chars (filter_digits s) in
+    match digits with
+    | [] -> 0
+    | _ -> digit_to_int (first digits) * 10 + digit_to_int (last digits)
+
+-- Part A: sum calibration values
+let part_a lines = foldl (fun acc x -> acc + x) 0 (map get_calibration_value lines)
+
+-- Part B: replace word-digits first
+-- The trick: replace "one" with "1e" not "1" to preserve overlaps like "twone" -> "2ne" -> "2n9"
+let replace_words s =
+    s |> string_replace "one" "1e"
+      |> string_replace "two" "2o"
+      |> string_replace "three" "3e"
+      |> string_replace "four" "4"
+      |> string_replace "five" "5e"
+      |> string_replace "six" "6"
+      |> string_replace "seven" "7n"
+      |> string_replace "eight" "8t"
+      |> string_replace "nine" "9e"
+
+let part_b lines =
+    foldl (fun acc x -> acc + x) 0 (map (fun s -> get_calibration_value (replace_words (replace_words s))) lines)
+
+-- Filter out empty lines
+let non_empty s = string_length s > 0
+
+-- Main: read file, parse, solve
+let main () =
+    let path = "/Users/zachfontenot/dev/adventofcode/haskell/inputs/2023-1.txt" in
+    match file_open path "r" with
+    | Ok handle ->
+        match file_read handle 100000 with
+        | Ok bytes ->
+            let _ = file_close handle in
+            let content = bytes_to_string bytes in
+            let lines = filter non_empty (string_split "\n" content) in
+            let a = part_a lines in
+            let b = part_b lines in
+            print "Part A:";
+            print a;
+            print "Part B:";
+            print b
+        | Err e -> print "Failed to read file"
+    | Err e -> print "Failed to open file"

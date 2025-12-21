@@ -369,6 +369,9 @@ impl Inferencer {
             (Type::Unit, Type::Unit) => Ok(()),
             (Type::Bytes, Type::Bytes) => Ok(()),
             (Type::Pid, Type::Pid) => Ok(()),
+            (Type::FileHandle, Type::FileHandle) => Ok(()),
+            (Type::TcpSocket, Type::TcpSocket) => Ok(()),
+            (Type::TcpListener, Type::TcpListener) => Ok(()),
 
             // Type variables
             (Type::Var(v1), Type::Var(v2)) if Rc::ptr_eq(v1, v2) => Ok(()),
