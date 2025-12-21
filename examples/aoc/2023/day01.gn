@@ -9,14 +9,23 @@ let char_is_digit c =
 -- Helper: convert digit char to int
 let digit_to_int c = char_to_int c - 48
 
--- Get first element of list (returns char for our use)
-let first xs = match xs with | x :: _ -> x | [] -> '0'
+-- Get first char of list (for Part A)
+let first_char xs = match xs with | x :: _ -> x | [] -> '0'
 
--- Get last element of list
-let rec last xs = match xs with
+-- Get last char of list (for Part A)
+let rec last_char xs = match xs with
     | [x] -> x
-    | _ :: rest -> last rest
+    | _ :: rest -> last_char rest
     | [] -> '0'
+
+-- Get first int of list (for Part B)
+let first_int xs = match xs with | x :: _ -> x | [] -> 0
+
+-- Get last int of list (for Part B)
+let rec last_int xs = match xs with
+    | [x] -> x
+    | _ :: rest -> last_int rest
+    | [] -> 0
 
 -- Filter string to digits only
 let filter_digits s =
@@ -27,26 +36,70 @@ let get_calibration_value s =
     let digits = string_to_chars (filter_digits s) in
     match digits with
     | [] -> 0
-    | _ -> digit_to_int (first digits) * 10 + digit_to_int (last digits)
+    | _ -> digit_to_int (first_char digits) * 10 + digit_to_int (last_char digits)
 
 -- Part A: sum calibration values
 let part_a lines = foldl (fun acc x -> acc + x) 0 (map get_calibration_value lines)
 
--- Part B: replace word-digits first
--- The trick: replace "one" with "1e" not "1" to preserve overlaps like "twone" -> "2ne" -> "2n9"
-let replace_words s =
-    s |> string_replace "one" "1e"
-      |> string_replace "two" "2o"
-      |> string_replace "three" "3e"
-      |> string_replace "four" "4"
-      |> string_replace "five" "5e"
-      |> string_replace "six" "6"
-      |> string_replace "seven" "7n"
-      |> string_replace "eight" "8t"
-      |> string_replace "nine" "9e"
+-- Part B: Need left-to-right scanning to handle overlaps like "eightwo"
+-- Work on char lists directly for performance
 
-let part_b lines =
-    foldl (fun acc x -> acc + x) 0 (map (fun s -> get_calibration_value (replace_words (replace_words s))) lines)
+-- Check if char list starts with given chars
+let rec list_starts_with prefix xs =
+    match prefix with
+    | [] -> true
+    | p :: ps ->
+        match xs with
+        | [] -> false
+        | x :: rest -> if p == x then list_starts_with ps rest else false
+
+-- Try to match a word-digit at start of char list, return Some digit or None
+-- Check first char to short-circuit most non-matches
+let match_word_digit_chars xs =
+    match xs with
+    | [] -> None
+    | c :: _ ->
+        if c == 'o' then
+            if list_starts_with ['o', 'n', 'e'] xs then Some 1 else None
+        else if c == 't' then
+            if list_starts_with ['t', 'w', 'o'] xs then Some 2
+            else if list_starts_with ['t', 'h', 'r', 'e', 'e'] xs then Some 3
+            else None
+        else if c == 'f' then
+            if list_starts_with ['f', 'o', 'u', 'r'] xs then Some 4
+            else if list_starts_with ['f', 'i', 'v', 'e'] xs then Some 5
+            else None
+        else if c == 's' then
+            if list_starts_with ['s', 'i', 'x'] xs then Some 6
+            else if list_starts_with ['s', 'e', 'v', 'e', 'n'] xs then Some 7
+            else None
+        else if c == 'e' then
+            if list_starts_with ['e', 'i', 'g', 'h', 't'] xs then Some 8 else None
+        else if c == 'n' then
+            if list_starts_with ['n', 'i', 'n', 'e'] xs then Some 9 else None
+        else None
+
+-- Extract all digits from char list (skip by 1 to handle overlaps)
+let rec extract_digits_chars xs =
+    match xs with
+    | [] -> []
+    | c :: rest ->
+        if char_is_digit c then
+            digit_to_int c :: extract_digits_chars rest
+        else
+            match match_word_digit_chars xs with
+            | Some digit -> digit :: extract_digits_chars rest
+            | None -> extract_digits_chars rest
+
+-- Get calibration value for Part B
+let get_calibration_value_b s =
+    let digits = extract_digits_chars (string_to_chars s) in
+    match digits with
+    | [] -> 0
+    | _ -> first_int digits * 10 + last_int digits
+
+-- Part B: sum calibration values with word-digits
+let part_b lines = foldl (fun acc x -> acc + x) 0 (map get_calibration_value_b lines)
 
 -- Filter out empty lines
 let non_empty s = string_length s > 0
