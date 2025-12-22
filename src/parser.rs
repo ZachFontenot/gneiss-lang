@@ -76,11 +76,18 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+        // Parse optional export list (must be first if present)
+        let exports = if self.check(&Token::Export) {
+            Some(self.parse_export()?)
+        } else {
+            None
+        };
+
         let mut items = Vec::new();
         while !self.is_at_end() {
             items.push(self.parse_item()?);
         }
-        Ok(Program { items })
+        Ok(Program { exports, items })
     }
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
@@ -94,11 +101,13 @@ impl Parser {
                 self.match_token(&Token::DoubleSemi);
                 Ok(Item::Import(import))
             }
-            Token::Pub => {
-                // Parse public declaration
-                let decl = self.parse_pub_decl()?;
-                self.match_token(&Token::DoubleSemi);
-                Ok(Item::Decl(decl))
+            Token::Export => {
+                // Export must be at the top of the module, not here
+                Err(ParseError::UnexpectedToken {
+                    expected: "export declaration must appear at the beginning of the module".to_string(),
+                    found: self.peek().clone(),
+                    span: self.current_span(),
+                })
             }
             Token::Let => {
                 // Could be a declaration (let x = e) or expression (let x = e in body)
@@ -200,165 +209,97 @@ impl Parser {
         Ok(path)
     }
 
-    /// Parse a public declaration: pub let, pub type, pub trait
-    fn parse_pub_decl(&mut self) -> Result<Decl, ParseError> {
-        self.consume(Token::Pub)?;
+    /// Parse an export declaration: export (foo, bar, MyType(..))
+    fn parse_export(&mut self) -> Result<ExportDecl, ParseError> {
+        use crate::ast::ExportItem;
 
-        match self.peek() {
-            Token::Let => {
-                let start = self.current_span();
-                self.consume(Token::Let)?;
+        let start = self.current_span();
+        self.consume(Token::Export)?;
+        self.consume(Token::LParen)?;
 
-                // Check for 'rec'
-                if self.match_token(&Token::Rec) {
-                    return self.parse_let_rec_decl_with_visibility(Visibility::Public);
-                }
+        let mut items = Vec::new();
 
-                // Check for operator definition: pub let (<|>) a b = ...
-                if self.check(&Token::LParen) {
-                    if let Some(op) = self.peek_operator_in_parens() {
-                        return self.parse_operator_def_decl_with_visibility(start, op, None, Visibility::Public);
+        // Parse export items
+        if !self.check(&Token::RParen) {
+            loop {
+                let item_start = self.current_span();
+                let item = match self.peek() {
+                    Token::Ident(name) => {
+                        let name = name.clone();
+                        self.advance();
+                        ExportItem::Value(name)
                     }
-                }
+                    Token::UpperIdent(name) => {
+                        let name = name.clone();
+                        self.advance();
 
-                // Parse regular let
-                let name = self.parse_ident()?;
+                        // Check for constructor list
+                        if self.check(&Token::LParen) {
+                            self.advance(); // consume (
 
-                // Check for infix operator: pub let a <|> b = ...
-                if let Some(op) = self.try_peek_operator() {
-                    return self.parse_operator_def_decl_with_visibility(start.clone(), op, Some((name.clone(), start)), Visibility::Public);
-                }
+                            if self.match_token(&Token::Dot) {
+                                // MyType(..) - export all constructors
+                                self.consume(Token::Dot)?;
+                                self.consume(Token::RParen)?;
+                                ExportItem::TypeAll(name)
+                            } else {
+                                // MyType(A, B) - export specific constructors
+                                let mut constructors = Vec::new();
+                                if !self.check(&Token::RParen) {
+                                    loop {
+                                        if let Token::UpperIdent(ctor) = self.peek() {
+                                            constructors.push(ctor.clone());
+                                            self.advance();
+                                        } else {
+                                            return Err(ParseError::UnexpectedToken {
+                                                expected: "constructor name".to_string(),
+                                                found: self.peek().clone(),
+                                                span: self.current_span(),
+                                            });
+                                        }
 
-                let mut params = Vec::new();
-                while self.is_pattern_start() && !self.check(&Token::Eq) {
-                    params.push(self.parse_simple_pattern()?);
-                }
-
-                self.consume(Token::Eq)?;
-                let body = self.parse_expr()?;
-
-                Ok(Decl::Let {
-                    visibility: Visibility::Public,
-                    name,
-                    type_ann: None,
-                    params,
-                    body,
-                })
-            }
-            Token::Type => {
-                self.consume(Token::Type)?;
-                let name = self.parse_upper_ident()?;
-
-                let mut params = Vec::new();
-                while let Token::Ident(_) = self.peek() {
-                    params.push(self.parse_ident()?);
-                }
-
-                self.consume(Token::Eq)?;
-
-                if self.check(&Token::Pipe) || self.peek_is_upper_ident() {
-                    let constructors = self.parse_constructors()?;
-                    Ok(Decl::Type {
-                        visibility: Visibility::Public,
-                        name,
-                        params,
-                        constructors,
-                    })
-                } else {
-                    let body = self.parse_type_expr()?;
-                    Ok(Decl::TypeAlias {
-                        visibility: Visibility::Public,
-                        name,
-                        params,
-                        body,
-                    })
-                }
-            }
-            Token::Trait => {
-                self.consume(Token::Trait)?;
-                let name = self.parse_upper_ident()?;
-                let type_param = self.parse_ident()?;
-
-                let supertraits = if self.match_token(&Token::Colon) {
-                    self.parse_supertrait_list()?
-                } else {
-                    vec![]
+                                        if !self.match_token(&Token::Comma) {
+                                            break;
+                                        }
+                                    }
+                                }
+                                self.consume(Token::RParen)?;
+                                ExportItem::TypeSome(name, constructors)
+                            }
+                        } else {
+                            // MyType - export type only
+                            ExportItem::TypeOnly(name)
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "identifier or type name in export list".to_string(),
+                            found: self.peek().clone(),
+                            span: self.current_span(),
+                        });
+                    }
                 };
 
-                self.consume(Token::Eq)?;
+                let item_end = self.current_span();
+                items.push(Spanned::new(item, Span::merge(&item_start, &item_end)));
 
-                let mut methods = Vec::new();
-                while self.match_token(&Token::Val) {
-                    let method_name = self.parse_ident()?;
-                    self.consume(Token::Colon)?;
-                    let type_sig = self.parse_type_expr()?;
-                    methods.push(TraitMethod {
-                        name: method_name,
-                        type_sig,
-                    });
+                if !self.match_token(&Token::Comma) {
+                    break;
                 }
 
-                self.consume(Token::End)?;
-
-                Ok(Decl::Trait {
-                    visibility: Visibility::Public,
-                    name,
-                    type_param,
-                    supertraits,
-                    methods,
-                })
-            }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "let, type, or trait after pub".to_string(),
-                found: self.peek().clone(),
-                span: self.current_span(),
-            }),
-        }
-    }
-
-    /// Parse let rec with specified visibility
-    fn parse_let_rec_decl_with_visibility(&mut self, visibility: Visibility) -> Result<Decl, ParseError> {
-        let mut bindings = Vec::new();
-        bindings.push(self.parse_rec_binding()?);
-
-        while self.match_token(&Token::And) {
-            bindings.push(self.parse_rec_binding()?);
-        }
-
-        Ok(Decl::LetRec { visibility, bindings })
-    }
-
-    /// Parse operator definition with specified visibility
-    fn parse_operator_def_decl_with_visibility(
-        &mut self,
-        _start: Span,
-        op: String,
-        first_param: Option<(String, Span)>,
-        visibility: Visibility,
-    ) -> Result<Decl, ParseError> {
-        let mut params = Vec::new();
-
-        if let Some((name, param_span)) = first_param {
-            self.advance(); // consume operator
-            params.push(Spanned::new(PatternKind::Var(name), param_span));
-            params.push(self.parse_simple_pattern()?);
-        } else {
-            self.consume(Token::LParen)?;
-            self.advance(); // consume operator
-            self.consume(Token::RParen)?;
-            while self.is_pattern_start() && !self.check(&Token::Eq) {
-                params.push(self.parse_simple_pattern()?);
+                // Allow trailing comma
+                if self.check(&Token::RParen) {
+                    break;
+                }
             }
         }
 
-        self.consume(Token::Eq)?;
-        let body = self.parse_expr()?;
+        self.consume(Token::RParen)?;
+        let end = self.current_span();
 
-        Ok(Decl::OperatorDef {
-            visibility,
-            op,
-            params,
-            body,
+        Ok(ExportDecl {
+            items,
+            span: Span::merge(&start, &end),
         })
     }
 
@@ -387,9 +328,9 @@ impl Parser {
             }
         }
 
-        // Parse first identifier
+        // Parse first identifier (possibly qualified like Html.text)
         let first_span = self.current_span();
-        let first_name = self.parse_ident()?;
+        let first_name = self.parse_possibly_qualified_name()?;
 
         // Check for infix operator syntax: let a <|> b = ...
         if let Some(op) = self.try_peek_operator() {
@@ -560,7 +501,7 @@ impl Parser {
     /// Parse a single recursive binding: name params = expr
     fn parse_rec_binding(&mut self) -> Result<RecBinding, ParseError> {
         let name_start = self.current_span();
-        let name = self.parse_ident()?;
+        let name = self.parse_possibly_qualified_name()?;
 
         // Collect parameters
         let mut params = Vec::new();
@@ -736,10 +677,10 @@ impl Parser {
         }
     }
 
-    /// Parse a standalone type signature: val xs : [Int]
+    /// Parse a standalone type signature: val xs : [Int] or val Http.format : ...
     fn parse_val_decl(&mut self) -> Result<Decl, ParseError> {
         self.consume(Token::Val)?;
-        let name = self.parse_ident()?;
+        let name = self.parse_possibly_qualified_name()?;
         self.consume(Token::Colon)?;
         let type_sig = self.parse_type_expr()?;
         Ok(Decl::Val { name, type_sig })
@@ -748,7 +689,7 @@ impl Parser {
     fn parse_let_decl(&mut self) -> Result<Decl, ParseError> {
         self.consume(Token::Let)?;
 
-        let name = self.parse_ident()?;
+        let name = self.parse_possibly_qualified_name()?;
 
         // Collect parameters
         let mut params = Vec::new();
@@ -2174,11 +2115,45 @@ impl Parser {
             _ => Err(self.unexpected_token("constructor")),
         }
     }
+
+    /// Parse a possibly qualified name like `Html.text` or just `text`.
+    /// For let bindings, allows `Module.function` syntax for namespacing.
+    fn parse_possibly_qualified_name(&mut self) -> Result<Ident, ParseError> {
+        match self.peek().clone() {
+            Token::UpperIdent(module_name) => {
+                // Check if this is a qualified name: Module.function
+                if self.pos + 1 < self.tokens.len() {
+                    if matches!(self.tokens[self.pos + 1].token, Token::Dot) {
+                        // It's a qualified name
+                        self.advance(); // consume UpperIdent
+                        self.advance(); // consume Dot
+                        let func_name = self.parse_ident()?;
+                        Ok(format!("{}.{}", module_name, func_name))
+                    } else {
+                        // Just an uppercase ident by itself - not valid for let binding name
+                        Err(self.unexpected_token("identifier"))
+                    }
+                } else {
+                    Err(self.unexpected_token("identifier"))
+                }
+            }
+            Token::Ident(name) => {
+                self.advance();
+                Ok(name)
+            }
+            Token::Underscore => {
+                self.advance();
+                Ok("_".to_string())
+            }
+            _ => Err(self.unexpected_token("identifier")),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::ExportItem;
     use crate::lexer::Lexer;
 
     fn parse(input: &str) -> Program {
@@ -2689,56 +2664,62 @@ mod tests {
     }
 
     #[test]
-    fn test_pub_let() {
-        let prog = parse("pub let x = 42");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Let { visibility, name, .. }) => {
-                assert_eq!(*visibility, Visibility::Public);
-                assert_eq!(name, "x");
-            }
-            _ => panic!("expected pub let"),
-        }
+    fn test_export_values() {
+        let prog = parse("export (foo, bar)");
+        assert!(prog.exports.is_some());
+        let exports = prog.exports.unwrap();
+        assert_eq!(exports.items.len(), 2);
+        assert_eq!(exports.items[0].node, ExportItem::Value("foo".to_string()));
+        assert_eq!(exports.items[1].node, ExportItem::Value("bar".to_string()));
     }
 
     #[test]
-    fn test_pub_let_function() {
-        let prog = parse("pub let add x y = x + y");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Let { visibility, name, params, .. }) => {
-                assert_eq!(*visibility, Visibility::Public);
-                assert_eq!(name, "add");
-                assert_eq!(params.len(), 2);
-            }
-            _ => panic!("expected pub let"),
-        }
+    fn test_export_type_only() {
+        let prog = parse("export (MyType)");
+        assert!(prog.exports.is_some());
+        let exports = prog.exports.unwrap();
+        assert_eq!(exports.items.len(), 1);
+        assert_eq!(exports.items[0].node, ExportItem::TypeOnly("MyType".to_string()));
     }
 
     #[test]
-    fn test_pub_type() {
-        let prog = parse("pub type Option a = | Some a | None");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Type { visibility, name, .. }) => {
-                assert_eq!(*visibility, Visibility::Public);
-                assert_eq!(name, "Option");
-            }
-            _ => panic!("expected pub type"),
-        }
+    fn test_export_type_all_constructors() {
+        let prog = parse("export (Option(..))");
+        assert!(prog.exports.is_some());
+        let exports = prog.exports.unwrap();
+        assert_eq!(exports.items.len(), 1);
+        assert_eq!(exports.items[0].node, ExportItem::TypeAll("Option".to_string()));
     }
 
     #[test]
-    fn test_pub_trait() {
-        let prog = parse("pub trait Show a = val show : a -> String end");
+    fn test_export_type_specific_constructors() {
+        let prog = parse("export (Either(Left, Right))");
+        assert!(prog.exports.is_some());
+        let exports = prog.exports.unwrap();
+        assert_eq!(exports.items.len(), 1);
+        assert_eq!(
+            exports.items[0].node,
+            ExportItem::TypeSome("Either".to_string(), vec!["Left".to_string(), "Right".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_export_mixed() {
+        let prog = parse("export (Result(..), map, flatMap, Error)");
+        assert!(prog.exports.is_some());
+        let exports = prog.exports.unwrap();
+        assert_eq!(exports.items.len(), 4);
+        assert_eq!(exports.items[0].node, ExportItem::TypeAll("Result".to_string()));
+        assert_eq!(exports.items[1].node, ExportItem::Value("map".to_string()));
+        assert_eq!(exports.items[2].node, ExportItem::Value("flatMap".to_string()));
+        assert_eq!(exports.items[3].node, ExportItem::TypeOnly("Error".to_string()));
+    }
+
+    #[test]
+    fn test_no_export_means_all_public() {
+        let prog = parse("let x = 42");
+        assert!(prog.exports.is_none());
         assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Trait { visibility, name, .. }) => {
-                assert_eq!(*visibility, Visibility::Public);
-                assert_eq!(name, "Show");
-            }
-            _ => panic!("expected pub trait"),
-        }
     }
 
     #[test]

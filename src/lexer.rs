@@ -44,7 +44,7 @@ pub enum Token {
     Val,
 
     // Module keywords
-    Pub,
+    Export,
     Import,
     As,
 
@@ -505,7 +505,7 @@ impl<'a> Lexer<'a> {
             "where" => Token::Where,
             "val" => Token::Val,
             // Module keywords
-            "pub" => Token::Pub,
+            "export" => Token::Export,
             "import" => Token::Import,
             "as" => Token::As,
             _ => {
@@ -697,18 +697,19 @@ mod tests {
     #[test]
     fn test_module_tokens() {
         assert_eq!(
-            tokens("pub import as"),
-            vec![Token::Pub, Token::Import, Token::As, Token::Eof]
+            tokens("export import as"),
+            vec![Token::Export, Token::Import, Token::As, Token::Eof]
         );
-        // 'pub' in context
+        // 'export' in context
         assert_eq!(
-            tokens("pub let x = 1"),
+            tokens("export (foo, bar)"),
             vec![
-                Token::Pub,
-                Token::Let,
-                Token::Ident("x".into()),
-                Token::Eq,
-                Token::Int(1),
+                Token::Export,
+                Token::LParen,
+                Token::Ident("foo".into()),
+                Token::Comma,
+                Token::Ident("bar".into()),
+                Token::RParen,
                 Token::Eof
             ]
         );

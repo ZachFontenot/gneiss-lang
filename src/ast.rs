@@ -688,6 +688,30 @@ pub struct Constraint {
 }
 
 // ============================================================================
+// Exports
+// ============================================================================
+
+/// An export item in an export list
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportItem {
+    /// Export a value/function: `foo`
+    Value(String),
+    /// Export a type only (constructors private): `MyType`
+    TypeOnly(String),
+    /// Export a type with all constructors: `MyType(..)`
+    TypeAll(String),
+    /// Export a type with specific constructors: `MyType(A, B)`
+    TypeSome(String, Vec<String>),
+}
+
+/// An export declaration at the top of a module
+#[derive(Debug, Clone)]
+pub struct ExportDecl {
+    pub items: Vec<Spanned<ExportItem>>,
+    pub span: Span,
+}
+
+// ============================================================================
 // Program
 // ============================================================================
 
@@ -704,6 +728,8 @@ pub enum Item {
 
 #[derive(Debug, Clone)]
 pub struct Program {
+    /// Optional export list. If None, all declarations are public.
+    pub exports: Option<ExportDecl>,
     pub items: Vec<Item>,
 }
 
