@@ -5,3 +5,4 @@ let x = Some 42
 match x with
 | Some n -> n + 1
 | None -> 0
+end

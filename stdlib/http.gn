@@ -53,6 +53,7 @@ let parse_method s =
     | "CONNECT" -> Some CONNECT
     | "TRACE" -> Some TRACE
     | _ -> None
+    end
 
 -- Parse HTTP version
 let parse_version s =
@@ -60,6 +61,7 @@ let parse_version s =
     | "HTTP/1.0" -> Some Http10
     | "HTTP/1.1" -> Some Http11
     | _ -> None
+    end
 
 -- Split string on first occurrence of delimiter
 let split_first delim s =
@@ -69,6 +71,7 @@ let split_first delim s =
         let before = string_substring 0 idx s in
         let after = string_substring (idx + string_length delim) (string_length s) s in
         Some (before, after)
+    end
 
 -- Parse a single header line "Key: Value"
 let parse_header_line line =
@@ -76,8 +79,10 @@ let parse_header_line line =
     | None ->
         (match split_first ":" line with
         | None -> None
-        | Some (key, value) -> Some (string_trim key, string_trim value))
+        | Some (key, value) -> Some (string_trim key, string_trim value)
+        end)
     | Some (key, value) -> Some (key, string_trim value)
+    end
 
 -- Parse headers from lines
 let rec parse_headers lines =
@@ -89,7 +94,9 @@ let rec parse_headers lines =
         else
             (match parse_header_line line with
             | None -> parse_headers rest
-            | Some header -> header :: parse_headers rest)
+            | Some header -> header :: parse_headers rest
+            end)
+    end
 
 -- Parse HTTP request from raw string
 let Http.parseRequest raw =
@@ -116,7 +123,8 @@ let Http.parseRequest raw =
                             if string_length (string_trim line) == 0 then
                                 (reverse acc, string_join "\r\n" rest2)
                             else
-                                split_headers_body (line :: acc) rest2)
+                                split_headers_body (line :: acc) rest2
+                        end)
                     in
                     let (header_lines, body) = split_headers_body [] rest in
                     let headers = parse_headers header_lines in
@@ -126,8 +134,12 @@ let Http.parseRequest raw =
                         version = version,
                         headers = headers,
                         body = body
-                    })))
-        | _ -> None))
+                    })
+                end)
+            end)
+        | _ -> None
+        end)
+    end)
 
 -- ============================================================================
 -- HTTP Formatting
@@ -145,12 +157,14 @@ let format_method m =
     | OPTIONS -> "OPTIONS"
     | CONNECT -> "CONNECT"
     | TRACE -> "TRACE"
+    end
 
 -- Format version as string
 let format_version v =
     match v with
     | Http10 -> "HTTP/1.0"
     | Http11 -> "HTTP/1.1"
+    end
 
 -- Format headers
 let format_headers headers =
@@ -256,26 +270,27 @@ let Request.getHeader name request =
         (match headers with
         | [] -> None
         | (key, value) :: rest ->
-            if key == name then Some value else find rest)
+            if key == name then Some value else find rest
+        end)
     in
     find request.headers
 
 -- Check if request is a specific method
 val Request.isGet : HttpRequest -> Bool
 let Request.isGet request =
-    match request.method with | GET -> true | _ -> false
+    match request.method with | GET -> true | _ -> false end
 
 val Request.isPost : HttpRequest -> Bool
 let Request.isPost request =
-    match request.method with | POST -> true | _ -> false
+    match request.method with | POST -> true | _ -> false end
 
 val Request.isPut : HttpRequest -> Bool
 let Request.isPut request =
-    match request.method with | PUT -> true | _ -> false
+    match request.method with | PUT -> true | _ -> false end
 
 val Request.isDelete : HttpRequest -> Bool
 let Request.isDelete request =
-    match request.method with | DELETE -> true | _ -> false
+    match request.method with | DELETE -> true | _ -> false end
 
 -- Parse query string from path
 let Request.parseQuery path =
@@ -286,12 +301,15 @@ let Request.parseQuery path =
         let parse_pair p =
             (match split_first "=" p with
             | None -> (p, "")
-            | Some (k, v) -> (k, v))
+            | Some (k, v) -> (k, v)
+            end)
         in
         map parse_pair pairs
+    end
 
 -- Get path without query string
 let Request.pathWithoutQuery path =
     match split_first "?" path with
     | None -> path
     | Some (p, _) -> p
+    end

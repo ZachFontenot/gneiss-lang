@@ -6,8 +6,7 @@
 //! - Wildcard and variable patterns
 //! - Constructor patterns with multiple fields
 
-use gneiss::test_support::{run_program_ok, run_program_err};
-use gneiss::eval::EvalError;
+use gneiss::test_support::run_program_ok;
 
 // ============================================================================
 // Deep Pattern Nesting
@@ -26,6 +25,7 @@ let main () =
     | Some (Some None) -> 0
     | Some None -> 0
     | None -> 0
+    end
 "#;
     run_program_ok(program);
 }
@@ -37,6 +37,7 @@ let main () =
     let nested = ((1, 2), (3, 4)) in
     match nested with
     | ((a, b), (c, d)) -> a + b + c + d
+    end
 "#;
     run_program_ok(program);
 }
@@ -53,6 +54,7 @@ let main () =
     | Cons a (Cons b Nil) -> a + b
     | Cons a Nil -> a
     | Nil -> 0
+    end
 "#;
     run_program_ok(program);
 }
@@ -71,6 +73,7 @@ let main () =
     match opt with
     | Some _ -> 1
     | None -> 0
+    end
 "#;
     run_program_ok(program);
 }
@@ -86,6 +89,7 @@ let main () =
     | Red -> 1
     | Green -> 2
     | _ -> 0
+    end
 "#;
     run_program_ok(program);
 }
@@ -97,6 +101,7 @@ let main () =
     let triple = (1, 2, 3) in
     match triple with
     | (_, x, _) -> x
+    end
 "#;
     run_program_ok(program);
 }
@@ -114,6 +119,7 @@ let main () =
     let t = MkTriple 1 2 3 in
     match t with
     | MkTriple a b c -> a + b + c
+    end
 "#;
     run_program_ok(program);
 }
@@ -129,10 +135,12 @@ let main () =
     let a = match x with
         | Left n -> n
         | Right _ -> 0
+        end
     in
     let b = match y with
         | Left _ -> 0
         | Right s -> string_length s
+        end
     in
     a + b
 "#;
@@ -154,6 +162,7 @@ let main () =
     | Some 42 -> 1
     | Some x -> 2
     | None -> 3
+    end
 "#;
     run_program_ok(program);
 }
@@ -167,6 +176,7 @@ let main () =
     | 0 -> "zero"
     | 1 -> "one"
     | n -> "other"
+    end
 "#;
     run_program_ok(program);
 }
@@ -186,6 +196,7 @@ let main () =
     | Leaf x -> x
     | Node (Leaf l) n (Leaf r) -> l + n + r
     | Node _ n _ -> n
+    end
 "#;
     run_program_ok(program);
 }
@@ -203,6 +214,7 @@ let rec eval e =
     | Lit n -> n
     | Add l r -> eval l + eval r
     | Mul l r -> eval l * eval r
+    end
 
 let main () =
     let expr = Add (Lit 1) (Mul (Lit 2) (Lit 3)) in
@@ -259,6 +271,7 @@ let unwrap_or default opt =
     match opt with
     | Some x -> x
     | None -> default
+    end
 
 let main () =
     unwrap_or 0 (Some 42)
@@ -278,6 +291,7 @@ let main () =
     match xs with
     | [] -> 0
     | h :: t -> h
+    end
 "#;
     run_program_ok(program);
 }
@@ -292,6 +306,7 @@ let main () =
     | a :: b :: c :: rest -> a + b + c
     | a :: b :: rest -> a + b
     | a :: rest -> a
+    end
 "#;
     run_program_ok(program);
 }
@@ -304,6 +319,7 @@ let main () =
     match xs with
     | [] -> "empty"
     | _ :: _ -> "non-empty"
+    end
 "#;
     run_program_ok(program);
 }
@@ -320,6 +336,7 @@ let main () =
     match b with
     | true -> 1
     | false -> 0
+    end
 "#;
     run_program_ok(program);
 }
@@ -334,6 +351,7 @@ let main () =
     | 1 -> "one"
     | 42 -> "answer"
     | _ -> "other"
+    end
 "#;
     run_program_ok(program);
 }
@@ -347,6 +365,7 @@ let main () =
     | "hello" -> 1
     | "world" -> 2
     | _ -> 0
+    end
 "#;
     run_program_ok(program);
 }
@@ -362,6 +381,7 @@ let main () =
     let x = 42 in
     match x with
     | n -> n * 2
+    end
 "#;
     run_program_ok(program);
 }
@@ -373,6 +393,7 @@ let main () =
     let u = () in
     match u with
     | () -> 42
+    end
 "#;
     run_program_ok(program);
 }
@@ -386,6 +407,7 @@ let main () =
     | 'a' -> 1
     | 'b' -> 2
     | _ -> 0
+    end
 "#;
     run_program_ok(program);
 }

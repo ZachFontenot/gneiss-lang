@@ -25,6 +25,7 @@ let eval_expr expr =
   | Num i -> i
   | Add expr_l expr_r -> (eval_expr expr_l) + (eval_expr expr_r)
   | Mul expr_l expr_r -> (eval_expr expr_l) * (eval_expr expr_r)
+  end
 
 let main _ =
   let expr = (Add (Mul (Num 2) (Add (Num 1) (Num 2))) (Add (Num 1) (Num 2))) in

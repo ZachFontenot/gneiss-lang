@@ -28,6 +28,7 @@ let parse_char_if pred input =
             ParseOk c (string_substring 1 (string_length input) input)
         else
             ParseErr ("unexpected character: " ++ char_to_string c)
+    end
 
 -- Parse a specific character
 let parse_char c input =
@@ -43,6 +44,7 @@ let parse_while pred input =
                 go (c :: acc) (string_substring 1 (string_length rest) rest)
             else
                 ParseOk (chars_to_string (reverse acc)) rest
+        end
     in
     go [] input
 
@@ -51,6 +53,7 @@ let skip_ws input =
     match parse_while char_is_whitespace input with
     | ParseOk _ rest -> rest
     | ParseErr _ -> input
+    end
 
 -- Parse a literal string
 let parse_literal lit input =
@@ -65,6 +68,7 @@ let parse_or p1 p2 input =
     match p1 input with
     | ParseOk v rest -> ParseOk v rest
     | ParseErr _ -> p2 input
+    end
 
 -- Sequence: run first parser, then second on remaining input
 let parse_then p1 p2 input =
@@ -74,12 +78,15 @@ let parse_then p1 p2 input =
         match p2 rest with
         | ParseErr e -> ParseErr e
         | ParseOk v2 rest2 -> ParseOk (v1, v2) rest2
+        end
+    end
 
 -- Map over parse result
 let parse_map f p input =
     match p input with
     | ParseErr e -> ParseErr e
     | ParseOk v rest -> ParseOk (f v) rest
+    end
 
 -- ============================================================================
 -- JSON Parser
@@ -90,6 +97,7 @@ let parse_json_null input =
     match parse_literal "null" input with
     | ParseOk _ rest -> ParseOk JsonNull rest
     | ParseErr e -> ParseErr e
+    end
 
 -- Parse boolean
 let parse_json_bool input =
@@ -99,6 +107,8 @@ let parse_json_bool input =
         match parse_literal "false" input with
         | ParseOk _ rest -> ParseOk (JsonBool false) rest
         | ParseErr e -> ParseErr e
+        end
+    end
 
 -- Parse integer (simple, no floats for now)
 let parse_json_number input =
@@ -111,11 +121,13 @@ let parse_json_number input =
                 parse_digits (acc ++ char_to_string c) (string_substring 1 (string_length rest) rest)
             else
                 (acc, rest)
+        end
     in
     -- Handle optional negative sign
     let (neg, start) = match string_char_at 0 input2 with
         | Some '-' -> (true, string_substring 1 (string_length input2) input2)
         | _ -> (false, input2)
+        end
     in
     let (digits, rest) = parse_digits "" start in
     if string_length digits == 0 then
@@ -145,13 +157,17 @@ let parse_json_string input =
                 | Some 't' -> parse_string_contents ('\t' :: acc) (string_substring 2 (string_length rest2) rest2)
                 | Some '"' -> parse_string_contents ('"' :: acc) (string_substring 2 (string_length rest2) rest2)
                 | Some '\\' -> parse_string_contents ('\\' :: acc) (string_substring 2 (string_length rest2) rest2)
-                | Some c -> parse_string_contents (c :: acc) (string_substring 2 (string_length rest2) rest2))
+                | Some c -> parse_string_contents (c :: acc) (string_substring 2 (string_length rest2) rest2)
+                end)
             | Some c ->
                 parse_string_contents (c :: acc) (string_substring 1 (string_length rest2) rest2)
+            end
         in
         match parse_string_contents [] rest with
         | ParseOk s rest3 -> ParseOk (JsonString s) rest3
         | ParseErr e -> ParseErr e
+        end
+    end
 
 -- Forward declaration for mutual recursion
 let rec parse_json input = parse_json_value (skip_ws input)
@@ -174,6 +190,11 @@ and parse_json_value input =
                     | ParseOk v rest -> ParseOk v rest
                     | ParseErr _ ->
                         parse_json_object input
+                    end
+                end
+            end
+        end
+    end
 
 and parse_json_array input =
     let input2 = skip_ws input in
@@ -197,8 +218,13 @@ and parse_json_array input =
                         match parse_char ']' rest5 with
                         | ParseOk _ rest6 -> ParseOk (JsonArray (reverse (v :: acc))) rest6
                         | ParseErr _ -> ParseErr "expected ',' or ']'"
+                        end
+                    end
+                end
             in
             parse_elements [] rest2
+        end
+    end
 
 and parse_json_object input =
     let input2 = skip_ws input in
@@ -230,9 +256,16 @@ and parse_json_object input =
                                 match parse_char '}' rest8 with
                                 | ParseOk _ rest9 -> ParseOk (JsonObject (reverse ((key, value) :: acc))) rest9
                                 | ParseErr _ -> ParseErr "expected ',' or '}'"
+                                end
+                            end
+                        end
+                    end
                 | _ -> ParseErr "object key must be string"
+                end
             in
             parse_pairs [] rest2
+        end
+    end
 
 -- Main parse function: returns Option Json
 let Json.parse input =
@@ -241,6 +274,7 @@ let Json.parse input =
         let rest2 = skip_ws rest in
         if string_length rest2 == 0 then Some json else None
     | ParseErr _ -> None
+    end
 
 -- ============================================================================
 -- JSON Encoder
@@ -259,6 +293,7 @@ let rec Json.encode json =
             "\"" ++ json_escape_string key ++ "\":" ++ Json.encode value
         in
         "{" ++ string_join "," (map encode_pair pairs) ++ "}"
+    end
 
 -- Pretty print with indentation
 let rec Json.pretty_encode indent json =
@@ -281,6 +316,7 @@ let rec Json.pretty_encode indent json =
             inner_spaces ++ "\"" ++ json_escape_string key ++ "\": " ++ Json.pretty_encode next_indent value
         in
         "{\n" ++ string_join ",\n" (map encode_pair pairs) ++ "\n" ++ spaces ++ "}"
+    end
 
 -- ============================================================================
 -- JSON Accessors
@@ -294,39 +330,46 @@ let Json.get key json =
             match ps with
             | [] -> None
             | (k, v) :: rest -> if k == key then Some v else find rest
+            end
         in
         find pairs
     | _ -> None
+    end
 
 -- Get as int
 let Json.getInt json =
     match json with
     | JsonInt n -> Some n
     | _ -> None
+    end
 
 -- Get as string
 let Json.getString json =
     match json with
     | JsonString s -> Some s
     | _ -> None
+    end
 
 -- Get as bool
 let Json.getBool json =
     match json with
     | JsonBool b -> Some b
     | _ -> None
+    end
 
 -- Get as array
 let Json.getArray json =
     match json with
     | JsonArray items -> Some items
     | _ -> None
+    end
 
 -- Get as object (list of pairs)
 let Json.getObject json =
     match json with
     | JsonObject pairs -> Some pairs
     | _ -> None
+    end
 
 -- ============================================================================
 -- JSON Builders

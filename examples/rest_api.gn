@@ -37,6 +37,7 @@ let item_to_json item =
             ("name", JsonString name),
             ("value", JsonInt value)
         ]
+    end
 
 -- Find an item by ID
 let rec find_item id items =
@@ -47,12 +48,15 @@ let rec find_item id items =
         | Item { id = item_id, name = _, value = _ } ->
             if item_id == id then Some item
             else find_item id rest
+        end
+    end
 
 -- Remove an item by ID
 let remove_item id items =
     filter (fun item ->
         match item with
         | Item { id = item_id, name = _, value = _ } -> item_id != id
+        end
     ) items
 
 -- ============================================================================
@@ -76,6 +80,7 @@ let rec store_loop items next_id request_ch response_ch =
         let response = match found with
             | None -> JsonNull
             | Some item -> item_to_json item
+            end
         in
         Channel.send response_ch response;
         store_loop items next_id request_ch response_ch
@@ -93,6 +98,7 @@ let rec store_loop items next_id request_ch response_ch =
         let deleted = length new_items < length items in
         Channel.send response_ch (JsonBool deleted);
         store_loop new_items next_id request_ch response_ch
+    end
 
 -- ============================================================================
 -- Request Parsing Helpers
@@ -117,14 +123,18 @@ let parse_create_body body =
         let name_opt = match Json.get "name" json with
             | Some (JsonString s) -> Some s
             | _ -> None
+            end
         in
         let value_opt = match Json.get "value" json with
             | Some (JsonInt n) -> Some n
             | _ -> None
+            end
         in
         match (name_opt, value_opt) with
         | (Some name, Some value) -> Some (name, value)
         | _ -> None
+        end
+    end
 
 -- ============================================================================
 -- Route Handlers
@@ -146,6 +156,8 @@ let handle_get_item request_ch response_ch req_path =
         match result with
         | JsonNull -> Response.notFound
         | _ -> Response.json 200 (Json.encode result)
+        end
+    end
 
 -- POST /items - Create new item
 let handle_create_item request_ch response_ch req_body =
@@ -155,6 +167,7 @@ let handle_create_item request_ch response_ch req_body =
         Channel.send request_ch (Create name value);
         let created = Channel.recv response_ch in
         Response.json 201 (Json.encode created)
+    end
 
 -- DELETE /items/:id - Delete item
 let handle_delete_item request_ch response_ch req_path =
@@ -166,6 +179,8 @@ let handle_delete_item request_ch response_ch req_path =
         match deleted with
         | JsonBool true -> Response.text 204 ""
         | _ -> Response.notFound
+        end
+    end
 
 -- ============================================================================
 -- Main Router
@@ -202,7 +217,9 @@ let handle_request request_ch response_ch request =
                 Response.notFound
 
         | _ ->
-            Response.text 405 "Method Not Allowed")
+            Response.text 405 "Method Not Allowed"
+        end)
+    end
 
 -- ============================================================================
 -- Main

@@ -89,6 +89,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 show (Some {})
@@ -119,6 +120,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 show None
@@ -149,6 +151,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 show (Some (Some {}))
@@ -180,6 +183,7 @@ impl Show for (List a) where a : Show =
     let show xs = match xs with
         | Nil -> "[]"
         | Cons h t -> "list"
+        end
 end
 
 show (Cons {} (Cons {} (Cons {} Nil)))
@@ -218,6 +222,7 @@ impl Show for (Either a b) where a : Show, b : Show =
     let show e = match e with
         | Left x -> "Left"
         | Right y -> "Right"
+        end
 end
 
 show ({})
@@ -315,6 +320,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> show x
         | None -> "None"
+        end
 end
 
 let input = {} in show input
@@ -345,6 +351,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 let display x = show x in display (Some {})
@@ -380,6 +387,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 show ({})
@@ -411,6 +419,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 show (Some {})
@@ -479,6 +488,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "some"
         | None -> "none"
+        end
 end
 
 show None
@@ -509,6 +519,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some(" ++ show x ++ ")"
         | None -> "None"
+        end
 end
 
 show (Some 42)
@@ -549,6 +560,7 @@ impl Show for (Result a b c) where a : Show, b : Show, c : Show =
         | Ok x -> "Ok"
         | Err e -> "Err"
         | Pending p -> "Pending"
+        end
 end
 
 show (Pending true)
@@ -579,6 +591,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "some"
         | None -> "none"
+        end
 end
 
 show None
@@ -614,6 +627,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some"
         | None -> "None"
+        end
 end
 
 show (Some (Cons 1 (Cons 2 Nil)))
@@ -644,6 +658,7 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some(" ++ show x ++ ")"
         | None -> "None"
+        end
 end
 
 show (Some (Some (Some 42)))
@@ -677,6 +692,7 @@ end
 impl Show for (Pair a b) where a : Show, b : Show =
     let show p = match p with
         | MkPair x y -> "pair"
+        end
 end
 
 show (MkPair 42 true)

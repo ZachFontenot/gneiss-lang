@@ -150,6 +150,7 @@ let is_void_element tag =
     | "track" -> true
     | "wbr" -> true
     | _ -> false
+    end
 
 -- Render attributes to string
 let render_attrs attrs =
@@ -173,6 +174,7 @@ let rec Html.render html =
         else
             let children_str = string_join "" (map Html.render children) in
             "<" ++ tag ++ attrs_str ++ ">" ++ children_str ++ "</" ++ tag ++ ">"
+    end
 
 -- Render with doctype
 let Html.renderDocument html =
@@ -203,6 +205,7 @@ let Html.maybe opt toHtml =
     match opt with
     | Some x -> toHtml x
     | None -> Empty
+    end
 
 -- ============================================================================
 -- Common Patterns

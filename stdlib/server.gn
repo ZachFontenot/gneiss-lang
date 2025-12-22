@@ -55,12 +55,15 @@ let method_matches route_method request_method =
         | (HEAD, HEAD) -> true
         | (OPTIONS, OPTIONS) -> true
         | _ -> false
+        end
+    end
 
 -- Strip query string from path
 let strip_query path =
     match string_index_of "?" path with
     | None -> path
     | Some idx -> string_substring 0 idx path
+    end
 
 -- Check if path matches (exact match, ignoring query string)
 let path_matches pattern request_path =
@@ -78,13 +81,17 @@ let rec find_route request routes =
             | Route { method, path, handler } ->
                 if method_matches method req_method && path_matches path req_path
                 then Some handler
-                else find_route request rest)
+                else find_route request rest
+            end
+        end)
+    end
 
 -- Find matching handler for a request
 let Router.find request router =
     match (request, router) with
     | (HttpRequest { method = _, path = _, version = _, headers = _, body = _ }, Router { routes }) ->
         find_route request routes
+    end
 
 -- Add a route with specific method
 let add_route method path handler router =
@@ -97,6 +104,7 @@ let add_route method path handler router =
                 handler = handler
             }]
         }
+    end
 
 -- Route builders
 let Router.get path handler router =
@@ -119,6 +127,7 @@ let Router.handle router request =
     match Router.find request router with
     | Some handler -> handler request
     | None -> Response.notFound
+    end
 
 -- ============================================================================
 -- Connection Handling
@@ -135,12 +144,14 @@ let handle_connection socket handler =
         let response = match Http.parseRequest raw with
             | None -> Response.badRequest "Malformed HTTP request"
             | Some request -> handler request
+            end
         in
         let response_str = Http.formatResponse response in
         let response_bytes = string_to_bytes response_str in
         let _ = tcp_write socket response_bytes in
         let _ = tcp_close socket in
         ()
+    end
 
 -- Accept loop - continuously accept connections and spawn handlers
 let rec accept_loop listener handler =
@@ -153,6 +164,7 @@ let rec accept_loop listener handler =
         let _ = Fiber.spawn (fun () -> handle_connection socket handler) in
         -- Continue accepting more connections
         accept_loop listener handler
+    end
 
 -- ============================================================================
 -- Server API
@@ -166,6 +178,7 @@ let Server.run port handler =
     | Ok listener ->
         print ("Server listening on port " ++ int_to_string port);
         accept_loop listener handler
+    end
 
 -- Start server with config
 let Server.runWith config handler =
@@ -177,6 +190,8 @@ let Server.runWith config handler =
         | Ok listener ->
             print ("Server listening on " ++ host ++ ":" ++ int_to_string port);
             accept_loop listener handler
+        end
+    end
 
 -- Start server with router
 let Server.serve config router =

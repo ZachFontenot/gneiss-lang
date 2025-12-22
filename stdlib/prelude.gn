@@ -32,32 +32,37 @@ let rec map f xs =
     match xs with
     | [] -> []
     | x :: rest -> f x :: map f rest
+    end
 
 let rec filter p xs =
     match xs with
     | [] -> []
     | x :: rest -> if p x then x :: filter p rest else filter p rest
+    end
 
 let rec foldl f acc xs =
     match xs with
     | [] -> acc
     | x :: rest -> foldl f (f acc x) rest
+    end
 
 let rec foldr f acc xs =
     match xs with
     | [] -> acc
     | x :: rest -> f x (foldr f acc rest)
+    end
 
-let null xs = match xs with | [] -> true | _ -> false
-let rec length xs = match xs with | [] -> 0 | _ :: rest -> 1 + length rest
+let null xs = match xs with | [] -> true | _ -> false end
+let rec length xs = match xs with | [] -> 0 | _ :: rest -> 1 + length rest end
 let rec reverse xs = foldl (fun acc x -> x :: acc) [] xs
-let head xs = match xs with | [] -> None | x :: _ -> Some x
-let tail xs = match xs with | [] -> None | _ :: rest -> Some rest
+let head xs = match xs with | [] -> None | x :: _ -> Some x end
+let tail xs = match xs with | [] -> None | _ :: rest -> Some rest end
 
 let rec drop_while p xs =
     match xs with
     | [] -> []
     | x :: rest -> if p x then drop_while p rest else xs
+    end
 
 -- String operations
 -- Note: string_to_lower, string_to_upper, string_trim, string_split, string_join
@@ -67,6 +72,7 @@ let string_contains needle haystack =
     match string_index_of needle haystack with
     | Some _ -> true
     | None -> false
+    end
 
 let string_starts_with prefix s =
     string_substring 0 (string_length prefix) s == prefix

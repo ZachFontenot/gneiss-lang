@@ -627,6 +627,7 @@ fun x ->
     match x with
     | 1 -> (); 100
     | 2 -> 200
+    end
 "#;
     let result = infer_source(source);
     assert!(
@@ -646,7 +647,9 @@ fun x y ->
         match y with
         | 10 -> (); 1
         | 20 -> (); 2
+        end
     | 2 -> 0
+    end
 "#;
     let result = infer_source(source);
     assert!(

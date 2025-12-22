@@ -28,6 +28,7 @@ let updated_req = { req with method = "POST", path = "/api" }
 let describe_point = fun pt ->
     match pt with
     | Point { x, y } -> x + y
+    end
 
 -- Polymorphic records
 type Pair a = {

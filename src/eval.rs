@@ -4205,7 +4205,7 @@ mod tests {
 
     #[test]
     fn test_match() {
-        let val = eval("match 1 with | 1 -> 42 | _ -> 0").unwrap();
+        let val = eval("match 1 with | 1 -> 42 | _ -> 0 end").unwrap();
         assert!(matches!(val, Value::Int(42)));
     }
 
@@ -5231,6 +5231,7 @@ let main () =
     match file_open "/nonexistent/path/to/file.txt" "r" with
     | Ok _ -> ()  -- unexpected success
     | Err _ -> () -- expected failure, test passes
+    end
 "#;
         run_program(program).unwrap();
     }
@@ -5256,7 +5257,9 @@ let main () =
         match file_close handle with
         | Ok _ -> () -- success
         | Err e -> print e -- print error
+        end
     | Err e -> print e -- print error
+    end
 "#,
             temp_path.display()
         );
@@ -5283,8 +5286,11 @@ let main () =
             match file_close handle with
             | Ok _ -> ()
             | Err e -> print e
+            end
         | Err e -> print e
+        end
     | Err e -> print e
+    end
 "#,
             temp_path.display()
         );
@@ -5323,7 +5329,9 @@ let main () =
         | Err e ->
             let _ = file_close handle in
             print e
+        end
     | Err e -> print e
+    end
 "#,
             temp_path.display()
         );
@@ -5359,8 +5367,11 @@ let main () =
             | Err e ->
                 let _ = file_close rh in
                 print e
+            end
         | Err e -> print e
+        end
     | Err e -> print e
+    end
 "#,
             path = temp_path.display()
         );
@@ -5386,6 +5397,7 @@ let main () =
     match tcp_connect "invalid.host.that.does.not.exist.local" 12345 with
     | Ok _ -> ()  -- unexpected success
     | Err _ -> () -- expected: connection error
+    end
 "#;
         run_program(program).unwrap();
     }
@@ -5400,6 +5412,7 @@ let main () =
         -- Would try accept but no registry yet
         ()
     | Err _ -> () -- May fail if port unavailable
+    end
 "#;
         run_program(program).unwrap();
     }

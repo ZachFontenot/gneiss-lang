@@ -91,6 +91,7 @@ end
 impl Show for (Pair a) where a : Show, a : Eq =
     let show p = match p with
         | MkPair x y -> if eq x y then "equal pair" else "different pair"
+        end
 end
 
 let main () =
@@ -124,12 +125,14 @@ impl Show for (Option a) where a : Show =
     let show opt = match opt with
         | Some x -> "Some(" ++ show x ++ ")"
         | None -> "None"
+        end
 end
 
 impl Show for (List a) where a : Show =
     let show xs = match xs with
         | Nil -> "[]"
         | Cons h t -> show h ++ " :: " ++ show t
+        end
 end
 
 let main () =
@@ -165,6 +168,7 @@ end
 impl Show for (Triple a b c) where a : Show, b : Show, c : Show =
     let show t = match t with
         | MkTriple x y z -> "(" ++ show x ++ ", " ++ show y ++ ", " ++ show z ++ ")"
+        end
 end
 
 let main () =
@@ -322,6 +326,7 @@ let main () =
     let result = match opt with
         | Some x -> show x
         | None -> "none"
+        end
     in
     print result;
     0
@@ -387,6 +392,7 @@ impl Show for (List a) where a : Show =
         | Nil -> "[]"
         | Cons h Nil -> "[" ++ show h ++ "]"
         | Cons h t -> "[" ++ show h ++ ", ...]"
+        end
 end
 
 let main () =

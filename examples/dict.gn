@@ -33,6 +33,7 @@ let greet = fun dict ->
     match Dict.get "name" dict with
     | Some n -> "Hello, " ++ n ++ "!"
     | None -> "Hello, stranger!"
+    end
 
 let _ = print "Greeting:"
 let _ = print (greet d3)

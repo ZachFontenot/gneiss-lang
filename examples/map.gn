@@ -2,6 +2,7 @@ let map f lst =
   match lst with
   | [] -> []
   | hd :: rest -> f hd :: map f rest
+  end
 
 let main _ =
   print (map (fun x -> x + 1) [-1,-2,-3])

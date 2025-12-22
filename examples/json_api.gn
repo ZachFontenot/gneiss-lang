@@ -22,6 +22,7 @@ let format_users_json users =
         | [] -> ""
         | [u] -> format_user u
         | u :: rest -> format_user u ++ "," ++ format_list rest
+        end
     in
     "[" ++ format_list users ++ "]"
 

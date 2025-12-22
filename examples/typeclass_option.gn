@@ -15,6 +15,7 @@ impl Show for (Option a) where a : Show =
         match opt with
         | None -> "None"
         | Some x -> "Some(" ++ show x ++ ")"
+        end
 end
 
 let main () =
