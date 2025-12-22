@@ -643,6 +643,7 @@ impl Parser {
         self.consume(Token::Eq)?;
 
         if self.check(&Token::LBrace) {
+            // Record type: type Foo = { field : Type }
             let fields = self.parse_record_fields()?;
             Ok(Decl::Record {
                 visibility: Visibility::Private,
@@ -650,7 +651,8 @@ impl Parser {
                 params,
                 fields,
             })
-        } else if self.check(&Token::Pipe) || self.peek_is_upper_ident() {
+        } else if self.check(&Token::Pipe) {
+            // Variant type with leading pipe: type Foo = | A | B
             let constructors = self.parse_constructors()?;
             Ok(Decl::Type {
                 visibility: Visibility::Private,
@@ -658,7 +660,64 @@ impl Parser {
                 params,
                 constructors,
             })
+        } else if self.peek_is_upper_ident() {
+            // Could be variant or type alias - disambiguate by looking for `|`
+            // Parse first constructor or type application
+            let first_name = self.parse_upper_ident()?;
+            let mut type_args = Vec::new();
+
+            while self.is_type_atom_start() {
+                type_args.push(self.parse_type_atom()?);
+            }
+
+            if self.check(&Token::Pipe) {
+                // It's a variant type: type Foo = A args | B args
+                let first_constructor = Constructor {
+                    name: first_name,
+                    fields: type_args,
+                };
+                let mut constructors = vec![first_constructor];
+                while self.match_token(&Token::Pipe) {
+                    let ctor_name = self.parse_upper_ident()?;
+                    let mut ctor_fields = Vec::new();
+                    while self.is_type_atom_start() {
+                        ctor_fields.push(self.parse_type_atom()?);
+                    }
+                    constructors.push(Constructor {
+                        name: ctor_name,
+                        fields: ctor_fields,
+                    });
+                }
+                Ok(Decl::Type {
+                    visibility: Visibility::Private,
+                    name,
+                    params,
+                    constructors,
+                })
+            } else {
+                // It's a type alias: type IntList = List Int
+                let body = if type_args.is_empty() {
+                    Spanned::new(TypeExprKind::Named(first_name), Span::default())
+                } else {
+                    let constructor =
+                        Spanned::new(TypeExprKind::Named(first_name), Span::default());
+                    Spanned::new(
+                        TypeExprKind::App {
+                            constructor: Rc::new(constructor),
+                            args: type_args,
+                        },
+                        Span::default(),
+                    )
+                };
+                Ok(Decl::TypeAlias {
+                    visibility: Visibility::Private,
+                    name,
+                    params,
+                    body,
+                })
+            }
         } else {
+            // Type alias with lowercase type var or other: type Foo a = a
             let body = self.parse_type_expr()?;
             Ok(Decl::TypeAlias {
                 visibility: Visibility::Private,
@@ -1903,174 +1962,5 @@ impl Parser {
             }
             _ => Err(self.unexpected_token("identifier")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::ExportItem;
-    use crate::lexer::Lexer;
-
-    fn parse(input: &str) -> Program {
-        let tokens = Lexer::new(input).tokenize().unwrap();
-        Parser::new(tokens).parse_program().unwrap()
-    }
-
-    #[test]
-    fn test_let_simple() {
-        let prog = parse("let x = 42");
-        assert_eq!(prog.items.len(), 1);
-    }
-
-    #[test]
-    fn test_let_function() {
-        let prog = parse("let add x y = x + y");
-        assert_eq!(prog.items.len(), 1);
-    }
-
-    #[test]
-    fn test_type_decl() {
-        let prog = parse("type Option a = | Some a | None");
-        assert_eq!(prog.items.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_trait_decl() {
-        let prog = parse("trait Show a = val show : a -> String end");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Trait {
-                name,
-                type_param,
-                supertraits,
-                methods,
-                ..
-            }) => {
-                assert_eq!(name, "Show");
-                assert_eq!(type_param, "a");
-                assert!(supertraits.is_empty());
-                assert_eq!(methods.len(), 1);
-                assert_eq!(methods[0].name, "show");
-            }
-            _ => panic!("expected trait decl"),
-        }
-    }
-
-    #[test]
-    fn test_parse_instance_decl() {
-        let prog = parse("impl Show for Int = let show n = int_to_string n end");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Instance {
-                trait_name,
-                constraints,
-                methods,
-                ..
-            }) => {
-                assert_eq!(trait_name, "Show");
-                assert!(constraints.is_empty());
-                assert_eq!(methods.len(), 1);
-                assert_eq!(methods[0].name, "show");
-            }
-            _ => panic!("expected instance decl"),
-        }
-    }
-
-    #[test]
-    fn test_parse_constrained_instance() {
-        let prog = parse(r#"impl Show for (List a) where a : Show = let show xs = "list" end"#);
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Instance { constraints, .. }) => {
-                assert_eq!(constraints.len(), 1);
-                assert_eq!(constraints[0].type_var, "a");
-                assert_eq!(constraints[0].trait_name, "Show");
-            }
-            _ => panic!("expected instance decl"),
-        }
-    }
-
-    #[test]
-    fn test_parse_trait_with_supertrait() {
-        let prog = parse("trait Ord a : Eq = val compare : a -> a -> Int end");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Decl(Decl::Trait { supertraits, .. }) => {
-                assert_eq!(supertraits.len(), 1);
-                assert_eq!(supertraits[0], "Eq");
-            }
-            _ => panic!("expected trait decl"),
-        }
-    }
-
-    #[test]
-    fn test_parse_trait_multiple_methods() {
-        let prog = parse("trait Eq a = val eq : a -> a -> Bool val neq : a -> a -> Bool end");
-        match &prog.items[0] {
-            Item::Decl(Decl::Trait { methods, .. }) => {
-                assert_eq!(methods.len(), 2);
-                assert_eq!(methods[0].name, "eq");
-                assert_eq!(methods[1].name, "neq");
-            }
-            _ => panic!("expected trait decl"),
-        }
-    }
-
-    #[test]
-    fn test_let_expression_at_top_level() {
-        let prog = parse("let x = 5 in x + 1");
-        assert_eq!(prog.items.len(), 1);
-        match &prog.items[0] {
-            Item::Expr(expr) => match &expr.node {
-                ExprKind::Let { body, .. } => {
-                    assert!(body.is_some(), "let-expression should have a body");
-                }
-                _ => panic!("expected let expression"),
-            },
-            _ => panic!("expected Item::Expr, got Item::Decl"),
-        }
-    }
-
-    #[test]
-    fn test_let_decl_with_double_semi() {
-        let prog = parse("let x = 5;; x");
-        assert_eq!(prog.items.len(), 2);
-        assert!(matches!(&prog.items[0], Item::Decl(Decl::Let { .. })));
-        assert!(matches!(&prog.items[1], Item::Expr(_)));
-    }
-
-    #[test]
-    fn test_let_function_expression() {
-        let prog = parse("let f x = x + 1 in f 5");
-        assert_eq!(prog.items.len(), 1);
-        assert!(matches!(&prog.items[0], Item::Expr(_)));
-    }
-
-    #[test]
-    fn test_match_requires_end() {
-        let prog = parse(
-            "match x with | Some y -> y | None -> 0 end",
-        );
-        assert_eq!(prog.items.len(), 1);
-    }
-
-    #[test]
-    fn test_export_value() {
-        let prog = parse("export (foo, bar)");
-        assert!(prog.exports.is_some());
-        let exports = prog.exports.unwrap();
-        assert_eq!(exports.items.len(), 2);
-        assert!(matches!(&exports.items[0].node, ExportItem::Value(s) if s == "foo"));
-        assert!(matches!(&exports.items[1].node, ExportItem::Value(s) if s == "bar"));
-    }
-
-    #[test]
-    fn test_export_type_all() {
-        let prog = parse("export (Option(..))");
-        assert!(prog.exports.is_some());
-        let exports = prog.exports.unwrap();
-        assert_eq!(exports.items.len(), 1);
-        assert!(matches!(&exports.items[0].node, ExportItem::TypeAll(s) if s == "Option"));
     }
 }

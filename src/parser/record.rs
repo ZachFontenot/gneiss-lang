@@ -4,7 +4,7 @@
 //! which eliminates the 4x duplication in record type fields, record literal fields,
 //! record update fields, and record pattern fields.
 
-use crate::ast::{Expr, Ident, Pattern, RecordField, TypeExpr};
+use crate::ast::{Expr, Ident, Pattern, RecordField};
 use crate::lexer::Token;
 
 use super::cursor::TokenCursor;
