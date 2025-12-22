@@ -1934,20 +1934,19 @@ impl Parser {
         }
     }
 
+    /// Parse a name that may be module-qualified: `name` or `Module.name`
+    ///
+    /// Used for let bindings and other declaration contexts where we need
+    /// to allow both local names and qualified references.
     fn parse_possibly_qualified_name(&mut self) -> ParseResult<Ident> {
         match self.peek().clone() {
             Token::UpperIdent(module_name) => {
-                let pos = self.cursor.position();
-                if pos + 1 < self.cursor.position() + 10 {
-                    // peek ahead
-                    if matches!(self.cursor.peek_nth(1), Token::Dot) {
-                        self.advance(); // consume UpperIdent
-                        self.advance(); // consume Dot
-                        let func_name = self.parse_ident()?;
-                        Ok(format!("{}.{}", module_name, func_name))
-                    } else {
-                        Err(self.unexpected_token("identifier"))
-                    }
+                // Look ahead for Module.name pattern
+                if matches!(self.cursor.peek_nth(1), Token::Dot) {
+                    self.advance(); // consume UpperIdent
+                    self.advance(); // consume Dot
+                    let func_name = self.parse_ident()?;
+                    Ok(format!("{}.{}", module_name, func_name))
                 } else {
                     Err(self.unexpected_token("identifier"))
                 }
