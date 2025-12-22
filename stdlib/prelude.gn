@@ -64,6 +64,17 @@ let rec drop_while p xs =
     | x :: rest -> if p x then drop_while p rest else xs
     end
 
+-- Range generation
+-- range start end generates [start, start+1, ..., end-1] (exclusive end)
+let rec range_helper start end_ acc =
+    if start >= end_ then reverse acc
+    else range_helper (start + 1) end_ (start :: acc)
+
+let range start end_ = range_helper start end_ []
+
+-- range_inclusive start end generates [start, start+1, ..., end] (inclusive end)
+let range_inclusive start end_ = range start (end_ + 1)
+
 -- String operations
 -- Note: string_to_lower, string_to_upper, string_trim, string_split, string_join
 -- are now native builtins for performance
