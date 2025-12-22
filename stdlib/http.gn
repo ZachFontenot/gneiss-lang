@@ -158,6 +158,7 @@ let format_headers headers =
     string_join "\r\n" (map format_header headers)
 
 -- Format HTTP response as string
+val Http.formatResponse : HttpResponse -> String
 let Http.formatResponse response =
     let status_line = format_version response.version ++ " "
         ++ int_to_string response.status ++ " "
@@ -166,6 +167,7 @@ let Http.formatResponse response =
     status_line ++ "\r\n" ++ headers_str ++ "\r\n\r\n" ++ response.body
 
 -- Format HTTP request as string
+val Http.formatRequest : HttpRequest -> String
 let Http.formatRequest request =
     let request_line = format_method request.method ++ " "
         ++ request.path ++ " "
@@ -233,6 +235,7 @@ let Response.badRequest msg = Response.text 400 msg
 let Response.internalError msg = Response.text 500 msg
 
 -- Add header to response
+val Response.withHeader : String -> String -> HttpResponse -> HttpResponse
 let Response.withHeader name value response =
     HttpResponse {
         version = response.version,
@@ -247,6 +250,7 @@ let Response.withHeader name value response =
 -- ============================================================================
 
 -- Get a header value by name (case-sensitive for now)
+val Request.getHeader : String -> HttpRequest -> Option String
 let Request.getHeader name request =
     let rec find headers =
         (match headers with
@@ -257,12 +261,19 @@ let Request.getHeader name request =
     find request.headers
 
 -- Check if request is a specific method
+val Request.isGet : HttpRequest -> Bool
 let Request.isGet request =
     match request.method with | GET -> true | _ -> false
+
+val Request.isPost : HttpRequest -> Bool
 let Request.isPost request =
     match request.method with | POST -> true | _ -> false
+
+val Request.isPut : HttpRequest -> Bool
 let Request.isPut request =
     match request.method with | PUT -> true | _ -> false
+
+val Request.isDelete : HttpRequest -> Bool
 let Request.isDelete request =
     match request.method with | DELETE -> true | _ -> false
 

@@ -137,15 +137,15 @@ let parse_json_string input =
             | Some '"' ->
                 ParseOk (chars_to_string (reverse acc)) (string_substring 1 (string_length rest2) rest2)
             | Some '\\' ->
-                -- Handle escape sequences
-                match string_char_at 1 rest2 with
+                -- Handle escape sequences (nested match needs parens)
+                (match string_char_at 1 rest2 with
                 | None -> ParseErr "unterminated escape"
                 | Some 'n' -> parse_string_contents ('\n' :: acc) (string_substring 2 (string_length rest2) rest2)
                 | Some 'r' -> parse_string_contents ('\r' :: acc) (string_substring 2 (string_length rest2) rest2)
                 | Some 't' -> parse_string_contents ('\t' :: acc) (string_substring 2 (string_length rest2) rest2)
                 | Some '"' -> parse_string_contents ('"' :: acc) (string_substring 2 (string_length rest2) rest2)
                 | Some '\\' -> parse_string_contents ('\\' :: acc) (string_substring 2 (string_length rest2) rest2)
-                | Some c -> parse_string_contents (c :: acc) (string_substring 2 (string_length rest2) rest2)
+                | Some c -> parse_string_contents (c :: acc) (string_substring 2 (string_length rest2) rest2))
             | Some c ->
                 parse_string_contents (c :: acc) (string_substring 1 (string_length rest2) rest2)
         in
