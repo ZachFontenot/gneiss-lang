@@ -384,6 +384,7 @@ fn format_parse_error_for_test(
         ParseError::InvalidPattern { span } => {
             ("I found an invalid pattern here.".to_string(), Some(span))
         }
+        ParseError::Custom { message, span } => (message.clone(), Some(span)),
     };
 
     if let Some(span) = span {

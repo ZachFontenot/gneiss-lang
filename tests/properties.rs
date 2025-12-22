@@ -639,13 +639,14 @@ fun x ->
 #[test]
 fn test_nested_match_with_sequences() {
     // Nested matches with sequences should parse correctly
+    // Nested match must be wrapped in parentheses
     let source = r#"
 fun x y ->
     match x with
     | 1 ->
-        match y with
+        (match y with
         | 10 -> (); 1
-        | 20 -> (); 2
+        | 20 -> (); 2)
     | 2 -> 0
 "#;
     let result = infer_source(source);

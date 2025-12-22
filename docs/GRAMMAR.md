@@ -183,21 +183,29 @@ expr_compound ::= expr_match
 
 ### Match Expressions
 
-**Key rule**: Nested match expressions require explicit delimiters.
+**Key rule**: Nested match expressions must be wrapped in parentheses.
 
 ```ebnf
-expr_match  ::= 'match' expr 'with' match_arm+ match_end
-
-match_end   ::= 'end'                               (* explicit terminator *)
-              | (* empty - allowed at top level only *)
+expr_match  ::= 'match' expr 'with' match_arm+
 
 match_arm   ::= '|'? pattern guard? '->' expr
 
 guard       ::= 'if' expr_binary                    (* restricted context *)
 ```
 
-When a match arm body contains another `match`, the inner match MUST use
-either parentheses `(match ... with ...)` or terminate with `end`.
+When a match arm body contains another `match`, the inner match MUST be
+wrapped in parentheses: `(match ... with ...)`. This prevents ambiguity
+about which `|` belongs to which match.
+
+**Example**:
+```gneiss
+match x with
+| Some n ->
+    (match n with        -- must use parentheses
+    | 0 -> "zero"
+    | _ -> "nonzero")
+| None -> "none"
+```
 
 ### Lambda Expressions
 

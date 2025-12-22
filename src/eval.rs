@@ -5253,9 +5253,9 @@ let main () =
 let main () =
     match file_open "{}" "r" with
     | Ok handle ->
-        match file_close handle with
+        (match file_close handle with
         | Ok _ -> () -- success
-        | Err e -> print e -- print error
+        | Err e -> print e) -- print error
     | Err e -> print e -- print error
 "#,
             temp_path.display()
@@ -5278,12 +5278,12 @@ let main () =
     match file_open "{}" "w" with
     | Ok handle ->
         let data = string_to_bytes "hello from gneiss" in
-        match file_write handle data with
+        (match file_write handle data with
         | Ok _ ->
-            match file_close handle with
+            (match file_close handle with
             | Ok _ -> ()
-            | Err e -> print e
-        | Err e -> print e
+            | Err e -> print e)
+        | Err e -> print e)
     | Err e -> print e
 "#,
             temp_path.display()
@@ -5315,14 +5315,14 @@ let main () =
 let main () =
     match file_open "{}" "r" with
     | Ok handle ->
-        match file_read handle 100 with
+        (match file_read handle 100 with
         | Ok data ->
             let s = bytes_to_string data in
             let _ = file_close handle in
             print s
         | Err e ->
             let _ = file_close handle in
-            print e
+            print e)
     | Err e -> print e
 "#,
             temp_path.display()
@@ -5350,16 +5350,16 @@ let main () =
         let _ = file_close wh in
 
         -- Now read it back
-        match file_open "{path}" "r" with
+        (match file_open "{path}" "r" with
         | Ok rh ->
-            match file_read rh 100 with
+            (match file_read rh 100 with
             | Ok read_data ->
                 let _ = file_close rh in
                 print (bytes_to_string read_data)
             | Err e ->
                 let _ = file_close rh in
-                print e
-        | Err e -> print e
+                print e)
+        | Err e -> print e)
     | Err e -> print e
 "#,
             path = temp_path.display()
