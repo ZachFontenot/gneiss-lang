@@ -8,6 +8,41 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use thiserror::Error;
 
+/// Substitute Generic type variables with concrete types.
+/// Generic(0) is replaced with args[0], Generic(1) with args[1], etc.
+fn substitute_generics(ty: &Type, args: &[Type]) -> Type {
+    match ty.resolve() {
+        Type::Var(var) => match &*var.borrow() {
+            TypeVar::Generic(id) => {
+                args.get(*id as usize).cloned().unwrap_or_else(|| ty.clone())
+            }
+            _ => ty.clone(),
+        },
+        Type::Arrow {
+            arg,
+            ret,
+            ans_in,
+            ans_out,
+        } => Type::Arrow {
+            arg: Rc::new(substitute_generics(&arg, args)),
+            ret: Rc::new(substitute_generics(&ret, args)),
+            ans_in: Rc::new(substitute_generics(&ans_in, args)),
+            ans_out: Rc::new(substitute_generics(&ans_out, args)),
+        },
+        Type::Tuple(ts) => {
+            Type::Tuple(ts.iter().map(|t| substitute_generics(t, args)).collect())
+        }
+        Type::Channel(t) => Type::Channel(Rc::new(substitute_generics(&t, args))),
+        Type::Fiber(t) => Type::Fiber(Rc::new(substitute_generics(&t, args))),
+        Type::Dict(t) => Type::Dict(Rc::new(substitute_generics(&t, args))),
+        Type::Constructor { name, args: cargs } => Type::Constructor {
+            name,
+            args: cargs.iter().map(|t| substitute_generics(t, args)).collect(),
+        },
+        other => other,
+    }
+}
+
 /// Context for where a unification error occurred
 #[derive(Debug, Clone)]
 pub enum UnifyContext {
@@ -2145,10 +2180,18 @@ impl Inferencer {
                 "String" => Ok(Type::String),
                 "Char" => Ok(Type::Char),
                 "Pid" => Ok(Type::Pid),
-                _ => Ok(Type::Constructor {
-                    name: name.clone(),
-                    args: vec![],
-                }),
+                _ => {
+                    // Check if this is a type alias with no parameters
+                    if let Some(alias_info) = self.type_ctx.get_type_alias(name).cloned() {
+                        if alias_info.params.is_empty() {
+                            return Ok(alias_info.body);
+                        }
+                    }
+                    Ok(Type::Constructor {
+                        name: name.clone(),
+                        args: vec![],
+                    })
+                }
             },
             TypeExprKind::App { constructor, args } => {
                 let arg_types: Result<Vec<_>, _> = args
@@ -2160,6 +2203,12 @@ impl Inferencer {
                         let arg_types = arg_types?;
                         if name == "List" && arg_types.len() == 1 {
                             return Ok(Type::list(arg_types.into_iter().next().unwrap()));
+                        }
+                        // Check if this is a type alias with parameters
+                        if let Some(alias_info) = self.type_ctx.get_type_alias(name).cloned() {
+                            if alias_info.params.len() == arg_types.len() {
+                                return Ok(substitute_generics(&alias_info.body, &arg_types));
+                            }
                         }
                         Ok(Type::Constructor {
                             name: name.clone(),
@@ -2224,10 +2273,19 @@ impl Inferencer {
                 "String" => Ok(Type::String),
                 "Char" => Ok(Type::Char),
                 "Pid" => Ok(Type::Pid),
-                _ => Ok(Type::Constructor {
-                    name: name.clone(),
-                    args: vec![],
-                }),
+                _ => {
+                    // Check if this is a type alias with no parameters
+                    if let Some(alias_info) = self.type_ctx.get_type_alias(name).cloned() {
+                        if alias_info.params.is_empty() {
+                            // Zero-parameter alias: just return the body
+                            return Ok(alias_info.body);
+                        }
+                    }
+                    Ok(Type::Constructor {
+                        name: name.clone(),
+                        args: vec![],
+                    })
+                }
             },
             TypeExprKind::App { constructor, args } => {
                 let arg_types: Result<Vec<_>, _> = args
@@ -2240,6 +2298,13 @@ impl Inferencer {
                         // Canonicalize "List a" to Type::list(a)
                         if name == "List" && arg_types.len() == 1 {
                             return Ok(Type::list(arg_types.into_iter().next().unwrap()));
+                        }
+                        // Check if this is a type alias with parameters
+                        if let Some(alias_info) = self.type_ctx.get_type_alias(name).cloned() {
+                            if alias_info.params.len() == arg_types.len() {
+                                // Substitute type arguments into the alias body
+                                return Ok(substitute_generics(&alias_info.body, &arg_types));
+                            }
                         }
                         Ok(Type::Constructor {
                             name: name.clone(),
@@ -2349,6 +2414,34 @@ impl Inferencer {
             };
 
             self.type_ctx.add_record(name.clone(), info);
+        }
+    }
+
+    /// Register a type alias declaration
+    pub fn register_type_alias_decl(&mut self, decl: &Decl) {
+        if let Decl::TypeAlias {
+            name,
+            params,
+            body,
+            ..
+        } = decl
+        {
+            // Map type parameter names to generic variable IDs
+            let param_map: HashMap<String, TypeVarId> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), i as TypeVarId))
+                .collect();
+
+            // Convert the body TypeExpr to a Type
+            if let Ok(body_type) = self.type_expr_to_type(body, &param_map) {
+                let info = TypeAliasInfo {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: body_type,
+                };
+                self.type_ctx.add_type_alias(name.clone(), info);
+            }
         }
     }
 
@@ -3219,11 +3312,12 @@ impl Inferencer {
             .chain(program.items.iter())
             .collect();
 
-        // First pass: register all type declarations (ADTs and records)
+        // First pass: register all type declarations (ADTs, records, and type aliases)
         for item in &all_items {
             if let Item::Decl(decl) = item {
                 self.register_type_decl(decl);
                 self.register_record_decl(decl);
+                self.register_type_alias_decl(decl);
             }
         }
 

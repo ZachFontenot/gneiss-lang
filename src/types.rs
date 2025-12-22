@@ -623,6 +623,17 @@ pub struct RecordInfo {
     pub field_types: HashMap<String, Type>,
 }
 
+/// Information about a type alias
+#[derive(Debug, Clone)]
+pub struct TypeAliasInfo {
+    /// The alias name (e.g., "Thing")
+    pub name: String,
+    /// Type parameter names (e.g., ["a", "b"] for `type Pair a b = (a, b)`)
+    pub params: Vec<String>,
+    /// The type this alias expands to (may contain generic type vars)
+    pub body: Type,
+}
+
 /// Stores information about declared data types
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
@@ -630,6 +641,8 @@ pub struct TypeContext {
     pub constructors: HashMap<String, ConstructorInfo>,
     /// Maps record type names to their info
     pub records: HashMap<String, RecordInfo>,
+    /// Maps type alias names to their info
+    pub type_aliases: HashMap<String, TypeAliasInfo>,
 }
 
 impl TypeContext {
@@ -661,6 +674,14 @@ impl TypeContext {
     /// Get an iterator over all record type names
     pub fn record_names(&self) -> impl Iterator<Item = &str> {
         self.records.keys().map(|s| s.as_str())
+    }
+
+    pub fn add_type_alias(&mut self, name: String, info: TypeAliasInfo) {
+        self.type_aliases.insert(name, info);
+    }
+
+    pub fn get_type_alias(&self, name: &str) -> Option<&TypeAliasInfo> {
+        self.type_aliases.get(name)
     }
 }
 
