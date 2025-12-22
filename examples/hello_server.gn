@@ -1,0 +1,10 @@
+-- Hello World Web Server
+-- Minimal example of a Gneiss web server
+
+import Http
+import Server
+
+let main () =
+    Server.run 8080 (fun request ->
+        Response.text 200 "Hello, World!"
+    )

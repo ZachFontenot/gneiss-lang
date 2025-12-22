@@ -767,7 +767,6 @@ fn format_parse_error(
         ParseError::InvalidPattern { span } => {
             ("I found an invalid pattern here.".to_string(), Some(span))
         }
-        ParseError::Custom { message, span } => (message.clone(), Some(span)),
     };
 
     // Location

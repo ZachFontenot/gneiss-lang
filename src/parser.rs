@@ -44,8 +44,6 @@ pub enum ParseError {
     UnexpectedEof { expected: String, last_span: Span },
     #[error("invalid pattern")]
     InvalidPattern { span: Span },
-    #[error("{message}")]
-    Custom { message: String, span: Span },
 }
 
 pub struct Parser {
@@ -1454,16 +1452,6 @@ impl Parser {
             };
 
             self.consume(Token::Arrow)?;
-
-            // Nested match expressions must be wrapped in parentheses to avoid ambiguity
-            if self.check(&Token::Match) {
-                let span = self.current_span();
-                return Err(ParseError::Custom {
-                    message: "nested match expressions must be wrapped in parentheses".to_string(),
-                    span,
-                });
-            }
-
             let body = self.parse_expr_in(ExprContext::Full)?; // Body allows full language including sequences
 
             arms.push(MatchArm {

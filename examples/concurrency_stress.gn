@@ -1,0 +1,135 @@
+-- Concurrency Stress Test
+-- Tests fiber spawn/join at increasing concurrency levels to investigate
+-- the 200+ concurrent connection issue in the HTTP server
+
+-- Helper: Generate a list from start to end_ (exclusive)
+let rec range_helper start end_ acc =
+    if start >= end_ then reverse acc
+    else range_helper (start + 1) end_ (start :: acc)
+
+let range start end_ = range_helper start end_ []
+
+-- ============================================================================
+-- Test A: Pure Fiber Spawn/Join (No I/O)
+-- ============================================================================
+
+let spawn_compute_fibers n =
+    let indices = range 0 n in
+    let spawn_one i = Fiber.spawn (fun () -> i * i) in
+    let fibers = map spawn_one indices in
+    let results = map Fiber.join fibers in
+    length results
+
+let test_pure_fibers n =
+    let result = spawn_compute_fibers n in
+    print ("Pure fibers (n=" ++ int_to_string n ++ "): " ++ int_to_string result ++ " fibers")
+
+-- ============================================================================
+-- Test B: Fiber with Sleep (simulated work)
+-- ============================================================================
+
+let spawn_sleep_fibers n sleep_time =
+    let indices = range 0 n in
+    let spawn_one i = Fiber.spawn (fun () ->
+        sleep_ms sleep_time;
+        i
+    ) in
+    let fibers = map spawn_one indices in
+    map Fiber.join fibers
+
+let test_fiber_sleep n =
+    let results = spawn_sleep_fibers n 10 in
+    print ("Sleep fibers (n=" ++ int_to_string n ++ "): " ++ int_to_string (length results))
+
+-- ============================================================================
+-- Test C: Channel Communication (fork/join with channels)
+-- ============================================================================
+
+let spawn_channel_workers n =
+    let results_ch = Channel.new in
+    let indices = range 0 n in
+    let spawn_worker i = Fiber.spawn (fun () ->
+        Channel.send results_ch (i * i)
+    ) in
+    let _ = map spawn_worker indices in
+    let rec collect_n count acc =
+        if count <= 0 then reverse acc
+        else
+            let v = Channel.recv results_ch in
+            collect_n (count - 1) (v :: acc)
+    in
+    collect_n n []
+
+let test_channel_workers n =
+    let results = spawn_channel_workers n in
+    print ("Channel workers (n=" ++ int_to_string n ++ "): " ++ int_to_string (length results))
+
+-- ============================================================================
+-- Test D: Mixed workload (fibers + sleep + channels)
+-- ============================================================================
+
+let spawn_mixed_workers n work_time =
+    let results_ch = Channel.new in
+    let indices = range 0 n in
+    let spawn_worker i = Fiber.spawn (fun () ->
+        sleep_ms work_time;
+        Channel.send results_ch (i * i)
+    ) in
+    let _ = map spawn_worker indices in
+    let rec collect_n count acc =
+        if count <= 0 then reverse acc
+        else
+            let v = Channel.recv results_ch in
+            collect_n (count - 1) (v :: acc)
+    in
+    collect_n n []
+
+let test_mixed n =
+    let results = spawn_mixed_workers n 5 in
+    let sum = foldl (fun acc x -> acc + x) 0 results in
+    print ("Mixed (n=" ++ int_to_string n ++ "): sum=" ++ int_to_string sum)
+
+-- ============================================================================
+-- Main Entry Point
+-- ============================================================================
+
+let main () =
+    print "=== Concurrency Stress Tests ===";
+    print "";
+
+    print "--- Test A: Pure Fiber Spawn/Join ---";
+    test_pure_fibers 10;
+    test_pure_fibers 50;
+    test_pure_fibers 100;
+    test_pure_fibers 200;
+    test_pure_fibers 500;
+    test_pure_fibers 1000;
+    test_pure_fibers 2000;
+    print "";
+
+    print "--- Test B: Fiber with Sleep ---";
+    test_fiber_sleep 10;
+    test_fiber_sleep 50;
+    test_fiber_sleep 100;
+    test_fiber_sleep 200;
+    test_fiber_sleep 500;
+    print "";
+
+    print "--- Test C: Channel Workers ---";
+    test_channel_workers 10;
+    test_channel_workers 50;
+    test_channel_workers 100;
+    test_channel_workers 200;
+    test_channel_workers 500;
+    test_channel_workers 1000;
+    print "";
+
+    print "--- Test D: Mixed Workload ---";
+    test_mixed 10;
+    test_mixed 50;
+    test_mixed 100;
+    test_mixed 200;
+    test_mixed 500;
+    print "";
+
+    print "=== Tests Complete ==="

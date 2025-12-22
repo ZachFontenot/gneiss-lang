@@ -322,6 +322,16 @@ impl Inferencer {
             }
         }
 
+        // 4. Check for qualified name in imported modules (e.g., Response.notFound from Http module)
+        // This handles cases where a function has a dot in its name like "Response.notFound"
+        if name.contains('.') {
+            for (_import_name, module_env) in &self.module_envs {
+                if let Some(scheme) = module_env.get(name) {
+                    return Some(scheme.clone());
+                }
+            }
+        }
+
         None
     }
 
@@ -2072,6 +2082,123 @@ impl Inferencer {
         }
     }
 
+    /// Collect all type variable names from a TypeExpr (lowercase identifiers)
+    /// Used for implicitly quantified type variables in val declarations
+    fn collect_type_vars(expr: &TypeExpr, vars: &mut Vec<String>) {
+        match &expr.node {
+            TypeExprKind::Var(name) => {
+                if !vars.contains(name) {
+                    vars.push(name.clone());
+                }
+            }
+            TypeExprKind::Named(_) => {}
+            TypeExprKind::App { constructor, args } => {
+                Self::collect_type_vars(constructor, vars);
+                for arg in args {
+                    Self::collect_type_vars(arg, vars);
+                }
+            }
+            TypeExprKind::Arrow { from, to } => {
+                Self::collect_type_vars(from, vars);
+                Self::collect_type_vars(to, vars);
+            }
+            TypeExprKind::Tuple(types) => {
+                for t in types {
+                    Self::collect_type_vars(t, vars);
+                }
+            }
+            TypeExprKind::Channel(inner) => {
+                Self::collect_type_vars(inner, vars);
+            }
+            TypeExprKind::List(inner) => {
+                Self::collect_type_vars(inner, vars);
+            }
+        }
+    }
+
+    /// Convert surface TypeExpr to internal Type, using pre-created fresh type variables
+    /// for type parameters. This is used for val declarations where we want proper
+    /// Unbound type vars (that can be generalized) instead of Generic types.
+    fn type_expr_to_type_with_fresh_vars(
+        &mut self,
+        expr: &TypeExpr,
+        var_names: &[String],
+        fresh_vars: &[Type],
+    ) -> Result<Type, TypeError> {
+        match &expr.node {
+            TypeExprKind::Var(name) => {
+                // Find the index of this variable name
+                if let Some(idx) = var_names.iter().position(|n| n == name) {
+                    Ok(fresh_vars[idx].clone())
+                } else {
+                    Err(TypeError::UnboundVariable {
+                        name: name.clone(),
+                        span: expr.span.clone(),
+                        suggestions: vec![],
+                    })
+                }
+            }
+            TypeExprKind::Named(name) => match name.as_str() {
+                "Int" => Ok(Type::Int),
+                "Float" => Ok(Type::Float),
+                "Bool" => Ok(Type::Bool),
+                "String" => Ok(Type::String),
+                "Char" => Ok(Type::Char),
+                "Pid" => Ok(Type::Pid),
+                _ => Ok(Type::Constructor {
+                    name: name.clone(),
+                    args: vec![],
+                }),
+            },
+            TypeExprKind::App { constructor, args } => {
+                let arg_types: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|a| self.type_expr_to_type_with_fresh_vars(a, var_names, fresh_vars))
+                    .collect();
+                match &constructor.node {
+                    TypeExprKind::Named(name) => {
+                        let arg_types = arg_types?;
+                        if name == "List" && arg_types.len() == 1 {
+                            return Ok(Type::list(arg_types.into_iter().next().unwrap()));
+                        }
+                        Ok(Type::Constructor {
+                            name: name.clone(),
+                            args: arg_types,
+                        })
+                    }
+                    _ => Err(TypeError::PatternMismatch {
+                        span: constructor.span.clone(),
+                    }),
+                }
+            }
+            TypeExprKind::Arrow { from, to } => {
+                let from_ty = self.type_expr_to_type_with_fresh_vars(from, var_names, fresh_vars)?;
+                let to_ty = self.type_expr_to_type_with_fresh_vars(to, var_names, fresh_vars)?;
+                Ok(Type::arrow(from_ty, to_ty))
+            }
+            TypeExprKind::Tuple(types) => {
+                let tys: Result<Vec<_>, _> = types
+                    .iter()
+                    .map(|t| self.type_expr_to_type_with_fresh_vars(t, var_names, fresh_vars))
+                    .collect();
+                let tys = tys?;
+                Ok(if tys.is_empty() {
+                    Type::Unit
+                } else {
+                    Type::Tuple(tys)
+                })
+            }
+            TypeExprKind::Channel(inner) => {
+                let inner_ty = self.type_expr_to_type_with_fresh_vars(inner, var_names, fresh_vars)?;
+                Ok(Type::Channel(Rc::new(inner_ty)))
+            }
+            TypeExprKind::List(inner) => {
+                let elem_ty = self.type_expr_to_type_with_fresh_vars(inner, var_names, fresh_vars)?;
+                Ok(Type::list(elem_ty))
+            }
+        }
+    }
+
     /// Convert surface TypeExpr to internal Type, mapping type params to generic vars
     fn type_expr_to_type(
         &mut self,
@@ -2346,6 +2473,12 @@ impl Inferencer {
             Scheme::mono(Type::arrow(Type::Int, Type::String)),
         );
 
+        // string_to_int : String -> Int (parses decimal string)
+        env.insert(
+            "string_to_int".into(),
+            Scheme::mono(Type::arrow(Type::String, Type::Int)),
+        );
+
         // string_length : String -> Int
         env.insert(
             "string_length".into(),
@@ -2391,6 +2524,24 @@ impl Inferencer {
         // char_is_whitespace : Char -> Bool
         env.insert(
             "char_is_whitespace".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Bool)),
+        );
+
+        // char_is_digit : Char -> Bool
+        env.insert(
+            "char_is_digit".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Bool)),
+        );
+
+        // char_is_alpha : Char -> Bool
+        env.insert(
+            "char_is_alpha".into(),
+            Scheme::mono(Type::arrow(Type::Char, Type::Bool)),
+        );
+
+        // char_is_alphanumeric : Char -> Bool
+        env.insert(
+            "char_is_alphanumeric".into(),
             Scheme::mono(Type::arrow(Type::Char, Type::Bool)),
         );
 
@@ -2610,6 +2761,30 @@ impl Inferencer {
         env.insert(
             "tcp_accept".into(),
             Scheme::mono(Type::arrow(Type::TcpListener, result_io_error(Type::TcpSocket))),
+        );
+
+        // tcp_read : TcpSocket -> Int -> Result IoError Bytes
+        env.insert(
+            "tcp_read".into(),
+            Scheme::mono(Type::arrow(
+                Type::TcpSocket,
+                Type::arrow(Type::Int, result_io_error(Type::Bytes)),
+            )),
+        );
+
+        // tcp_write : TcpSocket -> Bytes -> Result IoError Int
+        env.insert(
+            "tcp_write".into(),
+            Scheme::mono(Type::arrow(
+                Type::TcpSocket,
+                Type::arrow(Type::Bytes, result_io_error(Type::Int)),
+            )),
+        );
+
+        // tcp_close : TcpSocket -> Result IoError ()
+        env.insert(
+            "tcp_close".into(),
+            Scheme::mono(Type::arrow(Type::TcpSocket, result_io_error(Type::Unit))),
         );
 
         // spawn : forall a. (() -> a) -> Pid (backwards compatibility)
@@ -3080,8 +3255,34 @@ impl Inferencer {
                     let mut local_env = env.clone();
                     let mut param_types = Vec::new();
 
-                    for param in params {
-                        let param_ty = self.fresh_var();
+                    // Check if there's a val declaration - if so, use its parameter types
+                    let declared_param_types: Option<Vec<Type>> = env.get(name).map(|scheme| {
+                        let ty = self.instantiate(scheme);
+                        // Extract parameter types from the arrow chain
+                        let mut types = Vec::new();
+                        let mut current = ty;
+                        for _ in 0..params.len() {
+                            match current {
+                                Type::Arrow { arg, ret, .. } => {
+                                    types.push((*arg).clone());
+                                    current = (*ret).clone();
+                                }
+                                _ => break,
+                            }
+                        }
+                        types
+                    });
+
+                    for (i, param) in params.iter().enumerate() {
+                        let param_ty = if let Some(ref decl_types) = declared_param_types {
+                            if i < decl_types.len() {
+                                decl_types[i].clone()
+                            } else {
+                                self.fresh_var()
+                            }
+                        } else {
+                            self.fresh_var()
+                        };
                         self.bind_pattern(&mut local_env, param, &param_ty)?;
                         param_types.push(param_ty);
                     }
@@ -3150,8 +3351,39 @@ impl Inferencer {
                 Item::Decl(Decl::Val { name, type_sig }) => {
                     // Register a type signature for the name
                     // The subsequent let declaration will be checked against this
-                    let param_map = HashMap::new();
-                    let declared_ty = self.type_expr_to_type(type_sig, &param_map)?;
+                    //
+                    // We need to:
+                    // 1. Collect type variable names from the signature
+                    // 2. Create fresh Unbound type vars at a higher level for each
+                    // 3. Convert the type expression using these vars
+                    // 4. Generalize to create a proper polymorphic scheme
+                    self.level += 1;
+
+                    // Collect type variable names and create fresh vars for each
+                    let mut type_var_names = Vec::new();
+                    Self::collect_type_vars(type_sig, &mut type_var_names);
+
+                    let mut param_map: HashMap<String, TypeVarId> = HashMap::new();
+                    let mut fresh_vars: Vec<Type> = Vec::new();
+                    for name_str in &type_var_names {
+                        let fresh = self.fresh_var();
+                        // Extract the ID from the fresh var
+                        if let Type::Var(var) = &fresh {
+                            if let TypeVar::Unbound { id, .. } = &*var.borrow() {
+                                param_map.insert(name_str.clone(), *id);
+                            }
+                        }
+                        fresh_vars.push(fresh);
+                    }
+
+                    // Convert using fresh vars, but we need to map names to IDs
+                    // Actually, type_expr_to_type expects a map from name to generic ID
+                    // We need a different approach: use the fresh vars directly
+
+                    let declared_ty =
+                        self.type_expr_to_type_with_fresh_vars(type_sig, &type_var_names, &fresh_vars)?;
+
+                    self.level -= 1;
                     let scheme = self.generalize(&declared_ty);
                     env.insert(name.clone(), scheme);
                 }
@@ -3206,6 +3438,8 @@ impl Inferencer {
                     self.wanted_preds.clear();
 
                     // Step 1: Create preliminary types for all bindings
+                    // For recursive functions, we use fresh vars as preliminary types
+                    // but we'll use val declaration param types when inferring the body
                     let mut local_env = env.clone();
                     let mut preliminary_types: Vec<Type> = Vec::new();
 
@@ -3220,8 +3454,34 @@ impl Inferencer {
                         let mut body_env = local_env.clone();
                         let mut param_types = Vec::new();
 
-                        for param in &binding.params {
-                            let param_ty = self.fresh_var();
+                        // Check if there's a val declaration - if so, use its parameter types
+                        let declared_param_types: Option<Vec<Type>> =
+                            env.get(&binding.name.node).map(|scheme| {
+                                let ty = self.instantiate(scheme);
+                                let mut types = Vec::new();
+                                let mut current = ty;
+                                for _ in 0..binding.params.len() {
+                                    match current {
+                                        Type::Arrow { arg, ret, .. } => {
+                                            types.push((*arg).clone());
+                                            current = (*ret).clone();
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                types
+                            });
+
+                        for (j, param) in binding.params.iter().enumerate() {
+                            let param_ty = if let Some(ref decl_types) = declared_param_types {
+                                if j < decl_types.len() {
+                                    decl_types[j].clone()
+                                } else {
+                                    self.fresh_var()
+                                }
+                            } else {
+                                self.fresh_var()
+                            };
                             self.bind_pattern(&mut body_env, param, &param_ty)?;
                             param_types.push(param_ty);
                         }

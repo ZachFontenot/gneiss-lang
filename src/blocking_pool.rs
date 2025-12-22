@@ -309,13 +309,16 @@ fn execute_blocking_op(
         }
 
         IoOp::TcpAccept { listener } => {
-            // First, accept the connection while holding the lock
-            let accept_result = {
+            // Clone the listener so we can accept without holding the registry lock
+            // This is important because accept() is blocking and we don't want to
+            // block all other I/O operations while waiting for a connection
+            let listener_clone = {
                 let mut reg = registry.lock().unwrap();
                 match reg.get_mut(*listener) {
                     Some(IoResource::TcpListener(l)) => {
-                        // Accept returns (TcpStream, SocketAddr)
-                        l.accept().map(|(stream, _addr)| stream)
+                        // try_clone() returns a new TcpListener that shares the same
+                        // underlying OS socket
+                        l.try_clone()
                     }
                     Some(_) => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -326,6 +329,12 @@ fn execute_blocking_op(
                         "listener handle not found",
                     )),
                 }
+            };
+
+            // Now do the blocking accept without holding the lock
+            let accept_result = match listener_clone {
+                Ok(l) => l.accept().map(|(stream, _addr)| stream),
+                Err(e) => Err(e),
             };
 
             // Now insert the new socket (if accept succeeded)

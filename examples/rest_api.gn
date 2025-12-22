@@ -1,0 +1,235 @@
+-- REST API Server with In-Memory Storage
+-- Demonstrates GET/POST/DELETE with channel-based state actor
+-- Simulates DB latency with sleep_ms
+
+import Http
+import Server
+import Json
+
+-- ============================================================================
+-- Types
+-- ============================================================================
+
+-- An item in our store
+type Item = {
+    id : Int,
+    name : String,
+    value : Int
+}
+
+-- Messages to the store actor
+type StoreMsg =
+    | GetAll
+    | GetById Int
+    | Create String Int   -- name, value
+    | Delete Int
+
+-- ============================================================================
+-- Store Helpers (defined before store_loop to avoid mutual recursion issues)
+-- ============================================================================
+
+-- Convert item to JSON
+let item_to_json item =
+    match item with
+    | Item { id, name, value } ->
+        JsonObject [
+            ("id", JsonInt id),
+            ("name", JsonString name),
+            ("value", JsonInt value)
+        ]
+
+-- Find an item by ID
+let rec find_item id items =
+    match items with
+    | [] -> None
+    | item :: rest ->
+        match item with
+        | Item { id = item_id, name = _, value = _ } ->
+            if item_id == id then Some item
+            else find_item id rest
+
+-- Remove an item by ID
+let remove_item id items =
+    filter (fun item ->
+        match item with
+        | Item { id = item_id, name = _, value = _ } -> item_id != id
+    ) items
+
+-- ============================================================================
+-- Store Actor
+-- ============================================================================
+
+-- In-memory store that runs in its own fiber
+-- Uses synchronous channels for request/response
+
+let rec store_loop items next_id request_ch response_ch =
+    let msg = Channel.recv request_ch in
+    match msg with
+    | GetAll ->
+        sleep_ms 50;
+        Channel.send response_ch (JsonArray (map item_to_json items));
+        store_loop items next_id request_ch response_ch
+
+    | GetById id ->
+        sleep_ms 50;
+        let found = find_item id items in
+        let response = match found with
+            | None -> JsonNull
+            | Some item -> item_to_json item
+        in
+        Channel.send response_ch response;
+        store_loop items next_id request_ch response_ch
+
+    | Create name value ->
+        sleep_ms 50;
+        let new_item = Item { id = next_id, name = name, value = value } in
+        let new_items = items ++ [new_item] in
+        Channel.send response_ch (item_to_json new_item);
+        store_loop new_items (next_id + 1) request_ch response_ch
+
+    | Delete id ->
+        sleep_ms 50;
+        let new_items = remove_item id items in
+        let deleted = length new_items < length items in
+        Channel.send response_ch (JsonBool deleted);
+        store_loop new_items next_id request_ch response_ch
+
+-- ============================================================================
+-- Request Parsing Helpers
+-- ============================================================================
+
+-- Parse ID from path like "/items/123"
+let parse_id_from_path path =
+    let clean = Request.pathWithoutQuery path in
+    -- Check for /items/:id pattern
+    if string_starts_with "/items/" clean then
+        let id_str = string_substring 7 (string_length clean) clean in
+        if string_length id_str > 0 then
+            Some (string_to_int id_str)
+        else None
+    else None
+
+-- Parse JSON body to get name and value
+let parse_create_body body =
+    match Json.parse body with
+    | None -> None
+    | Some json ->
+        let name_opt = match Json.get "name" json with
+            | Some (JsonString s) -> Some s
+            | _ -> None
+        in
+        let value_opt = match Json.get "value" json with
+            | Some (JsonInt n) -> Some n
+            | _ -> None
+        in
+        match (name_opt, value_opt) with
+        | (Some name, Some value) -> Some (name, value)
+        | _ -> None
+
+-- ============================================================================
+-- Route Handlers
+-- ============================================================================
+
+-- GET /items - List all items
+let handle_list_items request_ch response_ch =
+    Channel.send request_ch GetAll;
+    let items = Channel.recv response_ch in
+    Response.json 200 (Json.encode items)
+
+-- GET /items/:id - Get single item
+let handle_get_item request_ch response_ch req_path =
+    match parse_id_from_path req_path with
+    | None -> Response.badRequest "Invalid item ID"
+    | Some id ->
+        Channel.send request_ch (GetById id);
+        let result = Channel.recv response_ch in
+        match result with
+        | JsonNull -> Response.notFound
+        | _ -> Response.json 200 (Json.encode result)
+
+-- POST /items - Create new item
+let handle_create_item request_ch response_ch req_body =
+    match parse_create_body req_body with
+    | None -> Response.badRequest "Invalid JSON: expected {\"name\": string, \"value\": int}"
+    | Some (name, value) ->
+        Channel.send request_ch (Create name value);
+        let created = Channel.recv response_ch in
+        Response.json 201 (Json.encode created)
+
+-- DELETE /items/:id - Delete item
+let handle_delete_item request_ch response_ch req_path =
+    match parse_id_from_path req_path with
+    | None -> Response.badRequest "Invalid item ID"
+    | Some id ->
+        Channel.send request_ch (Delete id);
+        let deleted = Channel.recv response_ch in
+        match deleted with
+        | JsonBool true -> Response.text 204 ""
+        | _ -> Response.notFound
+
+-- ============================================================================
+-- Main Router
+-- ============================================================================
+
+let handle_request request_ch response_ch request =
+    -- Destructure the HttpRequest
+    match request with
+    | HttpRequest { method = req_method, path = req_path, version = _, headers = _, body = req_body } ->
+        let path = Request.pathWithoutQuery req_path in
+
+        -- Route based on method and path
+        (match req_method with
+        | GET ->
+            if path == "/items" then
+                handle_list_items request_ch response_ch
+            else if string_starts_with "/items/" path then
+                handle_get_item request_ch response_ch req_path
+            else if path == "/" then
+                Response.json 200 "{\"status\":\"ok\",\"endpoints\":[\"/items\"]}"
+            else
+                Response.notFound
+
+        | POST ->
+            if path == "/items" then
+                handle_create_item request_ch response_ch req_body
+            else
+                Response.notFound
+
+        | DELETE ->
+            if string_starts_with "/items/" path then
+                handle_delete_item request_ch response_ch req_path
+            else
+                Response.notFound
+
+        | _ ->
+            Response.text 405 "Method Not Allowed")
+
+-- ============================================================================
+-- Main
+-- ============================================================================
+
+let main () =
+    -- Create channels for store communication
+    let request_ch = Channel.new in
+    let response_ch = Channel.new in
+
+    -- Start store actor with some initial data
+    let initial_items = [
+        Item { id = 1, name = "Widget", value = 100 },
+        Item { id = 2, name = "Gadget", value = 200 },
+        Item { id = 3, name = "Gizmo", value = 150 }
+    ] in
+
+    let _ = Fiber.spawn (fun () ->
+        store_loop initial_items 4 request_ch response_ch
+    ) in
+
+    print "REST API Server starting on port 8080...";
+    print "Endpoints:";
+    print "  GET  /items      - List all items";
+    print "  GET  /items/:id  - Get item by ID";
+    print "  POST /items      - Create item (JSON: {name, value})";
+    print "  DELETE /items/:id - Delete item";
+    print "";
+
+    Server.run 8080 (handle_request request_ch response_ch)

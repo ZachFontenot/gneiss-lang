@@ -1,0 +1,12 @@
+-- Pure fiber stress test: 100 fibers
+let rec range_helper start end_ acc =
+    if start >= end_ then reverse acc
+    else range_helper (start + 1) end_ (start :: acc)
+let range start end_ = range_helper start end_ []
+
+let main () =
+    let n = 100 in
+    let indices = range 0 n in
+    let fibers = map (fun i -> Fiber.spawn (fun () -> i * i)) indices in
+    let results = map Fiber.join fibers in
+    print ("Completed " ++ int_to_string (length results) ++ " fibers")

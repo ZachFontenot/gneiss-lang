@@ -1,0 +1,13 @@
+-- Routing Server Example
+-- Demonstrates the Router API for path-based routing
+
+import Http
+import Server
+
+let main () =
+    let router = Router.new ()
+        |> Router.get "/" (fun _ -> Response.html 200 "<h1>Home</h1><p>Welcome to Gneiss!</p>")
+        |> Router.get "/about" (fun _ -> Response.html 200 "<h1>About</h1><p>A Gneiss web server.</p>")
+        |> Router.get "/api/health" (fun _ -> Response.json 200 "{\"status\":\"ok\"}")
+    in
+    Server.serve Server.defaultConfig router

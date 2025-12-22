@@ -1,0 +1,43 @@
+-- JSON API Example
+-- Simple REST-like API returning JSON
+
+import Http
+import Server
+
+-- Sample data
+let users = [
+    ("alice", 30, "alice@example.com"),
+    ("bob", 25, "bob@example.com"),
+    ("charlie", 35, "charlie@example.com")
+]
+
+-- Format a user as JSON
+let format_user (name, age, email) =
+    "{\"name\":\"" ++ name ++ "\",\"age\":" ++ int_to_string age ++ ",\"email\":\"" ++ email ++ "\"}"
+
+-- Format users list as JSON array
+let format_users_json users =
+    let rec format_list us =
+        match us with
+        | [] -> ""
+        | [u] -> format_user u
+        | u :: rest -> format_user u ++ "," ++ format_list rest
+    in
+    "[" ++ format_list users ++ "]"
+
+-- API handlers
+let get_users _ =
+    Response.json 200 (format_users_json users)
+
+let get_status _ =
+    Response.json 200 "{\"status\":\"running\",\"version\":\"1.0\"}"
+
+let main () =
+    let router = Router.new ()
+        |> Router.get "/api/users" get_users
+        |> Router.get "/api/status" get_status
+        |> Router.get "/" (fun _ ->
+            Response.html 200 "<h1>JSON API</h1><p>Try <a href='/api/users'>/api/users</a></p>")
+    in
+    print "Starting JSON API server...";
+    Server.serve Server.defaultConfig router
