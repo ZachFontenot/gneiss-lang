@@ -56,12 +56,13 @@ fn snapshot_type_error_mismatch() {
     let program = Parser::new(tokens).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let err = inferencer.infer_program(&program).unwrap_err();
+    let errors = inferencer.infer_program(&program).unwrap_err();
+    let err = &errors[0];
 
     let source_map = SourceMap::new(source);
     let colors = Colors::new(false); // No colors for deterministic output
 
-    let formatted = format_type_error_for_test(&err, &source_map, Some("test.gn"), &colors);
+    let formatted = format_type_error_for_test(err, &source_map, Some("test.gn"), &colors);
     assert_snapshot(&formatted, "type_error_mismatch");
 }
 
@@ -72,12 +73,13 @@ fn snapshot_type_error_unbound_variable() {
     let program = Parser::new(tokens).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let err = inferencer.infer_program(&program).unwrap_err();
+    let errors = inferencer.infer_program(&program).unwrap_err();
+    let err = &errors[0];
 
     let source_map = SourceMap::new(source);
     let colors = Colors::new(false);
 
-    let formatted = format_type_error_for_test(&err, &source_map, Some("test.gn"), &colors);
+    let formatted = format_type_error_for_test(err, &source_map, Some("test.gn"), &colors);
     assert_snapshot(&formatted, "type_error_unbound");
 }
 
@@ -95,12 +97,13 @@ fn snapshot_type_error_with_suggestion() {
     let program2 = Parser::new(tokens2).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let err = inferencer.infer_program(&program2).unwrap_err();
+    let errors = inferencer.infer_program(&program2).unwrap_err();
+    let err = &errors[0];
 
     let source_map = SourceMap::new(source2);
     let colors = Colors::new(false);
 
-    let formatted = format_type_error_for_test(&err, &source_map, Some("test.gn"), &colors);
+    let formatted = format_type_error_for_test(err, &source_map, Some("test.gn"), &colors);
     assert_snapshot(&formatted, "type_error_suggestion");
 }
 
@@ -203,7 +206,7 @@ fn format_type_error_for_test(
                 }
                 None => {
                     format!(
-                        "I found a type mismatch.\n\n  One part has type:    {}\n  Another part has:     {}\n\n  These types are not compatible.",
+                        "I found a type mismatch.\n\n  Expected:  {}\n  Found:     {}\n\n  These types are not compatible.",
                         expected_str, found_str
                     )
                 }

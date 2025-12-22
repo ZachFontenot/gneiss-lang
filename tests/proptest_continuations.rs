@@ -20,7 +20,7 @@ fn eval(source: &str) -> Result<Value, String> {
     let mut inferencer = Inferencer::new();
     let _env = inferencer
         .infer_program(&program)
-        .map_err(|e| e.to_string())?;
+        .map_err(|errors| errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
 
     let mut interpreter = Interpreter::new();
     interpreter.set_class_env(inferencer.take_class_env());

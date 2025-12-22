@@ -1097,6 +1097,11 @@ impl Interpreter {
         None
     }
 
+    /// Get a reference to the global environment (for REPL use)
+    pub fn global_env(&self) -> &Env {
+        &self.global_env
+    }
+
     /// Run a program
     pub fn run(&mut self, program: &Program) -> Result<Value, EvalError> {
         let mut last_expr_value = Value::Unit;
@@ -4813,7 +4818,9 @@ let main () =
         let mut inferencer = Inferencer::new();
         let _env = inferencer
             .infer_program(&program)
-            .map_err(|e| e.to_string())?;
+            .map_err(|errors| {
+                errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
+            })?;
 
         // Run the program with the class env
         let mut interp = Interpreter::new();

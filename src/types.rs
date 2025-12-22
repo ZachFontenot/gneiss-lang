@@ -597,6 +597,11 @@ impl TypeEnv {
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.bindings.keys()
     }
+
+    /// Get an iterator over all bindings (name, scheme pairs)
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Scheme)> {
+        self.bindings.iter()
+    }
 }
 
 /// Information about a data type constructor

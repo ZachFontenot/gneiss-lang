@@ -256,6 +256,8 @@ pub struct Inferencer {
     used_imports: HashSet<String>,
     /// Track which module aliases have been used
     used_module_aliases: HashSet<String>,
+    /// Accumulated type errors (for multi-error reporting)
+    errors: Vec<TypeError>,
 }
 
 impl Inferencer {
@@ -271,6 +273,7 @@ impl Inferencer {
             module_aliases: HashMap::new(),
             used_imports: HashSet::new(),
             used_module_aliases: HashSet::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -313,6 +316,31 @@ impl Inferencer {
             .filter(|alias| !self.used_module_aliases.contains(*alias))
             .cloned()
             .collect()
+    }
+
+    /// Record a type error for later reporting (error accumulation mode)
+    fn record_error(&mut self, error: TypeError) {
+        self.errors.push(error);
+    }
+
+    /// Check if any errors have been accumulated
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// Take the accumulated errors, leaving an empty vector
+    pub fn take_errors(&mut self) -> Vec<TypeError> {
+        std::mem::take(&mut self.errors)
+    }
+
+    /// Clear accumulated errors (for starting a new module)
+    pub fn clear_errors(&mut self) {
+        self.errors.clear();
+    }
+
+    /// Get a reference to accumulated errors
+    pub fn errors(&self) -> &[TypeError] {
+        &self.errors
     }
 
     /// Look up a name, checking imports and module-qualified names.
@@ -397,6 +425,38 @@ impl Inferencer {
     ) -> Result<(), TypeError> {
         self.unify_inner(t1, t2, Some(span))
             .map_err(|e| e.with_context(context))
+    }
+
+    /// Unify or record error and continue (for error accumulation).
+    /// Returns true if unification succeeded, false if an error was recorded.
+    /// Fatal errors (OccursCheck) are still returned as Err.
+    fn unify_or_record(&mut self, t1: &Type, t2: &Type, span: &Span) -> Result<bool, TypeError> {
+        match self.unify_inner(t1, t2, Some(span)) {
+            Ok(()) => Ok(true),
+            Err(e @ TypeError::OccursCheck { .. }) => Err(e), // Fatal
+            Err(e) => {
+                self.record_error(e);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Unify with context, or record error and continue (for error accumulation).
+    fn unify_or_record_with_context(
+        &mut self,
+        t1: &Type,
+        t2: &Type,
+        span: &Span,
+        context: UnifyContext,
+    ) -> Result<bool, TypeError> {
+        match self.unify_inner(t1, t2, Some(span)) {
+            Ok(()) => Ok(true),
+            Err(e @ TypeError::OccursCheck { .. }) => Err(e.with_context(context)), // Fatal
+            Err(e) => {
+                self.record_error(e.with_context(context));
+                Ok(false)
+            }
+        }
     }
 
     /// Core unification logic with optional span for error reporting
@@ -868,6 +928,20 @@ impl Inferencer {
         }
     }
 
+    /// Extract function name from an application for error context.
+    /// For curried applications like `f a b`, returns ("f", 2) for the innermost arg.
+    /// Returns (Some(name), arg_position) where position counts from 1.
+    fn extract_func_info(expr: &Expr) -> (Option<String>, usize) {
+        fn go(e: &Expr, depth: usize) -> (Option<String>, usize) {
+            match &e.node {
+                ExprKind::Var(name) => (Some(name.clone()), depth),
+                ExprKind::App { func, .. } => go(func, depth + 1),
+                _ => (None, depth),
+            }
+        }
+        go(expr, 1)
+    }
+
     /// Infer the type of an expression (compatibility wrapper).
     /// This is the public API that returns just the type.
     /// Internally uses answer-type tracking for shift/reset.
@@ -1007,6 +1081,9 @@ impl Inferencer {
             // arg.ans_out (γ) = fun.ans_in (γ)
             // arg.ans_in (β) = function's latent ans_out (β)
             ExprKind::App { func, arg } => {
+                // Extract function name for better error messages
+                let (func_name, param_num) = Self::extract_func_info(func);
+
                 // Infer function and argument with full answer-type tracking
                 let fun_result = self.infer_expr_full(env, func)?;
                 let arg_result = self.infer_expr_full(env, arg)?;
@@ -1026,8 +1103,17 @@ impl Inferencer {
                 };
                 self.unify_at(&fun_result.ty, &expected_fun, &func.span)?;
 
-                // Argument must have type σ
-                self.unify_at(&arg_result.ty, &param_ty, &arg.span)?;
+                // Argument must have type σ (with context for better errors)
+                // Note: param_ty first so it becomes "expected", arg_result.ty second as "found"
+                self.unify_with_context(
+                    &param_ty,
+                    &arg_result.ty,
+                    &arg.span,
+                    UnifyContext::FunctionArgument {
+                        func_name,
+                        param_num,
+                    },
+                )?;
 
                 // CRITICAL THREADING:
                 // 1. arg.ans_out = fun.ans_in (= γ)
@@ -2542,8 +2628,13 @@ impl Inferencer {
         Ok(())
     }
 
-    /// Infer types for an entire program
-    pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, TypeError> {
+    /// Infer types for an entire program.
+    /// Returns all accumulated type errors rather than stopping on the first one.
+    /// On success, returns the type environment.
+    /// On failure, returns a non-empty vector of type errors.
+    pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, Vec<TypeError>> {
+        // Clear any previous errors
+        self.errors.clear();
         let mut env = TypeEnv::new();
 
         // Add built-in functions
@@ -3303,7 +3394,7 @@ impl Inferencer {
         env.insert("Set.toList".into(), set_tolist_scheme);
 
         // Parse and inject prelude (Option, Result, id, const, flip)
-        let prelude = parse_prelude().map_err(|e| TypeError::Other(e))?;
+        let prelude = parse_prelude().map_err(|e| vec![TypeError::Other(e)])?;
 
         // Collect all items: prelude first, then user program
         let all_items: Vec<&Item> = prelude
@@ -3324,14 +3415,18 @@ impl Inferencer {
         // Second pass: register all trait declarations
         for item in &all_items {
             if let Item::Decl(decl @ Decl::Trait { .. }) = item {
-                self.register_trait_decl(decl)?;
+                if let Err(e) = self.register_trait_decl(decl) {
+                    self.record_error(e);
+                }
             }
         }
 
         // Third pass: register all instance declarations
         for item in &all_items {
             if let Item::Decl(decl @ Decl::Instance { .. }) = item {
-                self.register_instance_decl(decl)?;
+                if let Err(e) = self.register_instance_decl(decl) {
+                    self.record_error(e);
+                }
             }
         }
 
@@ -3341,100 +3436,115 @@ impl Inferencer {
                 Item::Decl(Decl::Let {
                     name, params, body, ..
                 }) => {
-                    self.level += 1;
+                    // Use closure to allow early return on errors while continuing the loop
+                    let result: Result<Scheme, TypeError> = (|| {
+                        self.level += 1;
 
-                    // Clear wanted predicates for this binding
-                    self.wanted_preds.clear();
+                        // Clear wanted predicates for this binding
+                        self.wanted_preds.clear();
 
-                    let mut local_env = env.clone();
-                    let mut param_types = Vec::new();
+                        let mut local_env = env.clone();
+                        let mut param_types = Vec::new();
 
-                    // Check if there's a val declaration - if so, use its parameter types
-                    let declared_param_types: Option<Vec<Type>> = env.get(name).map(|scheme| {
-                        let ty = self.instantiate(scheme);
-                        // Extract parameter types from the arrow chain
-                        let mut types = Vec::new();
-                        let mut current = ty;
-                        for _ in 0..params.len() {
-                            match current {
-                                Type::Arrow { arg, ret, .. } => {
-                                    types.push((*arg).clone());
-                                    current = (*ret).clone();
+                        // Check if there's a val declaration - if so, use its parameter types
+                        let declared_param_types: Option<Vec<Type>> = env.get(name).map(|scheme| {
+                            let ty = self.instantiate(scheme);
+                            // Extract parameter types from the arrow chain
+                            let mut types = Vec::new();
+                            let mut current = ty;
+                            for _ in 0..params.len() {
+                                match current {
+                                    Type::Arrow { arg, ret, .. } => {
+                                        types.push((*arg).clone());
+                                        current = (*ret).clone();
+                                    }
+                                    _ => break,
                                 }
-                                _ => break,
                             }
-                        }
-                        types
-                    });
+                            types
+                        });
 
-                    for (i, param) in params.iter().enumerate() {
-                        let param_ty = if let Some(ref decl_types) = declared_param_types {
-                            if i < decl_types.len() {
-                                decl_types[i].clone()
+                        for (i, param) in params.iter().enumerate() {
+                            let param_ty = if let Some(ref decl_types) = declared_param_types {
+                                if i < decl_types.len() {
+                                    decl_types[i].clone()
+                                } else {
+                                    self.fresh_var()
+                                }
                             } else {
                                 self.fresh_var()
-                            }
-                        } else {
-                            self.fresh_var()
-                        };
-                        self.bind_pattern(&mut local_env, param, &param_ty)?;
-                        param_types.push(param_ty);
-                    }
-
-                    // For recursive functions, add the function to its own scope with a fresh type
-                    let ret_ty = self.fresh_var();
-                    let preliminary_func_ty = if param_types.is_empty() {
-                        ret_ty.clone()
-                    } else {
-                        Type::arrows(param_types.clone(), ret_ty.clone())
-                    };
-                    local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
-
-                    // Use infer_expr_full to get answer type information
-                    let body_result = self.infer_expr_full(&local_env, body)?;
-
-                    // Unify the body type with what we predicted
-                    self.unify_at(&ret_ty, &body_result.ty, &body.span)?;
-
-                    // Build the function type with proper answer types
-                    let func_ty = if param_types.is_empty() {
-                        body_result.ty
-                    } else {
-                        // Build function type that captures body's answer types
-                        // For multi-param functions: a -> b -> c becomes a/α₁ -> (b/α₂ -> c/α/β)
-                        // The innermost arrow captures the body's actual answer types
-                        let mut result = Type::Arrow {
-                            arg: Rc::new(param_types.pop().unwrap()),
-                            ret: Rc::new(body_result.ty),
-                            ans_in: Rc::new(body_result.answer_before),
-                            ans_out: Rc::new(body_result.answer_after),
-                        };
-                        // Wrap remaining params as pure arrows (returning a closure is pure)
-                        for param_ty in param_types.into_iter().rev() {
-                            let ans = self.fresh_var();
-                            result = Type::Arrow {
-                                arg: Rc::new(param_ty),
-                                ret: Rc::new(result),
-                                ans_in: Rc::new(ans.clone()),
-                                ans_out: Rc::new(ans),
                             };
+                            self.bind_pattern(&mut local_env, param, &param_ty)?;
+                            param_types.push(param_ty);
                         }
-                        result
-                    };
 
-                    self.level -= 1;
+                        // For recursive functions, add the function to its own scope with a fresh type
+                        let ret_ty = self.fresh_var();
+                        let preliminary_func_ty = if param_types.is_empty() {
+                            ret_ty.clone()
+                        } else {
+                            Type::arrows(param_types.clone(), ret_ty.clone())
+                        };
+                        local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
 
-                    // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
-                    // For now, predicates are collected but not checked
+                        // Use infer_expr_full to get answer type information
+                        let body_result = self.infer_expr_full(&local_env, body)?;
 
-                    // Check against declared type signature if one exists (from `val` declaration)
-                    if let Some(declared_scheme) = env.get(name) {
-                        let declared_ty = self.instantiate(declared_scheme);
-                        self.unify_at(&func_ty, &declared_ty, &body.span)?;
+                        // Unify the body type with what we predicted
+                        self.unify_at(&ret_ty, &body_result.ty, &body.span)?;
+
+                        // Build the function type with proper answer types
+                        let func_ty = if param_types.is_empty() {
+                            body_result.ty
+                        } else {
+                            // Build function type that captures body's answer types
+                            // For multi-param functions: a -> b -> c becomes a/α₁ -> (b/α₂ -> c/α/β)
+                            // The innermost arrow captures the body's actual answer types
+                            let mut result = Type::Arrow {
+                                arg: Rc::new(param_types.pop().unwrap()),
+                                ret: Rc::new(body_result.ty),
+                                ans_in: Rc::new(body_result.answer_before),
+                                ans_out: Rc::new(body_result.answer_after),
+                            };
+                            // Wrap remaining params as pure arrows (returning a closure is pure)
+                            for param_ty in param_types.into_iter().rev() {
+                                let ans = self.fresh_var();
+                                result = Type::Arrow {
+                                    arg: Rc::new(param_ty),
+                                    ret: Rc::new(result),
+                                    ans_in: Rc::new(ans.clone()),
+                                    ans_out: Rc::new(ans),
+                                };
+                            }
+                            result
+                        };
+
+                        self.level -= 1;
+
+                        // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
+                        // For now, predicates are collected but not checked
+
+                        // Check against declared type signature if one exists (from `val` declaration)
+                        if let Some(declared_scheme) = env.get(name) {
+                            let declared_ty = self.instantiate(declared_scheme);
+                            self.unify_at(&func_ty, &declared_ty, &body.span)?;
+                        }
+
+                        Ok(self.generalize(&func_ty))
+                    })();
+
+                    match result {
+                        Ok(scheme) => {
+                            env.insert(name.clone(), scheme);
+                        }
+                        Err(e) => {
+                            self.record_error(e);
+                            // Add error recovery type to prevent cascade errors
+                            env.insert(name.clone(), Scheme::mono(self.fresh_var()));
+                            // Ensure level is reset even on error
+                            self.level = self.level.saturating_sub(1);
+                        }
                     }
-
-                    let scheme = self.generalize(&func_ty);
-                    env.insert(name.clone(), scheme);
                 }
                 Item::Decl(Decl::Type { .. } | Decl::TypeAlias { .. } | Decl::Record { .. }) => {
                     // Already handled in first pass (type registration)
@@ -3445,142 +3555,60 @@ impl Inferencer {
                 Item::Decl(Decl::Val { name, type_sig }) => {
                     // Register a type signature for the name
                     // The subsequent let declaration will be checked against this
-                    //
-                    // We need to:
-                    // 1. Collect type variable names from the signature
-                    // 2. Create fresh Unbound type vars at a higher level for each
-                    // 3. Convert the type expression using these vars
-                    // 4. Generalize to create a proper polymorphic scheme
-                    self.level += 1;
+                    let result: Result<Scheme, TypeError> = (|| {
+                        self.level += 1;
 
-                    // Collect type variable names and create fresh vars for each
-                    let mut type_var_names = Vec::new();
-                    Self::collect_type_vars(type_sig, &mut type_var_names);
+                        // Collect type variable names and create fresh vars for each
+                        let mut type_var_names = Vec::new();
+                        Self::collect_type_vars(type_sig, &mut type_var_names);
 
-                    let mut param_map: HashMap<String, TypeVarId> = HashMap::new();
-                    let mut fresh_vars: Vec<Type> = Vec::new();
-                    for name_str in &type_var_names {
-                        let fresh = self.fresh_var();
-                        // Extract the ID from the fresh var
-                        if let Type::Var(var) = &fresh {
-                            if let TypeVar::Unbound { id, .. } = &*var.borrow() {
-                                param_map.insert(name_str.clone(), *id);
+                        let mut param_map: HashMap<String, TypeVarId> = HashMap::new();
+                        let mut fresh_vars: Vec<Type> = Vec::new();
+                        for name_str in &type_var_names {
+                            let fresh = self.fresh_var();
+                            // Extract the ID from the fresh var
+                            if let Type::Var(var) = &fresh {
+                                if let TypeVar::Unbound { id, .. } = &*var.borrow() {
+                                    param_map.insert(name_str.clone(), *id);
+                                }
                             }
+                            fresh_vars.push(fresh);
                         }
-                        fresh_vars.push(fresh);
+
+                        let declared_ty =
+                            self.type_expr_to_type_with_fresh_vars(type_sig, &type_var_names, &fresh_vars)?;
+
+                        self.level -= 1;
+                        Ok(self.generalize(&declared_ty))
+                    })();
+
+                    match result {
+                        Ok(scheme) => {
+                            env.insert(name.clone(), scheme);
+                        }
+                        Err(e) => {
+                            self.record_error(e);
+                            env.insert(name.clone(), Scheme::mono(self.fresh_var()));
+                            self.level = self.level.saturating_sub(1);
+                        }
                     }
-
-                    // Convert using fresh vars, but we need to map names to IDs
-                    // Actually, type_expr_to_type expects a map from name to generic ID
-                    // We need a different approach: use the fresh vars directly
-
-                    let declared_ty =
-                        self.type_expr_to_type_with_fresh_vars(type_sig, &type_var_names, &fresh_vars)?;
-
-                    self.level -= 1;
-                    let scheme = self.generalize(&declared_ty);
-                    env.insert(name.clone(), scheme);
                 }
                 Item::Decl(Decl::OperatorDef { op, params, body, .. }) => {
                     // Operator definitions work like function definitions
-                    self.level += 1;
-                    self.wanted_preds.clear();
+                    let result: Result<Scheme, TypeError> = (|| {
+                        self.level += 1;
+                        self.wanted_preds.clear();
 
-                    let mut local_env = env.clone();
-                    let mut param_types = Vec::new();
-
-                    for param in params {
-                        let param_ty = self.fresh_var();
-                        self.bind_pattern(&mut local_env, param, &param_ty)?;
-                        param_types.push(param_ty);
-                    }
-
-                    let body_result = self.infer_expr_full(&local_env, body)?;
-
-                    let func_ty = if param_types.is_empty() {
-                        body_result.ty
-                    } else {
-                        let mut result = Type::Arrow {
-                            arg: Rc::new(param_types.pop().unwrap()),
-                            ret: Rc::new(body_result.ty),
-                            ans_in: Rc::new(body_result.answer_before),
-                            ans_out: Rc::new(body_result.answer_after),
-                        };
-                        for param_ty in param_types.into_iter().rev() {
-                            let ans = self.fresh_var();
-                            result = Type::Arrow {
-                                arg: Rc::new(param_ty),
-                                ret: Rc::new(result),
-                                ans_in: Rc::new(ans.clone()),
-                                ans_out: Rc::new(ans),
-                            };
-                        }
-                        result
-                    };
-
-                    self.level -= 1;
-                    let scheme = self.generalize(&func_ty);
-                    env.insert(op.clone(), scheme);
-                }
-                Item::Decl(Decl::Fixity(_)) => {
-                    // Fixity declarations are handled during parsing
-                    // No type inference needed
-                }
-                Item::Decl(Decl::LetRec { bindings, .. }) => {
-                    // Mutually recursive function definitions
-                    self.level += 1;
-                    self.wanted_preds.clear();
-
-                    // Step 1: Create preliminary types for all bindings
-                    // For recursive functions, we use fresh vars as preliminary types
-                    // but we'll use val declaration param types when inferring the body
-                    let mut local_env = env.clone();
-                    let mut preliminary_types: Vec<Type> = Vec::new();
-
-                    for binding in bindings {
-                        let preliminary_ty = self.fresh_var();
-                        preliminary_types.push(preliminary_ty.clone());
-                        local_env.insert(binding.name.node.clone(), Scheme::mono(preliminary_ty));
-                    }
-
-                    // Step 2: Infer each binding's body
-                    for (i, binding) in bindings.iter().enumerate() {
-                        let mut body_env = local_env.clone();
+                        let mut local_env = env.clone();
                         let mut param_types = Vec::new();
 
-                        // Check if there's a val declaration - if so, use its parameter types
-                        let declared_param_types: Option<Vec<Type>> =
-                            env.get(&binding.name.node).map(|scheme| {
-                                let ty = self.instantiate(scheme);
-                                let mut types = Vec::new();
-                                let mut current = ty;
-                                for _ in 0..binding.params.len() {
-                                    match current {
-                                        Type::Arrow { arg, ret, .. } => {
-                                            types.push((*arg).clone());
-                                            current = (*ret).clone();
-                                        }
-                                        _ => break,
-                                    }
-                                }
-                                types
-                            });
-
-                        for (j, param) in binding.params.iter().enumerate() {
-                            let param_ty = if let Some(ref decl_types) = declared_param_types {
-                                if j < decl_types.len() {
-                                    decl_types[j].clone()
-                                } else {
-                                    self.fresh_var()
-                                }
-                            } else {
-                                self.fresh_var()
-                            };
-                            self.bind_pattern(&mut body_env, param, &param_ty)?;
+                        for param in params {
+                            let param_ty = self.fresh_var();
+                            self.bind_pattern(&mut local_env, param, &param_ty)?;
                             param_types.push(param_ty);
                         }
 
-                        let body_result = self.infer_expr_full(&body_env, &binding.body)?;
+                        let body_result = self.infer_expr_full(&local_env, body)?;
 
                         let func_ty = if param_types.is_empty() {
                             body_result.ty
@@ -3603,22 +3631,134 @@ impl Inferencer {
                             result
                         };
 
-                        self.unify_with_context(
-                            &preliminary_types[i],
-                            &func_ty,
-                            &binding.name.span,
-                            UnifyContext::RecursiveBinding {
-                                name: binding.name.node.clone(),
-                            },
-                        )?;
+                        self.level -= 1;
+                        Ok(self.generalize(&func_ty))
+                    })();
+
+                    match result {
+                        Ok(scheme) => {
+                            env.insert(op.clone(), scheme);
+                        }
+                        Err(e) => {
+                            self.record_error(e);
+                            env.insert(op.clone(), Scheme::mono(self.fresh_var()));
+                            self.level = self.level.saturating_sub(1);
+                        }
                     }
+                }
+                Item::Decl(Decl::Fixity(_)) => {
+                    // Fixity declarations are handled during parsing
+                    // No type inference needed
+                }
+                Item::Decl(Decl::LetRec { bindings, .. }) => {
+                    // Mutually recursive function definitions
+                    // Wrap entire letrec in error handling
+                    let result: Result<Vec<(String, Scheme)>, TypeError> = (|| {
+                        self.level += 1;
+                        self.wanted_preds.clear();
 
-                    self.level -= 1;
+                        // Step 1: Create preliminary types for all bindings
+                        let mut local_env = env.clone();
+                        let mut preliminary_types: Vec<Type> = Vec::new();
 
-                    // Generalize and add to global env
-                    for (i, binding) in bindings.iter().enumerate() {
-                        let scheme = self.generalize(&preliminary_types[i]);
-                        env.insert(binding.name.node.clone(), scheme);
+                        for binding in bindings {
+                            let preliminary_ty = self.fresh_var();
+                            preliminary_types.push(preliminary_ty.clone());
+                            local_env.insert(binding.name.node.clone(), Scheme::mono(preliminary_ty));
+                        }
+
+                        // Step 2: Infer each binding's body
+                        for (i, binding) in bindings.iter().enumerate() {
+                            let mut body_env = local_env.clone();
+                            let mut param_types = Vec::new();
+
+                            // Check if there's a val declaration - if so, use its parameter types
+                            let declared_param_types: Option<Vec<Type>> =
+                                env.get(&binding.name.node).map(|scheme| {
+                                    let ty = self.instantiate(scheme);
+                                    let mut types = Vec::new();
+                                    let mut current = ty;
+                                    for _ in 0..binding.params.len() {
+                                        match current {
+                                            Type::Arrow { arg, ret, .. } => {
+                                                types.push((*arg).clone());
+                                                current = (*ret).clone();
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                    types
+                                });
+
+                            for (j, param) in binding.params.iter().enumerate() {
+                                let param_ty = if let Some(ref decl_types) = declared_param_types {
+                                    if j < decl_types.len() {
+                                        decl_types[j].clone()
+                                    } else {
+                                        self.fresh_var()
+                                    }
+                                } else {
+                                    self.fresh_var()
+                                };
+                                self.bind_pattern(&mut body_env, param, &param_ty)?;
+                                param_types.push(param_ty);
+                            }
+
+                            let body_result = self.infer_expr_full(&body_env, &binding.body)?;
+
+                            let func_ty = if param_types.is_empty() {
+                                body_result.ty
+                            } else {
+                                let mut result = Type::Arrow {
+                                    arg: Rc::new(param_types.pop().unwrap()),
+                                    ret: Rc::new(body_result.ty),
+                                    ans_in: Rc::new(body_result.answer_before),
+                                    ans_out: Rc::new(body_result.answer_after),
+                                };
+                                for param_ty in param_types.into_iter().rev() {
+                                    let ans = self.fresh_var();
+                                    result = Type::Arrow {
+                                        arg: Rc::new(param_ty),
+                                        ret: Rc::new(result),
+                                        ans_in: Rc::new(ans.clone()),
+                                        ans_out: Rc::new(ans),
+                                    };
+                                }
+                                result
+                            };
+
+                            self.unify_with_context(
+                                &preliminary_types[i],
+                                &func_ty,
+                                &binding.name.span,
+                                UnifyContext::RecursiveBinding {
+                                    name: binding.name.node.clone(),
+                                },
+                            )?;
+                        }
+
+                        self.level -= 1;
+
+                        // Generalize and return schemes
+                        Ok(bindings.iter().enumerate().map(|(i, binding)| {
+                            (binding.name.node.clone(), self.generalize(&preliminary_types[i]))
+                        }).collect())
+                    })();
+
+                    match result {
+                        Ok(schemes) => {
+                            for (name, scheme) in schemes {
+                                env.insert(name, scheme);
+                            }
+                        }
+                        Err(e) => {
+                            self.record_error(e);
+                            // Add error recovery types for all bindings
+                            for binding in bindings {
+                                env.insert(binding.name.node.clone(), Scheme::mono(self.fresh_var()));
+                            }
+                            self.level = self.level.saturating_sub(1);
+                        }
                     }
                 }
                 Item::Import(import_spec) => {
@@ -3642,12 +3782,19 @@ impl Inferencer {
                 }
                 Item::Expr(expr) => {
                     // Type-check top-level expressions
-                    self.infer_expr(&env, expr)?;
+                    if let Err(e) = self.infer_expr(&env, expr) {
+                        self.record_error(e);
+                    }
                 }
             }
         }
 
-        Ok(env)
+        // Return errors if any were accumulated
+        if self.has_errors() {
+            Err(self.take_errors())
+        } else {
+            Ok(env)
+        }
     }
 
     /// Get the wanted predicates (for testing)
@@ -3725,7 +3872,7 @@ mod tests {
         assert!(matches!(ty, Type::Int));
     }
 
-    fn typecheck_program(input: &str) -> Result<TypeEnv, TypeError> {
+    fn typecheck_program(input: &str) -> Result<TypeEnv, Vec<TypeError>> {
         let tokens = Lexer::new(input).tokenize().unwrap();
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
@@ -3881,7 +4028,7 @@ let result = apply id 42
     // Phase 4 Typeclass Tests
     // ========================================================================
 
-    fn typecheck_program_with_inferencer(input: &str) -> (Result<TypeEnv, TypeError>, Inferencer) {
+    fn typecheck_program_with_inferencer(input: &str) -> (Result<TypeEnv, Vec<TypeError>>, Inferencer) {
         let tokens = Lexer::new(input).tokenize().unwrap();
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
@@ -3958,10 +4105,13 @@ end
 "#;
         let (result, _) = typecheck_program_with_inferencer(source);
         assert!(result.is_err());
-        if let Err(TypeError::UnknownTrait { name, .. }) = result {
-            assert_eq!(name, "Show");
-        } else {
-            panic!("Expected UnknownTrait error");
+        if let Err(errors) = result {
+            assert!(!errors.is_empty());
+            if let TypeError::UnknownTrait { name, .. } = &errors[0] {
+                assert_eq!(name, "Show");
+            } else {
+                panic!("Expected UnknownTrait error, got {:?}", errors[0]);
+            }
         }
     }
 
@@ -3981,7 +4131,10 @@ end
 "#;
         let (result, _) = typecheck_program_with_inferencer(source);
         assert!(result.is_err());
-        assert!(matches!(result, Err(TypeError::OverlappingInstance { .. })));
+        if let Err(errors) = result {
+            assert!(!errors.is_empty());
+            assert!(matches!(errors[0], TypeError::OverlappingInstance { .. }));
+        }
     }
 
     #[test]
@@ -4116,5 +4269,77 @@ end
         // Clear should reset everything
         inferencer.clear_imports();
         assert!(inferencer.get_unused_imports().is_empty()); // No imports anymore
+    }
+
+    // ========================================================================
+    // Error Accumulation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_multiple_type_errors_accumulated() {
+        // Program with multiple independent type errors
+        // Each binding has an expression that doesn't match the declared type
+        let source = r#"
+val x : Int
+let x = "hello"
+val y : Int
+let y = true
+val z : String
+let z = 42
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_err());
+        if let Err(errors) = result {
+            // Should have 3 errors, one for each mismatched binding
+            assert_eq!(errors.len(), 3, "Expected 3 errors, got {}: {:?}", errors.len(), errors);
+        }
+    }
+
+    #[test]
+    fn test_error_accumulation_continues_after_unbound_variable() {
+        // Two different unbound variables - should get errors for both
+        let source = r#"
+let x = unknownVar1
+let y = unknownVar2
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_err());
+        if let Err(errors) = result {
+            // Should have 2 errors for the two unbound variables
+            assert_eq!(errors.len(), 2, "Expected 2 errors, got {}: {:?}", errors.len(), errors);
+            for err in &errors {
+                assert!(matches!(err, TypeError::UnboundVariable { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn test_error_recovery_prevents_cascades() {
+        // After an error, subsequent bindings that use the errored name
+        // should not cause cascade errors (we insert a fresh type)
+        let source = r#"
+let x = unknownVar
+let y = x + 1
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_err());
+        if let Err(errors) = result {
+            // Should only have 1 error for unknownVar
+            // The use of x in y should not cause another error
+            // because we add a recovery type for x
+            assert_eq!(errors.len(), 1, "Expected 1 error (not cascade), got {}: {:?}", errors.len(), errors);
+        }
+    }
+
+    #[test]
+    fn test_single_error_still_works() {
+        // Verify single errors still work as expected
+        let source = "let x = 1 + \"hello\"";
+        let result = typecheck_program(source);
+        assert!(result.is_err());
+        if let Err(errors) = result {
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(errors[0], TypeError::TypeMismatch { .. }));
+        }
     }
 }

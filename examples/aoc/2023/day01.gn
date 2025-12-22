@@ -10,22 +10,24 @@ let char_is_digit c =
 let digit_to_int c = char_to_int c - 48
 
 -- Get first char of list (for Part A)
-let first_char xs = match xs with | x :: _ -> x | [] -> '0'
+let first_char xs = match xs with | x :: _ -> x | [] -> '0' end
 
 -- Get last char of list (for Part A)
 let rec last_char xs = match xs with
     | [x] -> x
     | _ :: rest -> last_char rest
     | [] -> '0'
+    end
 
 -- Get first int of list (for Part B)
-let first_int xs = match xs with | x :: _ -> x | [] -> 0
+let first_int xs = match xs with | x :: _ -> x | [] -> 0 end
 
 -- Get last int of list (for Part B)
 let rec last_int xs = match xs with
     | [x] -> x
     | _ :: rest -> last_int rest
     | [] -> 0
+    end
 
 -- Filter string to digits only
 let filter_digits s =
@@ -37,6 +39,7 @@ let get_calibration_value s =
     match digits with
     | [] -> 0
     | _ -> digit_to_int (first_char digits) * 10 + digit_to_int (last_char digits)
+    end
 
 -- Part A: sum calibration values
 let part_a lines = foldl (fun acc x -> acc + x) 0 (map get_calibration_value lines)
@@ -52,6 +55,8 @@ let rec list_starts_with prefix xs =
         match xs with
         | [] -> false
         | x :: rest -> if p == x then list_starts_with ps rest else false
+        end
+    end
 
 -- Try to match a word-digit at start of char list, return Some digit or None
 -- Check first char to short-circuit most non-matches
@@ -78,7 +83,8 @@ let match_word_digit_chars xs =
         else if c == 'n' then
             if list_starts_with ['n', 'i', 'n', 'e'] xs then Some 9 else None
         else None
-
+    end
+    
 -- Extract all digits from char list (skip by 1 to handle overlaps)
 let rec extract_digits_chars xs =
     match xs with
@@ -90,6 +96,8 @@ let rec extract_digits_chars xs =
             match match_word_digit_chars xs with
             | Some digit -> digit :: extract_digits_chars rest
             | None -> extract_digits_chars rest
+            end
+    end
 
 -- Get calibration value for Part B
 let get_calibration_value_b s =
@@ -97,6 +105,7 @@ let get_calibration_value_b s =
     match digits with
     | [] -> 0
     | _ -> first_int digits * 10 + last_int digits
+    end
 
 -- Part B: sum calibration values with word-digits
 let part_b lines = foldl (fun acc x -> acc + x) 0 (map get_calibration_value_b lines)
@@ -121,4 +130,6 @@ let main () =
             print "Part B:";
             print b
         | Err e -> print "Failed to read file"
+        end
     | Err e -> print "Failed to open file"
+    end

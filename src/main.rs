@@ -10,7 +10,7 @@ use gneiss::ast::{ImportSpec, Item};
 use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
-use gneiss::module::ModuleResolver;
+use gneiss::module::{ModuleError, ModuleResolver};
 use gneiss::parser::ParseError;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser, SourceMap, TypeEnv};
 
@@ -48,7 +48,7 @@ fn run_file(path: &str) {
     let entry_id = match resolver.load_module(entry_path) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("Module error: {}", e);
+            format_module_error(&e, &colors);
             return;
         }
     };
@@ -83,11 +83,14 @@ fn run_file(path: &str) {
         // Type check this module
         let type_env = match inferencer.infer_program(&module.program) {
             Ok(env) => env,
-            Err(e) => {
-                eprint!(
-                    "{}",
-                    format_type_error(&e, &source_map, Some(&module_path_str), &colors)
-                );
+            Err(errors) => {
+                // Print all accumulated type errors
+                for e in &errors {
+                    eprint!(
+                        "{}",
+                        format_type_error(e, &source_map, Some(&module_path_str), &colors)
+                    );
+                }
                 return;
             }
         };
@@ -329,25 +332,77 @@ fn repl() {
         // Try as declaration
         let mut parser = Parser::new(tokens.clone());
         if let Ok(program) = parser.parse_program() {
-            if !program.items.is_empty() {
+            // Check if the program has any declarations (not just expressions)
+            let has_declarations = program.items.iter().any(|item| {
+                matches!(item, gneiss::ast::Item::Decl(_) | gneiss::ast::Item::Import(_))
+            });
+
+            // If only expressions, fall through to expression handling
+            // This allows expressions to use REPL's accumulated type_env
+            if has_declarations && !program.items.is_empty() {
+                // Collect names of declarations for type display
+                let decl_names: Vec<String> = program
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        if let gneiss::ast::Item::Decl(decl) = item {
+                            match decl {
+                                gneiss::ast::Decl::Let { name, .. } => Some(name.clone()),
+                                gneiss::ast::Decl::LetRec { bindings, .. } => {
+                                    // Return first binding name (could show all)
+                                    bindings.first().map(|b| b.name.node.clone())
+                                }
+                                gneiss::ast::Decl::OperatorDef { op, .. } => Some(op.clone()),
+                                _ => None, // Type decls don't need value display
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
                 // Type check and add to environment
                 match inferencer.infer_program(&program) {
                     Ok(new_env) => {
-                        for (name, scheme) in new_env.bindings() {
-                            type_env.insert(name.clone(), scheme.clone());
-                            println!("{} : {}", name, scheme);
+                        // Print types for new declarations
+                        for name in &decl_names {
+                            if let Some(scheme) = new_env.get(name) {
+                                type_env.insert(name.clone(), scheme.clone());
+                                println!("{} : {}", name, scheme);
+                            }
                         }
                     }
-                    Err(e) => {
+                    Err(errors) => {
                         let source_map = SourceMap::new(line);
-                        eprint!("{}", format_type_error(&e, &source_map, None, &colors));
+                        for e in &errors {
+                            eprint!("{}", format_type_error(e, &source_map, None, &colors));
+                        }
                         continue;
                     }
                 }
 
+                // Get the type of the last expression item (if any)
+                let last_expr_type = program.items.iter().rev().find_map(|item| {
+                    if let gneiss::ast::Item::Expr(expr) = item {
+                        inferencer.infer_expr(&type_env, expr).ok()
+                    } else {
+                        None
+                    }
+                });
+
                 // Evaluate
                 match interpreter.run(&program) {
-                    Ok(_) => {}
+                    Ok(val) => {
+                        // Show result if not Unit
+                        if !matches!(val, gneiss::Value::Unit) {
+                            print_value(&val);
+                            if let Some(ty) = last_expr_type {
+                                println!(" : {}", ty);
+                            } else {
+                                println!();
+                            }
+                        }
+                    }
                     Err(e) => eprintln!("Runtime error: {}", e),
                 }
                 continue;
@@ -361,8 +416,8 @@ fn repl() {
                 // Type check
                 match inferencer.infer_expr(&type_env, &expr) {
                     Ok(ty) => {
-                        // Evaluate
-                        let env = gneiss::eval::EnvInner::new();
+                        // Evaluate using the interpreter's global environment
+                        let env = interpreter.global_env().clone();
                         match interpreter.eval_expr(&env, &expr) {
                             Ok(val) => {
                                 print_value(&val);
@@ -489,18 +544,6 @@ fn print_value(val: &gneiss::Value) {
     }
 }
 
-// Helper trait to access TypeEnv internals for REPL
-trait TypeEnvExt {
-    fn bindings(&self) -> impl Iterator<Item = (&String, &gneiss::types::Scheme)>;
-}
-
-impl TypeEnvExt for TypeEnv {
-    fn bindings(&self) -> impl Iterator<Item = (&String, &gneiss::types::Scheme)> {
-        // This is a bit of a hack - in a real implementation we'd expose this properly
-        std::iter::empty()
-    }
-}
-
 // ============================================================================
 // Elm-style Error Formatting
 // ============================================================================
@@ -553,10 +596,11 @@ fn format_type_error(
                 }
                 None => {
                     // Generic message when no context available
+                    // Still use Expected/Found wording for clarity
                     format!(
                         "I found a type mismatch.\n\n\
-                         One part has type:    {}{}{}\n\
-                         Another part has:     {}{}{}\n\n\
+                         Expected:  {}{}{}\n\
+                         Found:     {}{}{}\n\n\
                          These types are not compatible.",
                         colors.cyan(),
                         expected_str,
@@ -794,6 +838,26 @@ fn format_parse_error(
 
     out.push('\n');
     out
+}
+
+/// Format and print a module error with proper source context
+fn format_module_error(err: &ModuleError, colors: &Colors) {
+    match err {
+        ModuleError::LexError { path, error, source } => {
+            let source_map = SourceMap::new(source);
+            let path_str = path.display().to_string();
+            eprint!("{}", format_lex_error(error, &source_map, Some(&path_str), colors));
+        }
+        ModuleError::ParseError { path, error, source } => {
+            let source_map = SourceMap::new(source);
+            let path_str = path.display().to_string();
+            eprint!("{}", format_parse_error(error, &source_map, Some(&path_str), colors));
+        }
+        // For other errors, fall back to Display
+        _ => {
+            eprintln!("Module error: {}", err);
+        }
+    }
 }
 
 fn format_lex_error(

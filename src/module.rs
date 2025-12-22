@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{ImportSpec, Item, Program, Visibility};
+use crate::lexer::LexError;
+use crate::parser::ParseError;
 
 /// Unique identifier for a module
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,7 +96,7 @@ impl ModuleGraph {
 }
 
 /// Error during module resolution
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ModuleError {
     /// Module file not found
     NotFound { module_path: String, search_paths: Vec<PathBuf> },
@@ -102,8 +104,10 @@ pub enum ModuleError {
     CircularDependency { cycle: Vec<String> },
     /// IO error reading file
     IoError { path: PathBuf, message: String },
-    /// Parse error in module
-    ParseError { path: PathBuf, message: String },
+    /// Lex error in module (preserves error and source for formatting)
+    LexError { path: PathBuf, error: LexError, source: String },
+    /// Parse error in module (preserves error and source for formatting)
+    ParseError { path: PathBuf, error: ParseError, source: String },
 }
 
 impl std::fmt::Display for ModuleError {
@@ -118,8 +122,11 @@ impl std::fmt::Display for ModuleError {
             ModuleError::IoError { path, message } => {
                 write!(f, "error reading {}: {}", path.display(), message)
             }
-            ModuleError::ParseError { path, message } => {
-                write!(f, "parse error in {}: {}", path.display(), message)
+            ModuleError::LexError { path, error, .. } => {
+                write!(f, "lex error in {}: {}", path.display(), error)
+            }
+            ModuleError::ParseError { path, error, .. } => {
+                write!(f, "parse error in {}: {}", path.display(), error)
             }
         }
     }
@@ -213,16 +220,18 @@ impl ModuleResolver {
 
             let tokens = crate::lexer::Lexer::new(&source)
                 .tokenize()
-                .map_err(|e| ModuleError::ParseError {
+                .map_err(|e| ModuleError::LexError {
                     path: path.clone(),
-                    message: e.to_string(),
+                    error: e,
+                    source: source.clone(),
                 })?;
 
             let program = crate::parser::Parser::new(tokens)
                 .parse_program()
                 .map_err(|e| ModuleError::ParseError {
                     path: path.clone(),
-                    message: e.to_string(),
+                    error: e,
+                    source: source.clone(),
                 })?;
 
             // Extract imports and exports
