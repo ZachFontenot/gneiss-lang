@@ -6,7 +6,7 @@ use crate::ast::{Spanned, TypeExpr, TypeExprKind};
 use crate::lexer::Token;
 
 use super::cursor::TokenCursor;
-use super::error::ParseResult;
+use super::error::{ParseError, ParseResult};
 
 /// Extension trait for type expression parsing
 pub trait TypeParser {
@@ -14,7 +14,11 @@ pub trait TypeParser {
     fn parse_type_expr(&mut self) -> ParseResult<TypeExpr>;
 
     /// Parse a type arrow (right-associative): A -> B -> C
+    /// With optional answer types: A/α -> B/β
     fn parse_type_arrow(&mut self) -> ParseResult<TypeExpr>;
+
+    /// Helper for right-associative arrow parsing with answer types
+    fn parse_type_arrow_continuation(&mut self, left: TypeExpr, left_ans: Option<Rc<TypeExpr>>) -> ParseResult<TypeExpr>;
 
     /// Parse type application: List Int, Map String Int
     fn parse_type_app(&mut self) -> ParseResult<TypeExpr>;
@@ -30,21 +34,99 @@ impl TypeParser for TokenCursor {
 
     fn parse_type_arrow(&mut self) -> ParseResult<TypeExpr> {
         let start = self.current_span();
-        let mut ty = self.parse_type_app()?;
+        let ty = self.parse_type_app()?;
+
+        // Check for optional answer type annotation: from/ans_in -> to/ans_out
+        let ans_in = if self.match_token(&Token::Slash) {
+            Some(Rc::new(self.parse_type_app()?))
+        } else {
+            None
+        };
 
         if self.match_token(&Token::Arrow) {
-            let to = self.parse_type_arrow()?;
-            let span = start.merge(&to.span);
-            ty = Spanned::new(
+            let to_type = self.parse_type_app()?;
+
+            // Check for answer-out annotation
+            let ans_out = if self.match_token(&Token::Slash) {
+                Some(Rc::new(self.parse_type_app()?))
+            } else {
+                None
+            };
+
+            // Handle right-associativity: if to is followed by ->, continue parsing
+            // For chained arrows, the ans_out applies to the inner arrow, not the outer
+            let (inner_to, outer_ans_out) = if self.peek() == &Token::Arrow {
+                // Build the nested arrow chain, ans_out becomes ans_in of inner
+                let inner = self.parse_type_arrow_continuation(to_type, ans_out)?;
+                // For chained arrows, outer arrow has no explicit ans_out
+                (inner, None)
+            } else {
+                // Simple case: to_type is the actual target type
+                (to_type, ans_out)
+            };
+
+            // Always wrap with ty as the from type
+            let span = start.merge(&inner_to.span);
+            return Ok(Spanned::new(
                 TypeExprKind::Arrow {
                     from: Rc::new(ty),
-                    to: Rc::new(to),
+                    to: Rc::new(inner_to),
+                    ans_in,
+                    ans_out: outer_ans_out,
                 },
                 span,
-            );
+            ));
+        }
+
+        // No arrow, but we might have parsed ans_in incorrectly as a type app
+        // If we saw a slash, that's a parse error in non-arrow context
+        if ans_in.is_some() {
+            return Err(ParseError::unexpected(
+                "'->' after answer type annotation",
+                self.peek().clone(),
+                start,
+            ));
         }
 
         Ok(ty)
+    }
+
+    /// Helper for right-associative arrow parsing with answer types
+    fn parse_type_arrow_continuation(&mut self, left: TypeExpr, left_ans: Option<Rc<TypeExpr>>) -> ParseResult<TypeExpr> {
+        let start = left.span.clone();
+
+        if self.match_token(&Token::Arrow) {
+            let right = self.parse_type_app()?;
+            let ans_out = if self.match_token(&Token::Slash) {
+                Some(Rc::new(self.parse_type_app()?))
+            } else {
+                None
+            };
+
+            // Continue for right-associativity
+            let to = if self.peek() == &Token::Arrow {
+                self.parse_type_arrow_continuation(right, ans_out)?
+            } else {
+                Spanned::new(
+                    TypeExprKind::Arrow {
+                        from: Rc::new(left),
+                        to: Rc::new(right),
+                        ans_in: left_ans,
+                        ans_out,
+                    },
+                    start.merge(&self.current_span()),
+                )
+            };
+
+            Ok(to)
+        } else {
+            // This shouldn't happen if called correctly
+            Err(ParseError::unexpected(
+                "'->'",
+                self.peek().clone(),
+                start,
+            ))
+        }
     }
 
     fn parse_type_app(&mut self) -> ParseResult<TypeExpr> {
@@ -161,11 +243,32 @@ mod tests {
     #[test]
     fn test_arrow_type_right_assoc() {
         let ty = parse_type("Int -> String -> Bool");
-        if let TypeExprKind::Arrow { from, to } = &ty.node {
+        if let TypeExprKind::Arrow { from, to, ans_in, ans_out } = &ty.node {
             assert!(matches!(from.node, TypeExprKind::Named(ref s) if s == "Int"));
             assert!(matches!(to.node, TypeExprKind::Arrow { .. }));
+            assert!(ans_in.is_none());
+            assert!(ans_out.is_none());
         } else {
             panic!("expected arrow type");
+        }
+    }
+
+    #[test]
+    fn test_arrow_type_with_answer_types() {
+        let ty = parse_type("Int/a -> String/b");
+        if let TypeExprKind::Arrow { from, to, ans_in, ans_out } = &ty.node {
+            assert!(matches!(from.node, TypeExprKind::Named(ref s) if s == "Int"));
+            assert!(matches!(to.node, TypeExprKind::Named(ref s) if s == "String"));
+            assert!(ans_in.is_some());
+            assert!(ans_out.is_some());
+            if let Some(ai) = ans_in {
+                assert!(matches!(ai.node, TypeExprKind::Var(ref s) if s == "a"));
+            }
+            if let Some(ao) = ans_out {
+                assert!(matches!(ao.node, TypeExprKind::Var(ref s) if s == "b"));
+            }
+        } else {
+            panic!("expected arrow type with answer types");
         }
     }
 

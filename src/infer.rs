@@ -1208,11 +1208,21 @@ impl Inferencer {
 
                 // Step 1: Create preliminary types for all bindings
                 // This allows mutual references
+                // If there's a pre-existing val declaration, use that type to help break
+                // infinite type cycles in answer types
                 let mut rec_env = env.clone();
                 let mut preliminary_types: Vec<Type> = Vec::new();
 
                 for binding in bindings {
-                    let preliminary_ty = self.fresh_var();
+                    // Check if there's an existing type signature from a val declaration
+                    let preliminary_ty = if let Some(scheme) = env.get(&binding.name.node) {
+                        // Use the declared type as the preliminary type
+                        // This helps break infinite type cycles for recursive functions
+                        self.instantiate(scheme)
+                    } else {
+                        // No declaration, use fresh variable
+                        self.fresh_var()
+                    };
                     preliminary_types.push(preliminary_ty.clone());
                     rec_env.insert(binding.name.node.clone(), Scheme::mono(preliminary_ty));
                 }
@@ -2190,9 +2200,15 @@ impl Inferencer {
                     Self::collect_type_vars(arg, vars);
                 }
             }
-            TypeExprKind::Arrow { from, to } => {
+            TypeExprKind::Arrow { from, to, ans_in, ans_out } => {
                 Self::collect_type_vars(from, vars);
                 Self::collect_type_vars(to, vars);
+                if let Some(ai) = ans_in {
+                    Self::collect_type_vars(ai, vars);
+                }
+                if let Some(ao) = ans_out {
+                    Self::collect_type_vars(ao, vars);
+                }
             }
             TypeExprKind::Tuple(types) => {
                 for t in types {
@@ -2277,10 +2293,30 @@ impl Inferencer {
                     }),
                 }
             }
-            TypeExprKind::Arrow { from, to } => {
+            TypeExprKind::Arrow { from, to, ans_in, ans_out } => {
                 let from_ty = self.type_expr_to_type_with_fresh_vars(from, var_names, fresh_vars)?;
                 let to_ty = self.type_expr_to_type_with_fresh_vars(to, var_names, fresh_vars)?;
-                Ok(Type::arrow(from_ty, to_ty))
+                match (ans_in, ans_out) {
+                    (Some(ai), Some(ao)) => {
+                        let ans_in_ty = self.type_expr_to_type_with_fresh_vars(ai, var_names, fresh_vars)?;
+                        let ans_out_ty = self.type_expr_to_type_with_fresh_vars(ao, var_names, fresh_vars)?;
+                        Ok(Type::effectful_arrow(from_ty, to_ty, ans_in_ty, ans_out_ty))
+                    }
+                    (Some(ai), None) => {
+                        // Only ans_in specified - use same for both (pure with explicit annotation)
+                        let ans_ty = self.type_expr_to_type_with_fresh_vars(ai, var_names, fresh_vars)?;
+                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
+                    }
+                    (None, Some(ao)) => {
+                        // Only ans_out specified - use same for both (pure with explicit annotation)
+                        let ans_ty = self.type_expr_to_type_with_fresh_vars(ao, var_names, fresh_vars)?;
+                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
+                    }
+                    (None, None) => {
+                        // No explicit answer types - use default (pure)
+                        Ok(Type::arrow(from_ty, to_ty))
+                    }
+                }
             }
             TypeExprKind::Tuple(types) => {
                 let tys: Result<Vec<_>, _> = types
@@ -2373,10 +2409,27 @@ impl Inferencer {
                     }),
                 }
             }
-            TypeExprKind::Arrow { from, to } => {
+            TypeExprKind::Arrow { from, to, ans_in, ans_out } => {
                 let from_ty = self.type_expr_to_type(from, param_map)?;
                 let to_ty = self.type_expr_to_type(to, param_map)?;
-                Ok(Type::arrow(from_ty, to_ty))
+                match (ans_in, ans_out) {
+                    (Some(ai), Some(ao)) => {
+                        let ans_in_ty = self.type_expr_to_type(ai, param_map)?;
+                        let ans_out_ty = self.type_expr_to_type(ao, param_map)?;
+                        Ok(Type::effectful_arrow(from_ty, to_ty, ans_in_ty, ans_out_ty))
+                    }
+                    (Some(ai), None) => {
+                        let ans_ty = self.type_expr_to_type(ai, param_map)?;
+                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
+                    }
+                    (None, Some(ao)) => {
+                        let ans_ty = self.type_expr_to_type(ao, param_map)?;
+                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
+                    }
+                    (None, None) => {
+                        Ok(Type::arrow(from_ty, to_ty))
+                    }
+                }
             }
             TypeExprKind::Tuple(types) => {
                 let tys: Result<Vec<_>, _> = types
@@ -3642,11 +3695,21 @@ impl Inferencer {
                         self.wanted_preds.clear();
 
                         // Step 1: Create preliminary types for all bindings
+                        // If there's a pre-existing val declaration, use that type to help break
+                        // infinite type cycles in answer types
                         let mut local_env = env.clone();
                         let mut preliminary_types: Vec<Type> = Vec::new();
 
                         for binding in bindings {
-                            let preliminary_ty = self.fresh_var();
+                            // Check if there's an existing type signature from a val declaration
+                            let preliminary_ty = if let Some(scheme) = env.get(&binding.name.node) {
+                                // Use the declared type as the preliminary type
+                                // This helps break infinite type cycles for recursive functions
+                                self.instantiate(scheme)
+                            } else {
+                                // No declaration, use fresh variable
+                                self.fresh_var()
+                            };
                             preliminary_types.push(preliminary_ty.clone());
                             local_env.insert(binding.name.node.clone(), Scheme::mono(preliminary_ty));
                         }

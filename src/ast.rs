@@ -507,9 +507,14 @@ pub enum TypeExprKind {
     },
 
     // Function type: a -> b
+    // With optional answer types: a/α -> b/β
     Arrow {
         from: Rc<TypeExpr>,
         to: Rc<TypeExpr>,
+        /// Optional answer type before (for `from/ans_in -> to/ans_out`)
+        ans_in: Option<Rc<TypeExpr>>,
+        /// Optional answer type after
+        ans_out: Option<Rc<TypeExpr>>,
     },
 
     // Tuple type: (a, b, c)

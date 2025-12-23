@@ -1,0 +1,30 @@
+-- Minimal test case for (<|>) type inference
+
+type ParseResult a =
+    | Parsed a (List Char)
+    | ParseFail String
+
+-- Run a parser on input
+let run_parser parser input =
+    let k = reset (
+        let result = parser () in
+        fun remaining -> Parsed result remaining
+    ) in
+    k input
+
+-- Alternative: try first, if fails try second
+-- This is the pattern that was expected to cause infinite type error
+let (<|>) p1 p2 =
+    fun () ->
+      shift (fun k ->
+        fun input ->
+            match run_parser p1 input with
+            | Parsed v rest -> k v rest
+            | ParseFail _ -> run_parser p2 input
+            end
+    )
+
+-- Does renaming to mymap work?
+let mymap f p =
+    let x = p () in
+    f x

@@ -973,21 +973,99 @@ impl Parser {
 
     fn parse_type_arrow(&mut self) -> ParseResult<TypeExpr> {
         let start = self.current_span();
-        let mut ty = self.parse_type_app()?;
+        let ty = self.parse_type_app()?;
+
+        // Check for optional answer type annotation: from/ans_in -> to/ans_out
+        let ans_in = if self.match_token(&Token::Slash) {
+            Some(Rc::new(self.parse_type_app()?))
+        } else {
+            None
+        };
 
         if self.match_token(&Token::Arrow) {
-            let to = self.parse_type_arrow()?;
-            let span = start.merge(&to.span);
-            ty = Spanned::new(
+            let to_type = self.parse_type_app()?;
+
+            // Check for answer-out annotation
+            let ans_out = if self.match_token(&Token::Slash) {
+                Some(Rc::new(self.parse_type_app()?))
+            } else {
+                None
+            };
+
+            // Handle right-associativity: if there's another arrow, continue
+            let (inner_to, outer_ans_out) = if self.peek() == &Token::Arrow {
+                // Build the nested arrow chain
+                let inner = self.parse_type_arrow_continuation(to_type, ans_out)?;
+                // For chained arrows, outer arrow has no explicit ans_out
+                (inner, None)
+            } else {
+                // Simple case: to_type is the actual target type
+                (to_type, ans_out)
+            };
+
+            let span = start.merge(&inner_to.span);
+            Ok(Spanned::new(
                 TypeExprKind::Arrow {
                     from: Rc::new(ty),
-                    to: Rc::new(to),
+                    to: Rc::new(inner_to),
+                    ans_in,
+                    ans_out: outer_ans_out,
                 },
                 span,
-            );
+            ))
+        } else {
+            // No arrow, but we might have parsed ans_in incorrectly as a type app
+            if ans_in.is_some() {
+                return Err(ParseError::unexpected(
+                    "'->' after answer type annotation",
+                    self.peek().clone(),
+                    start,
+                ));
+            }
+            Ok(ty)
         }
+    }
 
-        Ok(ty)
+    /// Helper for right-associative arrow parsing with answer types
+    fn parse_type_arrow_continuation(
+        &mut self,
+        left: TypeExpr,
+        left_ans: Option<Rc<TypeExpr>>,
+    ) -> ParseResult<TypeExpr> {
+        let start = left.span.clone();
+
+        if self.match_token(&Token::Arrow) {
+            let right = self.parse_type_app()?;
+            let ans_out = if self.match_token(&Token::Slash) {
+                Some(Rc::new(self.parse_type_app()?))
+            } else {
+                None
+            };
+
+            // Continue for right-associativity
+            let inner = if self.peek() == &Token::Arrow {
+                self.parse_type_arrow_continuation(right, ans_out)?
+            } else {
+                Spanned::new(
+                    TypeExprKind::Arrow {
+                        from: Rc::new(left),
+                        to: Rc::new(right),
+                        ans_in: left_ans,
+                        ans_out,
+                    },
+                    start.merge(&self.current_span()),
+                )
+            };
+
+            Ok(inner)
+        } else {
+            // This shouldn't happen if called correctly
+            Err(ParseError::unexpected(
+                "'->'",
+                self.peek().clone(),
+                start,
+            ))
+        }
     }
 
     fn parse_type_app(&mut self) -> ParseResult<TypeExpr> {
