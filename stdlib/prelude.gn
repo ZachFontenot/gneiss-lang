@@ -95,3 +95,264 @@ let string_ends_with suffix s =
     else string_substring (slen - suflen) slen s == suffix
 
 let string_replace from to s = string_join to (string_split from s)
+
+-- ============================================================================
+-- Additional List operations
+-- ============================================================================
+
+-- take n xs: Take the first n elements from a list
+let rec take n xs =
+    if n <= 0 then []
+    else match xs with
+        | [] -> []
+        | x :: rest -> x :: take (n - 1) rest
+    end
+
+-- drop n xs: Drop the first n elements from a list
+let rec drop n xs =
+    if n <= 0 then xs
+    else match xs with
+        | [] -> []
+        | _ :: rest -> drop (n - 1) rest
+    end
+
+-- nth n xs: Get the element at index n (0-based), returns Option
+let rec nth n xs =
+    match xs with
+    | [] -> None
+    | x :: rest -> if n == 0 then Some x else nth (n - 1) rest
+    end
+
+-- find p xs: Find the first element satisfying predicate p
+let rec find p xs =
+    match xs with
+    | [] -> None
+    | x :: rest -> if p x then Some x else find p rest
+    end
+
+-- zip xs ys: Combine two lists into a list of pairs
+let rec zip xs ys =
+    match (xs, ys) with
+    | ([], _) -> []
+    | (_, []) -> []
+    | (x :: xrest, y :: yrest) -> (x, y) :: zip xrest yrest
+    end
+
+-- zipWith f xs ys: Combine two lists using a function
+let rec zipWith f xs ys =
+    match (xs, ys) with
+    | ([], _) -> []
+    | (_, []) -> []
+    | (x :: xrest, y :: yrest) -> f x y :: zipWith f xrest yrest
+    end
+
+-- unzip xys: Split a list of pairs into two lists
+let unzip xys =
+    let rec go xs ys pairs =
+        match pairs with
+        | [] -> (reverse xs, reverse ys)
+        | (x, y) :: rest -> go (x :: xs) (y :: ys) rest
+        end
+    in go [] [] xys
+
+-- partition p xs: Split list into (elements satisfying p, elements not satisfying p)
+let partition p xs =
+    let rec go yes no lst =
+        match lst with
+        | [] -> (reverse yes, reverse no)
+        | x :: rest ->
+            if p x then go (x :: yes) no rest
+            else go yes (x :: no) rest
+        end
+    in go [] [] xs
+
+-- intersperse sep xs: Insert separator between elements
+let rec intersperse sep xs =
+    match xs with
+    | [] -> []
+    | [x] -> [x]
+    | x :: rest -> x :: sep :: intersperse sep rest
+    end
+
+-- concat xss: Flatten a list of lists
+let concat xss = foldr (fun xs acc -> xs ++ acc) [] xss
+
+-- concatMap f xs: Map then flatten (flatMap/bind for lists)
+let concatMap f xs = concat (map f xs)
+
+-- all p xs: Check if all elements satisfy predicate
+let rec all p xs =
+    match xs with
+    | [] -> true
+    | x :: rest -> if p x then all p rest else false
+    end
+
+-- any p xs: Check if any element satisfies predicate
+let rec any p xs =
+    match xs with
+    | [] -> false
+    | x :: rest -> if p x then true else any p rest
+    end
+
+-- sum xs: Sum of a list of integers
+let sum xs = foldl (fun acc x -> acc + x) 0 xs
+
+-- product xs: Product of a list of integers
+let product xs = foldl (fun acc x -> acc * x) 1 xs
+
+-- last xs: Get the last element of a list
+let rec last xs =
+    match xs with
+    | [] -> None
+    | [x] -> Some x
+    | _ :: rest -> last rest
+    end
+
+-- init xs: Get all elements except the last
+let init xs =
+    let rec go acc lst =
+        match lst with
+        | [] -> None
+        | [_] -> Some (reverse acc)
+        | x :: rest -> go (x :: acc) rest
+        end
+    in go [] xs
+
+-- replicate n x: Create a list of n copies of x
+let rec replicate n x =
+    if n <= 0 then []
+    else x :: replicate (n - 1) x
+
+-- take_while p xs: Take elements while predicate holds
+let rec take_while p xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> if p x then x :: take_while p rest else []
+    end
+
+-- elem x xs: Check if x is in the list (uses ==)
+let rec elem x xs =
+    match xs with
+    | [] -> false
+    | y :: rest -> if x == y then true else elem x rest
+    end
+
+-- ============================================================================
+-- Tuple operations
+-- ============================================================================
+
+-- fst: Get the first element of a pair
+let fst pair = match pair with | (x, _) -> x end
+
+-- snd: Get the second element of a pair
+let snd pair = match pair with | (_, y) -> y end
+
+-- swap: Swap the elements of a pair
+let swap pair = match pair with | (x, y) -> (y, x) end
+
+-- ============================================================================
+-- Math operations
+-- ============================================================================
+
+-- abs: Absolute value
+let abs n = if n < 0 then 0 - n else n
+
+-- negate: Negate a number
+let negate n = 0 - n
+
+-- min: Minimum of two values
+let min a b = if a < b then a else b
+
+-- max: Maximum of two values
+let max a b = if a > b then a else b
+
+-- clamp lo hi x: Clamp x to the range [lo, hi]
+let clamp lo hi x =
+    if x < lo then lo
+    else if x > hi then hi
+    else x
+
+-- ============================================================================
+-- String operations (additional)
+-- ============================================================================
+
+-- lines: Split a string on newlines
+let lines s = string_split "\n" s
+
+-- unlines: Join strings with newlines
+let unlines xs = string_join "\n" xs
+
+-- words: Split a string on whitespace (simple version using spaces)
+let words s = filter (fun w -> string_length w > 0) (string_split " " s)
+
+-- unwords: Join strings with spaces
+let unwords xs = string_join " " xs
+
+-- ============================================================================
+-- Option operations
+-- ============================================================================
+
+-- map_option f opt: Apply f to the value inside Some, or return None
+let map_option f opt =
+    match opt with
+    | None -> None
+    | Some x -> Some (f x)
+    end
+
+-- and_then opt f: Chain Option computations (flatMap/bind for Option)
+let and_then opt f =
+    match opt with
+    | None -> None
+    | Some x -> f x
+    end
+
+-- unwrap_or default opt: Get the value or a default
+let unwrap_or default opt =
+    match opt with
+    | None -> default
+    | Some x -> x
+    end
+
+-- is_some opt: Check if Option contains a value
+let is_some opt = match opt with | Some _ -> true | None -> false end
+
+-- is_none opt: Check if Option is empty
+let is_none opt = match opt with | None -> true | Some _ -> false end
+
+-- ============================================================================
+-- Result operations
+-- ============================================================================
+
+-- map_result f res: Apply f to Ok value, pass through Err
+let map_result f res =
+    match res with
+    | Err e -> Err e
+    | Ok x -> Ok (f x)
+    end
+
+-- map_err f res: Apply f to Err value, pass through Ok
+let map_err f res =
+    match res with
+    | Ok x -> Ok x
+    | Err e -> Err (f e)
+    end
+
+-- and_then_result res f: Chain Result computations
+let and_then_result res f =
+    match res with
+    | Err e -> Err e
+    | Ok x -> f x
+    end
+
+-- unwrap_or_result default res: Get Ok value or default
+let unwrap_or_result default res =
+    match res with
+    | Err _ -> default
+    | Ok x -> x
+    end
+
+-- is_ok res: Check if Result is Ok
+let is_ok res = match res with | Ok _ -> true | Err _ -> false end
+
+-- is_err res: Check if Result is Err
+let is_err res = match res with | Err _ -> true | Ok _ -> false end
