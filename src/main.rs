@@ -12,6 +12,7 @@ use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
 use gneiss::module::{ModuleError, ModuleResolver};
 use gneiss::parser::ParseError;
+use gneiss::prelude::parse_prelude;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser, SourceMap, TypeEnv};
 
 fn main() {
@@ -279,6 +280,34 @@ fn repl() {
     let mut interpreter = Interpreter::new();
     let mut type_env = TypeEnv::new();
     let mut inferencer = Inferencer::new();
+
+    // Load prelude (Option, Result, map, filter, etc.)
+    match parse_prelude() {
+        Ok(prelude) => {
+            // Type check prelude and populate type_env
+            match inferencer.infer_program(&prelude) {
+                Ok(prelude_env) => {
+                    // Copy prelude types to our type_env
+                    for (name, scheme) in prelude_env.iter() {
+                        type_env.insert(name.clone(), scheme.clone());
+                    }
+                    // Run prelude to define values in interpreter
+                    if let Err(e) = interpreter.run(&prelude) {
+                        eprintln!("Warning: Failed to load prelude values: {}", e);
+                    }
+                }
+                Err(errors) => {
+                    eprintln!("Warning: Failed to type check prelude:");
+                    for e in errors {
+                        eprintln!("  {}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to parse prelude: {}", e);
+        }
+    }
 
     loop {
         print!("gneiss> ");
