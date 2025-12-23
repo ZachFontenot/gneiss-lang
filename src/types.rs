@@ -371,7 +371,7 @@ impl fmt::Display for Type {
         match self.resolve() {
             Type::Var(var) => match &*var.borrow() {
                 TypeVar::Unbound { id, .. } => write!(f, "t{}", id),
-                TypeVar::Generic(id) => write!(f, "'{}", ('a' as u8 + (*id % 26) as u8) as char),
+                TypeVar::Generic(id) => write!(f, "'{}", (b'a' + (*id % 26) as u8) as char),
                 TypeVar::Link(_) => unreachable!(),
             },
             Type::Int => write!(f, "Int"),
@@ -489,7 +489,7 @@ impl fmt::Display for Scheme {
                 if i > 0 {
                     write!(f, " ")?;
                 }
-                write!(f, "{}", ('a' as u8 + (i % 26) as u8) as char)?;
+                write!(f, "{}", (b'a' + (i % 26) as u8) as char)?;
             }
             write!(f, ". ")?;
         }
@@ -891,15 +891,14 @@ impl ClassEnv {
 
         // Check for overlapping instances (simplified: just check same trait + unifiable heads)
         for existing in &self.instances {
-            if existing.trait_name == info.trait_name {
-                if types_overlap(&existing.head, &info.head) {
+            if existing.trait_name == info.trait_name
+                && types_overlap(&existing.head, &info.head) {
                     return Err(ClassError::OverlappingInstance {
                         trait_name: info.trait_name.clone(),
                         existing: existing.head.clone(),
                         new: info.head.clone(),
                     });
                 }
-            }
         }
 
         self.instances.push(info);

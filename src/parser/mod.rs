@@ -1023,13 +1023,12 @@ impl Parser {
             }
             Token::UpperIdent(name) => {
                 self.advance();
-                if name == "Channel" {
-                    if self.is_type_atom_start() {
+                if name == "Channel"
+                    && self.is_type_atom_start() {
                         let inner = self.parse_type_atom()?;
                         let span = start.merge(&inner.span);
                         return Ok(Spanned::new(TypeExprKind::Channel(Rc::new(inner)), span));
                     }
-                }
                 Ok(Spanned::new(TypeExprKind::Named(name), start))
             }
             Token::LParen => {

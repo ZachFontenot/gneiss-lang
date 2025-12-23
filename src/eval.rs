@@ -241,7 +241,7 @@ pub enum OpenMode {
 
 impl OpenMode {
     /// Convert from a string value (for builtins)
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "r" | "read" => Some(OpenMode::Read),
             "w" | "write" => Some(OpenMode::Write),
@@ -769,7 +769,7 @@ impl Value {
 /// Environment mapping names to values
 pub type Env = Rc<RefCell<EnvInner>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnvInner {
     bindings: HashMap<String, Value>,
     parent: Option<Env>,
@@ -805,14 +805,6 @@ impl EnvInner {
     }
 }
 
-impl Default for EnvInner {
-    fn default() -> Self {
-        Self {
-            bindings: HashMap::new(),
-            parent: None,
-        }
-    }
-}
 
 /// The interpreter
 pub struct Interpreter {
@@ -830,6 +822,8 @@ pub struct Interpreter {
     imports: HashMap<String, (String, String)>,
     /// Module aliases: alias -> original module name
     module_aliases: HashMap<String, String>,
+    /// Command-line arguments passed to the program
+    program_args: Vec<String>,
 }
 
 impl Interpreter {
@@ -1002,6 +996,9 @@ impl Interpreter {
             env.define("Set.intersect".into(), Value::Builtin("Set.intersect".into()));
             env.define("Set.size".into(), Value::Builtin("Set.size".into()));
             env.define("Set.toList".into(), Value::Builtin("Set.toList".into()));
+
+            // Command-line args
+            env.define("get_args".into(), Value::Builtin("get_args".into()));
         }
 
         Self {
@@ -1012,7 +1009,13 @@ impl Interpreter {
             module_envs: HashMap::new(),
             imports: HashMap::new(),
             module_aliases: HashMap::new(),
+            program_args: Vec::new(),
         }
+    }
+
+    /// Set the command-line arguments for the program
+    pub fn set_program_args(&mut self, args: Vec<String>) {
+        self.program_args = args;
     }
 
     /// Set the class environment (called after type inference)
@@ -1914,7 +1917,7 @@ impl Interpreter {
                         } => {
                             let fields: im::HashMap<String, Value> = field_names
                                 .into_iter()
-                                .zip(acc.into_iter())
+                                .zip(acc)
                                 .collect();
                             Value::Record { type_name, fields }
                         }
@@ -2150,8 +2153,8 @@ impl Interpreter {
                         // Convert patterns/bodies/env into SelectEffectArms
                         let arms: Vec<SelectEffectArm> = channels
                             .into_iter()
-                            .zip(patterns.into_iter())
-                            .zip(bodies.into_iter())
+                            .zip(patterns)
+                            .zip(bodies)
                             .map(|((channel, pattern), body)| SelectEffectArm {
                                 channel,
                                 pattern,
@@ -2409,7 +2412,7 @@ impl Interpreter {
                     }
                 };
                 let mode = match &args[1] {
-                    Value::String(s) => OpenMode::from_str(s).ok_or_else(|| {
+                    Value::String(s) => OpenMode::parse(s).ok_or_else(|| {
                         EvalError::TypeError(format!("invalid open mode: {}", s))
                     })?,
                     v => {
@@ -2636,9 +2639,9 @@ impl Interpreter {
 
             Value::Builtin(ref name) => {
                 // Check if this is a trait method dispatch
-                if name.starts_with("__method__") {
+                if let Some(rest) = name.strip_prefix("__method__") {
                     // Parse "__method__TraitName_methodName"
-                    let rest = &name[10..]; // Skip "__method__"
+                    // Skip "__method__"
                     if let Some(underscore_pos) = rest.find('_') {
                         let trait_name = &rest[..underscore_pos];
                         let method_name = &rest[underscore_pos + 1..];
@@ -3642,6 +3645,15 @@ impl Interpreter {
                     args: vec![arg],
                 })
             },
+            // Command-line arguments
+            "get_args" => {
+                let args: im::Vector<Value> = self
+                    .program_args
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect();
+                Ok(Value::List(args))
+            },
             _ => Err(EvalError::RuntimeError(format!(
                 "unknown builtin: {}",
                 name
@@ -4014,7 +4026,7 @@ impl Interpreter {
                                     let new_env = EnvInner::with_parent(&arm.env);
                                     if self.try_bind_pattern(&new_env, &arm.pattern, &value) {
                                         // Build continuation with fiber_cont
-                                        let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_else(Cont::new);
+                                        let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_default();
                                         cont.insert_at_bottom(Frame::FiberBoundary);
                                         let state = State::Eval {
                                             expr: arm.body,

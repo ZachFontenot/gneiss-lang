@@ -1,0 +1,10 @@
+-- Test command-line arguments
+let args = get_args () in
+let rec print_args xs = match xs with
+    | [] -> ()
+    | x :: rest ->
+        print x;
+        print_args rest
+end in
+print "Arguments:";
+print_args args

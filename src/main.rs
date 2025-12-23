@@ -18,15 +18,16 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
-        // Run a file
-        run_file(&args[1]);
+        // Run a file, pass remaining args to the program
+        let program_args = args[2..].to_vec();
+        run_file(&args[1], program_args);
     } else {
         // Start REPL
         repl();
     }
 }
 
-fn run_file(path: &str) {
+fn run_file(path: &str, program_args: Vec<String>) {
     let entry_path = Path::new(path);
     let colors = Colors::new(std::io::stderr().is_terminal());
 
@@ -59,6 +60,7 @@ fn run_file(path: &str) {
     // Type check and evaluate all modules
     let mut inferencer = Inferencer::new();
     let mut interpreter = Interpreter::new();
+    interpreter.set_program_args(program_args);
 
     // Type-check each module in dependency order (dependencies first)
     let mut module_type_envs: Vec<(String, TypeEnv)> = Vec::new();

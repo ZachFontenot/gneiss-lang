@@ -312,7 +312,7 @@ impl<'a> Lexer<'a> {
                     Token::Semicolon
                 }
             }
-            '_' if !self.peek().map_or(false, is_ident_continue) => Token::Underscore,
+            '_' if !self.peek().is_some_and(is_ident_continue) => Token::Underscore,
             '.' => Token::Dot,
 
             // Colon: either `:` (type annotation) or `::` (cons)
@@ -423,7 +423,7 @@ impl<'a> Lexer<'a> {
             // Look ahead to make sure it's not something like `1.method`
             let mut chars = self.chars.clone();
             chars.next(); // skip the dot
-            if chars.peek().map_or(false, |c| c.is_ascii_digit()) {
+            if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
                 s.push('.');
                 self.advance(); // consume the dot
                 while let Some(c) = self.peek() {

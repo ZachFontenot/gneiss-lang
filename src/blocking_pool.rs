@@ -262,7 +262,6 @@ fn execute_blocking_op(
                     .truncate(true)
                     .open(path),
                 OpenMode::Append => OpenOptions::new()
-                    .write(true)
                     .create(true)
                     .append(true)
                     .open(path),
@@ -270,6 +269,7 @@ fn execute_blocking_op(
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(path),
             };
 
@@ -351,7 +351,7 @@ fn execute_blocking_op(
             let mut reg = registry.lock().unwrap();
             match reg.get_mut(*handle) {
                 Some(IoResource::File(f)) => {
-                    let mut buf = vec![0u8; *count as usize];
+                    let mut buf = vec![0u8; *count];
                     match f.read(&mut buf) {
                         Ok(n) => {
                             buf.truncate(n);
@@ -361,7 +361,7 @@ fn execute_blocking_op(
                     }
                 }
                 Some(IoResource::TcpSocket(s)) => {
-                    let mut buf = vec![0u8; *count as usize];
+                    let mut buf = vec![0u8; *count];
                     match s.read(&mut buf) {
                         Ok(n) => {
                             buf.truncate(n);

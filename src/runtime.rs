@@ -525,14 +525,6 @@ impl Runtime {
     // I/O Integration
     // ========================================================================
 
-    /// Get or create the I/O reactor
-    fn ensure_reactor(&mut self) -> &mut IoReactor {
-        if self.io_reactor.is_none() {
-            self.io_reactor = Some(IoReactor::new().expect("failed to create I/O reactor"));
-        }
-        self.io_reactor.as_mut().unwrap()
-    }
-
     /// Get or create the blocking pool
     fn ensure_blocking_pool(&mut self) -> &mut BlockingPool {
         if self.blocking_pool.is_none() {

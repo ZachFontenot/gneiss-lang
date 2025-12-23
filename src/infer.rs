@@ -1,5 +1,8 @@
 //! Hindley-Milner type inference
 
+// TODO: Box TypeError to reduce Result size (tracked in roadmap)
+#![allow(clippy::result_large_err)]
+
 use crate::ast::*;
 use crate::errors::find_similar;
 use crate::prelude::parse_prelude;
@@ -388,7 +391,7 @@ impl Inferencer {
         // 4. Check for qualified name in imported modules (e.g., Response.notFound from Http module)
         // This handles cases where a function has a dot in its name like "Response.notFound"
         if name.contains('.') {
-            for (_import_name, module_env) in &self.module_envs {
+            for module_env in self.module_envs.values() {
                 if let Some(scheme) = module_env.get(name) {
                     return Some(scheme.clone());
                 }
@@ -427,38 +430,6 @@ impl Inferencer {
             .map_err(|e| e.with_context(context))
     }
 
-    /// Unify or record error and continue (for error accumulation).
-    /// Returns true if unification succeeded, false if an error was recorded.
-    /// Fatal errors (OccursCheck) are still returned as Err.
-    fn unify_or_record(&mut self, t1: &Type, t2: &Type, span: &Span) -> Result<bool, TypeError> {
-        match self.unify_inner(t1, t2, Some(span)) {
-            Ok(()) => Ok(true),
-            Err(e @ TypeError::OccursCheck { .. }) => Err(e), // Fatal
-            Err(e) => {
-                self.record_error(e);
-                Ok(false)
-            }
-        }
-    }
-
-    /// Unify with context, or record error and continue (for error accumulation).
-    fn unify_or_record_with_context(
-        &mut self,
-        t1: &Type,
-        t2: &Type,
-        span: &Span,
-        context: UnifyContext,
-    ) -> Result<bool, TypeError> {
-        match self.unify_inner(t1, t2, Some(span)) {
-            Ok(()) => Ok(true),
-            Err(e @ TypeError::OccursCheck { .. }) => Err(e.with_context(context)), // Fatal
-            Err(e) => {
-                self.record_error(e.with_context(context));
-                Ok(false)
-            }
-        }
-    }
-
     /// Core unification logic with optional span for error reporting
     fn unify_inner(&mut self, t1: &Type, t2: &Type, span: Option<&Span>) -> Result<(), TypeError> {
         let t1 = t1.resolve();
@@ -494,7 +465,7 @@ impl Inferencer {
                             });
                         }
                         // Update levels for let-polymorphism
-                        self.update_levels(&other, level);
+                        self.update_levels(other, level);
                         // Link the variable
                         *var.borrow_mut() = TypeVar::Link(other.clone());
                         Ok(())
@@ -1920,7 +1891,7 @@ impl Inferencer {
                             if actual_module.is_some() {
                                 self.used_module_aliases.insert(module_name.clone());
                             }
-                            let ty = self.instantiate(&scheme);
+                            let ty = self.instantiate(scheme);
                             return Ok(InferResult::pure(ty, ans));
                         } else {
                             // Module exists but field doesn't
@@ -3392,6 +3363,19 @@ impl Inferencer {
             },
         };
         env.insert("Set.toList".into(), set_tolist_scheme);
+
+        // get_args : forall t. () -> [String]
+        let get_args_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Unit),
+                ret: Rc::new(Type::list(Type::String)),
+                ans_in: Rc::new(Type::new_generic(0)),
+                ans_out: Rc::new(Type::new_generic(0)),
+            },
+        };
+        env.insert("get_args".into(), get_args_scheme);
 
         // Parse and inject prelude (Option, Result, id, const, flip)
         let prelude = parse_prelude().map_err(|e| vec![TypeError::Other(e)])?;

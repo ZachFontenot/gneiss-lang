@@ -346,7 +346,7 @@ impl ModuleResolver {
 fn module_path_to_file_path(module_path: &str) -> String {
     module_path
         .split('/')
-        .map(|part| to_snake_case(part))
+        .map(to_snake_case)
         .collect::<Vec<_>>()
         .join("/")
 }
