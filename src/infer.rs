@@ -2160,44 +2160,95 @@ impl Inferencer {
             }
 
             ExprKind::Handle { body, return_clause, handlers } => {
-                // TODO: Full handler typing with effect row subtraction
-                // For now, infer body and handler types, return body type
+                // Infer body type and collect its effects
                 let body_result = self.infer_expr_full(env, body)?;
 
-                // Infer return clause
+                // Collect which effects are handled by these handlers
+                let mut handled_effects: HashSet<String> = HashSet::new();
+                for handler in handlers {
+                    // Look up which effect this operation belongs to
+                    if let Some((effect_name, _)) = self.effect_env.operations.get(&handler.operation).cloned() {
+                        handled_effects.insert(effect_name);
+                    }
+                    // If operation not found, we'll still handle it but can't verify types
+                }
+
+                // Infer return clause - this determines the result type
                 let mut return_env = env.clone();
                 let return_pattern_ty = self.fresh_var();
                 self.bind_pattern(&mut return_env, &return_clause.pattern, &return_pattern_ty)?;
                 self.unify_at(&body_result.ty, &return_pattern_ty, &return_clause.pattern.span)?;
 
                 let return_body_result = self.infer_expr_full(&return_env, &return_clause.body)?;
+                let result_ty = return_body_result.ty.clone();
 
-                // Infer each handler arm
+                // Infer each handler arm and verify types
                 for handler in handlers {
                     let mut handler_env = env.clone();
 
-                    // Bind operation parameters
-                    for param in &handler.params {
-                        let param_ty = self.fresh_var();
-                        self.bind_pattern(&mut handler_env, param, &param_ty)?;
+                    // Look up operation signature if available
+                    let op_info = self.effect_env.operations.get(&handler.operation).cloned();
+
+                    // Bind operation parameters with expected types if known
+                    if let Some((effect_name, ref op)) = op_info {
+                        // Get effect type params
+                        let effect_info = self.effect_env.effects.get(&effect_name).cloned();
+                        let num_type_params = effect_info.map(|e| e.type_params.len()).unwrap_or(0);
+
+                        // Create fresh vars for effect type params
+                        let mut effect_type_args: Vec<Type> = Vec::new();
+                        for _ in 0..num_type_params {
+                            effect_type_args.push(self.fresh_var());
+                        }
+
+                        // Bind params with instantiated types
+                        let instantiated_params: Vec<Type> = op.param_types.iter()
+                            .map(|t| substitute_generics(t, &effect_type_args))
+                            .collect();
+
+                        for (i, param) in handler.params.iter().enumerate() {
+                            let param_ty = instantiated_params.get(i)
+                                .cloned()
+                                .unwrap_or_else(|| self.fresh_var());
+                            self.bind_pattern(&mut handler_env, param, &param_ty)?;
+                        }
+
+                        // Continuation takes the operation's result type and returns the handle result
+                        let cont_arg = substitute_generics(&op.result_type, &effect_type_args);
+                        let cont_type = Type::Arrow {
+                            arg: Rc::new(cont_arg),
+                            ret: Rc::new(result_ty.clone()),
+                            effects: Row::Empty, // Continuation is pure within handler
+                        };
+                        handler_env.insert(handler.continuation.clone(), Scheme::mono(cont_type));
+                    } else {
+                        // Unknown operation - use fresh type variables
+                        for param in &handler.params {
+                            let param_ty = self.fresh_var();
+                            self.bind_pattern(&mut handler_env, param, &param_ty)?;
+                        }
+
+                        let cont_arg = self.fresh_var();
+                        let cont_type = Type::Arrow {
+                            arg: Rc::new(cont_arg),
+                            ret: Rc::new(result_ty.clone()),
+                            effects: Row::Empty,
+                        };
+                        handler_env.insert(handler.continuation.clone(), Scheme::mono(cont_type));
                     }
 
-                    // Bind continuation as a function type
-                    let cont_arg = self.fresh_var();
-                    let cont_ret = self.fresh_var();
-                    let cont_type = Type::Arrow {
-                        arg: Rc::new(cont_arg),
-                        ret: Rc::new(cont_ret),
-                        effects: Row::Empty,
-                    };
-                    handler_env.insert(handler.continuation.clone(), Scheme::mono(cont_type));
-
-                    // Infer handler body
-                    self.infer_expr_full(&handler_env, &handler.body)?;
+                    // Infer handler body - should unify with result type
+                    let handler_body_result = self.infer_expr_full(&handler_env, &handler.body)?;
+                    self.unify_at(&handler_body_result.ty, &result_ty, &handler.body.span)?;
                 }
 
-                // Handle expression produces the return clause's result type
-                Ok(InferResult::pure(return_body_result.ty))
+                // Subtract handled effects from body's effect row
+                let remaining_effects = self.subtract_effects(&body_result.effects, &handled_effects);
+
+                // Also combine with return clause's effects (should typically be pure)
+                let combined = self.union_rows(&remaining_effects, &return_body_result.effects);
+
+                Ok(InferResult::with_effects(result_ty, combined))
             }
 
             // ========================================================================
