@@ -1535,6 +1535,122 @@ impl Parser {
         ))
     }
 
+    /// Parse a perform expression: perform Effect.operation args
+    fn parse_perform_expr(&mut self, start: Span) -> ParseResult<Expr> {
+        self.consume(Token::Perform)?;
+
+        // Parse Effect.operation (qualified name)
+        let effect = self.parse_upper_ident()?;
+        self.consume(Token::Dot)?;
+        let operation = self.parse_ident()?;
+
+        // Parse arguments (collect atoms until we hit something that's not an expression)
+        let mut args = Vec::new();
+        while self.is_atom_start() {
+            args.push(self.parse_expr_atom()?);
+        }
+
+        let end_span = if args.is_empty() {
+            self.current_span()
+        } else {
+            args.last().unwrap().span.clone()
+        };
+
+        Ok(Spanned::new(
+            ExprKind::Perform {
+                effect,
+                operation,
+                args,
+            },
+            start.merge(&end_span),
+        ))
+    }
+
+    /// Parse a handle expression:
+    /// handle expr with | return x -> ... | op args k -> ... end
+    fn parse_handle_expr(&mut self, start: Span) -> ParseResult<Expr> {
+        self.consume(Token::Handle)?;
+
+        // Parse the body expression
+        let body = self.parse_expr_binary(0)?;
+
+        self.consume(Token::With)?;
+
+        // Optional leading pipe
+        self.match_token(&Token::Pipe);
+
+        // First arm must be `return`
+        self.consume(Token::Return)?;
+        let return_pattern = self.parse_simple_pattern()?;
+        self.consume(Token::Arrow)?;
+        let return_body = self.parse_expr_in(ExprContext::Full)?;
+
+        let return_clause = HandlerReturn {
+            pattern: return_pattern,
+            body: Box::new(return_body),
+        };
+
+        // Parse operation handlers
+        let mut handlers = Vec::new();
+        while self.match_token(&Token::Pipe) {
+            // Parse operation name
+            let operation = self.parse_ident()?;
+
+            // Parse parameters (patterns before the continuation)
+            let mut params = Vec::new();
+            while self.is_pattern_start()
+                && !self.check(&Token::Arrow)
+                && !self.check(&Token::Pipe)
+            {
+                // Check if this is the continuation param (last one before ->)
+                let pat = self.parse_simple_pattern()?;
+                params.push(pat);
+            }
+
+            // Last parameter is the continuation
+            let continuation = if let Some(last) = params.pop() {
+                match last.node {
+                    PatternKind::Var(name) => name,
+                    _ => {
+                        return Err(ParseError::unexpected(
+                            "continuation parameter must be a simple identifier",
+                            self.peek().clone(),
+                            last.span,
+                        ));
+                    }
+                }
+            } else {
+                return Err(ParseError::unexpected(
+                    "handler needs continuation parameter",
+                    self.peek().clone(),
+                    self.current_span(),
+                ));
+            };
+
+            self.consume(Token::Arrow)?;
+            let handler_body = self.parse_expr_in(ExprContext::Full)?;
+
+            handlers.push(HandlerArm {
+                operation,
+                params,
+                continuation,
+                body: Box::new(handler_body),
+            });
+        }
+
+        let end_span = self.current_span();
+        self.consume(Token::End)?;
+
+        Ok(Spanned::new(
+            ExprKind::Handle {
+                body: Rc::new(body),
+                return_clause,
+                handlers,
+            },
+            start.merge(&end_span),
+        ))
+    }
+
     fn parse_expr_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
         let start = self.current_span();
         let mut left = self.parse_expr_unary()?;
@@ -1840,6 +1956,8 @@ impl Parser {
                     _ => Err(self.unexpected_token("function (fun k -> ...)")),
                 }
             }
+            Token::Perform => self.parse_perform_expr(start),
+            Token::Handle => self.parse_handle_expr(start),
             Token::LParen => {
                 self.advance();
                 if self.match_token(&Token::RParen) {

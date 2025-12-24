@@ -1614,6 +1614,24 @@ impl Interpreter {
                 })
             }
 
+            // ========================================================================
+            // Algebraic Effects (stubs - full implementation in Phase 4)
+            // ========================================================================
+            ExprKind::Perform { effect, operation, .. } => {
+                // TODO: Implement perform dispatch to handlers
+                StepResult::Error(EvalError::RuntimeError(format!(
+                    "perform {}.{} not yet implemented - handlers coming in Phase 4",
+                    effect, operation
+                )))
+            }
+
+            ExprKind::Handle { .. } => {
+                // TODO: Implement handler scope
+                StepResult::Error(EvalError::RuntimeError(
+                    "handle expressions not yet implemented - coming in Phase 4".into(),
+                ))
+            }
+
             ExprKind::Select { arms } => {
                 if arms.is_empty() {
                     return StepResult::Error(EvalError::RuntimeError("empty select".into()));

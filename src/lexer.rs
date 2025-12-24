@@ -47,6 +47,7 @@ pub enum Token {
     Effect,
     Handle,
     Perform,
+    Return,
 
     // Module keywords
     Export,
@@ -509,6 +510,7 @@ impl<'a> Lexer<'a> {
             "effect" => Token::Effect,
             "handle" => Token::Handle,
             "perform" => Token::Perform,
+            "return" => Token::Return,
             "impl" => Token::Impl,
             "for" => Token::For,
             "where" => Token::Where,

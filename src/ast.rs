@@ -296,6 +296,30 @@ pub enum ExprKind {
     },
 
     // ========================================================================
+    // Algebraic Effects
+    // ========================================================================
+    /// Perform an effect operation: perform State.get ()
+    Perform {
+        /// Effect name (e.g., "State")
+        effect: Ident,
+        /// Operation name (e.g., "get")
+        operation: Ident,
+        /// Arguments to the operation
+        args: Vec<Expr>,
+    },
+
+    /// Handle effects in an expression
+    /// handle expr with | return x -> ... | op args k -> ... end
+    Handle {
+        /// Expression whose effects are being handled
+        body: Rc<Expr>,
+        /// Return clause: what to do with the final value
+        return_clause: HandlerReturn,
+        /// Operation handlers
+        handlers: Vec<HandlerArm>,
+    },
+
+    // ========================================================================
     // Records
     // ========================================================================
     /// Record literal: Request { method = "GET", path = "/" }
@@ -335,6 +359,28 @@ pub struct SelectArm {
     pub channel: Expr,
     pub pattern: Pattern,
     pub body: Expr,
+}
+
+/// Return clause for an effect handler: | return x -> body
+#[derive(Debug, Clone)]
+pub struct HandlerReturn {
+    /// Pattern for the return value
+    pub pattern: Pattern,
+    /// Body to execute with the return value (boxed to break recursion)
+    pub body: Box<Expr>,
+}
+
+/// Handler arm for an effect operation: | op args k -> body
+#[derive(Debug, Clone)]
+pub struct HandlerArm {
+    /// Operation name (e.g., "get" for State.get)
+    pub operation: Ident,
+    /// Parameters for the operation (not including continuation)
+    pub params: Vec<Pattern>,
+    /// Continuation parameter name
+    pub continuation: Ident,
+    /// Handler body (boxed to break recursion)
+    pub body: Box<Expr>,
 }
 
 /// A single binding in a let rec group

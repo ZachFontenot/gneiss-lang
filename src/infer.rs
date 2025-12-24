@@ -2026,6 +2026,77 @@ impl Inferencer {
             }
 
             // ========================================================================
+            // Algebraic Effects (stubs - full inference in Phase 3)
+            // ========================================================================
+            ExprKind::Perform { effect, operation: _, args } => {
+                // TODO: Look up effect declaration, find operation signature,
+                // infer argument types, and add effect to row
+                // For now, return a fresh type variable and report a warning
+                let result_ty = self.fresh_var();
+
+                // Infer types for arguments (for basic type checking)
+                for arg in args {
+                    self.infer_expr(env, arg)?;
+                }
+
+                // Add the effect to the result's effect row
+                let _effect_row = Row::Extend {
+                    effect: Effect {
+                        name: effect.clone(),
+                        params: vec![], // TODO: get params from effect declaration
+                    },
+                    rest: Rc::new(Row::Empty),
+                };
+
+                Ok(InferResult {
+                    ty: result_ty,
+                    answer_before: ans.clone(),
+                    answer_after: ans,
+                })
+            }
+
+            ExprKind::Handle { body, return_clause, handlers } => {
+                // TODO: Full handler typing with effect row subtraction
+                // For now, infer body and handler types, return body type
+                let body_result = self.infer_expr_full(env, body)?;
+
+                // Infer return clause
+                let mut return_env = env.clone();
+                let return_pattern_ty = self.fresh_var();
+                self.bind_pattern(&mut return_env, &return_clause.pattern, &return_pattern_ty)?;
+                self.unify_at(&body_result.ty, &return_pattern_ty, &return_clause.pattern.span)?;
+
+                let return_body_result = self.infer_expr_full(&return_env, &return_clause.body)?;
+
+                // Infer each handler arm
+                for handler in handlers {
+                    let mut handler_env = env.clone();
+
+                    // Bind operation parameters
+                    for param in &handler.params {
+                        let param_ty = self.fresh_var();
+                        self.bind_pattern(&mut handler_env, param, &param_ty)?;
+                    }
+
+                    // Bind continuation as a function type
+                    let cont_arg = self.fresh_var();
+                    let cont_ret = self.fresh_var();
+                    let cont_type = Type::Arrow {
+                        arg: Rc::new(cont_arg),
+                        ret: Rc::new(cont_ret),
+                        effects: Row::Empty,
+                    };
+                    handler_env.insert(handler.continuation.clone(), Scheme::mono(cont_type));
+
+                    // Infer handler body
+                    self.infer_expr_full(&handler_env, &handler.body)?;
+                }
+
+                // Handle expression produces the return clause's result type
+                Ok(InferResult::pure(return_body_result.ty, ans))
+            }
+
+            // ========================================================================
             // Records
             // ========================================================================
             ExprKind::Record { name, fields } => {
