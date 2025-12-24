@@ -664,9 +664,11 @@ pub enum Decl {
     },
 
     // val xs : [Int]  -- standalone type signature
+    // val show_it : a -> String where a : Show  -- with trait constraints
     Val {
         name: Ident,
         type_sig: TypeExpr,
+        constraints: Vec<Constraint>,
     },
 
     // Record type declaration: type Request = { method : String, path : String }

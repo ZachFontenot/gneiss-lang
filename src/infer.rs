@@ -3838,7 +3838,7 @@ impl Inferencer {
                 Item::Decl(Decl::Trait { .. } | Decl::Instance { .. }) => {
                     // Already handled in second/third pass
                 }
-                Item::Decl(Decl::Val { name, type_sig }) => {
+                Item::Decl(Decl::Val { name, type_sig, constraints }) => {
                     // Register a type signature for the name
                     // The subsequent let declaration will be checked against this
                     let result: Result<Scheme, TypeError> = (|| {
@@ -3864,8 +3864,26 @@ impl Inferencer {
                         let declared_ty =
                             self.type_expr_to_type_with_fresh_vars(type_sig, &type_var_names, &fresh_vars)?;
 
+                        // Build predicates from constraints
+                        let mut predicates = Vec::new();
+                        for constraint in constraints {
+                            // Look up the type var for this constraint
+                            if let Some(idx) = type_var_names.iter().position(|n| n == &constraint.type_var) {
+                                predicates.push(Pred {
+                                    trait_name: constraint.trait_name.clone(),
+                                    ty: fresh_vars[idx].clone(),
+                                });
+                            }
+                        }
+
                         self.level -= 1;
-                        Ok(self.generalize(&declared_ty))
+
+                        // Generalize with predicates
+                        let scheme = self.generalize(&declared_ty);
+                        Ok(Scheme {
+                            predicates,
+                            ..scheme
+                        })
                     })();
 
                     match result {

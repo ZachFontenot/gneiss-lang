@@ -605,7 +605,15 @@ impl Parser {
         let name = self.parse_possibly_qualified_name()?;
         self.consume(Token::Colon)?;
         let type_sig = self.parse_type_expr()?;
-        Ok(Decl::Val { name, type_sig })
+
+        // Optional where clause for trait constraints
+        let constraints = if self.match_token(&Token::Where) {
+            self.parse_constraints()?
+        } else {
+            vec![]
+        };
+
+        Ok(Decl::Val { name, type_sig, constraints })
     }
 
     fn parse_let_decl(&mut self) -> ParseResult<Decl> {
