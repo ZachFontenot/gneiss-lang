@@ -975,97 +975,128 @@ impl Parser {
         let start = self.current_span();
         let ty = self.parse_type_app()?;
 
-        // Check for optional answer type annotation: from/ans_in -> to/ans_out
-        let ans_in = if self.match_token(&Token::Slash) {
-            Some(Rc::new(self.parse_type_app()?))
-        } else {
-            None
-        };
-
         if self.match_token(&Token::Arrow) {
-            let to_type = self.parse_type_app()?;
+            // Parse the rest of the arrow chain (right-associative)
+            let to_type = self.parse_type_arrow()?;
 
-            // Check for answer-out annotation
-            let ans_out = if self.match_token(&Token::Slash) {
-                Some(Rc::new(self.parse_type_app()?))
+            // Check for optional effect row: { IO, State s | r }
+            let effects = if self.peek() == &Token::LBrace {
+                Some(self.parse_effect_row()?)
             } else {
                 None
             };
 
-            // Handle right-associativity: if there's another arrow, continue
-            let (inner_to, outer_ans_out) = if self.peek() == &Token::Arrow {
-                // Build the nested arrow chain
-                let inner = self.parse_type_arrow_continuation(to_type, ans_out)?;
-                // For chained arrows, outer arrow has no explicit ans_out
-                (inner, None)
+            let span = if let Some(ref eff) = effects {
+                start.merge(&eff.span)
             } else {
-                // Simple case: to_type is the actual target type
-                (to_type, ans_out)
+                start.merge(&to_type.span)
             };
 
-            let span = start.merge(&inner_to.span);
-            Ok(Spanned::new(
+            return Ok(Spanned::new(
                 TypeExprKind::Arrow {
                     from: Rc::new(ty),
-                    to: Rc::new(inner_to),
-                    ans_in,
-                    ans_out: outer_ans_out,
+                    to: Rc::new(to_type),
+                    effects,
                 },
                 span,
-            ))
-        } else {
-            // No arrow, but we might have parsed ans_in incorrectly as a type app
-            if ans_in.is_some() {
-                return Err(ParseError::unexpected(
-                    "'->' after answer type annotation",
-                    self.peek().clone(),
-                    start,
-                ));
-            }
-            Ok(ty)
+            ));
         }
+
+        Ok(ty)
     }
 
-    /// Helper for right-associative arrow parsing with answer types
-    fn parse_type_arrow_continuation(
-        &mut self,
-        left: TypeExpr,
-        left_ans: Option<Rc<TypeExpr>>,
-    ) -> ParseResult<TypeExpr> {
-        let start = left.span.clone();
+    fn parse_effect_row(&mut self) -> ParseResult<EffectRowExpr> {
+        let start = self.current_span();
+        self.consume(Token::LBrace)?;
 
-        if self.match_token(&Token::Arrow) {
-            let right = self.parse_type_app()?;
-            let ans_out = if self.match_token(&Token::Slash) {
-                Some(Rc::new(self.parse_type_app()?))
-            } else {
-                None
-            };
+        let mut effects = Vec::new();
+        let mut rest = None;
 
-            // Continue for right-associativity
-            let inner = if self.peek() == &Token::Arrow {
-                self.parse_type_arrow_continuation(right, ans_out)?
-            } else {
-                Spanned::new(
-                    TypeExprKind::Arrow {
-                        from: Rc::new(left),
-                        to: Rc::new(right),
-                        ans_in: left_ans,
-                        ans_out,
-                    },
-                    start.merge(&self.current_span()),
-                )
-            };
-
-            Ok(inner)
-        } else {
-            // This shouldn't happen if called correctly
-            Err(ParseError::unexpected(
-                "'->'",
-                self.peek().clone(),
-                start,
-            ))
+        // Handle empty effect row: {}
+        if self.match_token(&Token::RBrace) {
+            let span = start.merge(&self.current_span());
+            return Ok(EffectRowExpr {
+                effects,
+                rest,
+                span,
+            });
         }
+
+        loop {
+            // Check for row variable: | r }
+            if self.match_token(&Token::Pipe) {
+                match self.peek().clone() {
+                    Token::Ident(name) => {
+                        self.advance();
+                        rest = Some(name);
+                    }
+                    _ => {
+                        return Err(self.cursor.unexpected("row variable after '|'"));
+                    }
+                }
+                break;
+            }
+
+            // Parse an effect
+            effects.push(self.parse_effect()?);
+
+            // Check for comma (more effects), pipe (row variable), or end
+            if self.match_token(&Token::Comma) {
+                continue;
+            } else if self.match_token(&Token::Pipe) {
+                // Row variable after effects: { IO, State s | r }
+                match self.peek().clone() {
+                    Token::Ident(name) => {
+                        self.advance();
+                        rest = Some(name);
+                    }
+                    _ => {
+                        return Err(self.cursor.unexpected("row variable after '|'"));
+                    }
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+
+        self.consume(Token::RBrace)?;
+        let span = start.merge(&self.current_span());
+
+        Ok(EffectRowExpr {
+            effects,
+            rest,
+            span,
+        })
+    }
+
+    fn parse_effect(&mut self) -> ParseResult<EffectExpr> {
+        let start = self.current_span();
+
+        // Effect name must be an UpperIdent (like IO, State, Reader)
+        let name = match self.peek().clone() {
+            Token::UpperIdent(n) => {
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(self.cursor.unexpected("effect name (capitalized identifier)"));
+            }
+        };
+
+        // Parse optional type parameters (e.g., 's' in State s)
+        let mut params = Vec::new();
+        while self.is_type_atom_start() && self.peek() != &Token::Comma && self.peek() != &Token::Pipe && self.peek() != &Token::RBrace {
+            params.push(self.parse_type_atom()?);
+        }
+
+        let span = if params.is_empty() {
+            start
+        } else {
+            start.merge(&params.last().unwrap().span)
+        };
+
+        Ok(EffectExpr { name, params, span })
     }
 
     fn parse_type_app(&mut self) -> ParseResult<TypeExpr> {

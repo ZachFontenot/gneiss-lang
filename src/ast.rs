@@ -506,15 +506,12 @@ pub enum TypeExprKind {
         args: Vec<TypeExpr>,
     },
 
-    // Function type: a -> b
-    // With optional answer types: a/α -> b/β
+    // Function type: a -> b { effects }
     Arrow {
         from: Rc<TypeExpr>,
         to: Rc<TypeExpr>,
-        /// Optional answer type before (for `from/ans_in -> to/ans_out`)
-        ans_in: Option<Rc<TypeExpr>>,
-        /// Optional answer type after
-        ans_out: Option<Rc<TypeExpr>>,
+        /// Optional effect row: { IO, State s | r }
+        effects: Option<EffectRowExpr>,
     },
 
     // Tuple type: (a, b, c)
@@ -525,6 +522,30 @@ pub enum TypeExprKind {
 
     // List type: [a]
     List(Rc<TypeExpr>),
+}
+
+// ============================================================================
+// Effect Rows (surface syntax for effect annotations)
+// ============================================================================
+
+/// An effect row expression: { IO, State s | r }
+#[derive(Debug, Clone)]
+pub struct EffectRowExpr {
+    /// Concrete effects in the row: IO, State s, etc.
+    pub effects: Vec<EffectExpr>,
+    /// Optional row variable for polymorphism: the 'r' in { IO | r }
+    pub rest: Option<Ident>,
+    pub span: Span,
+}
+
+/// A single effect: IO, State s, Reader Config, etc.
+#[derive(Debug, Clone)]
+pub struct EffectExpr {
+    /// Effect name (e.g., "IO", "State", "Reader")
+    pub name: Ident,
+    /// Effect type parameters (e.g., 's' in State s)
+    pub params: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 // ============================================================================

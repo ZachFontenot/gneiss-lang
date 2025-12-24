@@ -2407,14 +2407,22 @@ impl Inferencer {
                     Self::collect_type_vars(arg, vars);
                 }
             }
-            TypeExprKind::Arrow { from, to, ans_in, ans_out } => {
+            TypeExprKind::Arrow { from, to, effects } => {
                 Self::collect_type_vars(from, vars);
                 Self::collect_type_vars(to, vars);
-                if let Some(ai) = ans_in {
-                    Self::collect_type_vars(ai, vars);
-                }
-                if let Some(ao) = ans_out {
-                    Self::collect_type_vars(ao, vars);
+                // Collect type vars from effect parameters
+                if let Some(eff_row) = effects {
+                    for eff in &eff_row.effects {
+                        for param in &eff.params {
+                            Self::collect_type_vars(param, vars);
+                        }
+                    }
+                    // Row variable is also a type var
+                    if let Some(ref rest) = eff_row.rest {
+                        if !vars.contains(rest) {
+                            vars.push(rest.clone());
+                        }
+                    }
                 }
             }
             TypeExprKind::Tuple(types) => {
@@ -2500,32 +2508,11 @@ impl Inferencer {
                     }),
                 }
             }
-            TypeExprKind::Arrow { from, to, ans_in, ans_out } => {
+            TypeExprKind::Arrow { from, to, effects } => {
                 let from_ty = self.type_expr_to_type_with_fresh_vars(from, var_names, fresh_vars)?;
                 let to_ty = self.type_expr_to_type_with_fresh_vars(to, var_names, fresh_vars)?;
-                match (ans_in, ans_out) {
-                    (Some(ai), Some(ao)) => {
-                        let ans_in_ty = self.type_expr_to_type_with_fresh_vars(ai, var_names, fresh_vars)?;
-                        let ans_out_ty = self.type_expr_to_type_with_fresh_vars(ao, var_names, fresh_vars)?;
-                        Ok(Type::effectful_arrow(from_ty, to_ty, ans_in_ty, ans_out_ty))
-                    }
-                    (Some(ai), None) => {
-                        // Only ans_in specified - use same for both (pure with explicit annotation)
-                        let ans_ty = self.type_expr_to_type_with_fresh_vars(ai, var_names, fresh_vars)?;
-                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
-                    }
-                    (None, Some(ao)) => {
-                        // Only ans_out specified - use same for both (pure with explicit annotation)
-                        let ans_ty = self.type_expr_to_type_with_fresh_vars(ao, var_names, fresh_vars)?;
-                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
-                    }
-                    (None, None) => {
-                        // No explicit answer types - use fresh vars at current level
-                        // so they get properly generalized in val declarations
-                        let ans = self.fresh_var();
-                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans))
-                    }
-                }
+                let eff_row = self.effect_row_expr_to_row(effects.as_ref(), var_names, fresh_vars)?;
+                Ok(Type::arrow_with_effects(from_ty, to_ty, eff_row))
             }
             TypeExprKind::Tuple(types) => {
                 let tys: Result<Vec<_>, _> = types
@@ -2546,6 +2533,121 @@ impl Inferencer {
             TypeExprKind::List(inner) => {
                 let elem_ty = self.type_expr_to_type_with_fresh_vars(inner, var_names, fresh_vars)?;
                 Ok(Type::list(elem_ty))
+            }
+        }
+    }
+
+    /// Convert an EffectRowExpr to a Row type, using fresh type variables
+    fn effect_row_expr_to_row(
+        &mut self,
+        expr: Option<&EffectRowExpr>,
+        var_names: &[String],
+        fresh_vars: &[Type],
+    ) -> Result<Row, TypeError> {
+        match expr {
+            None => {
+                // No effect annotation - use empty row (pure)
+                Ok(Row::Empty)
+            }
+            Some(eff_row) => {
+                // Build row from effects
+                let mut row = if let Some(ref rest) = eff_row.rest {
+                    // Has a row variable - look it up or create fresh
+                    if let Some(idx) = var_names.iter().position(|n| n == rest) {
+                        // Convert the type var to a row var
+                        if let Type::Var(var) = &fresh_vars[idx] {
+                            Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Unbound {
+                                id: match &*var.borrow() {
+                                    TypeVar::Unbound { id, .. } => *id,
+                                    TypeVar::Generic(id) => *id,
+                                    _ => self.next_var,
+                                },
+                                level: self.level,
+                            })))
+                        } else {
+                            Row::Empty
+                        }
+                    } else {
+                        // Not in fresh_vars, create new row var
+                        let id = self.next_var;
+                        self.next_var += 1;
+                        Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Unbound {
+                            id,
+                            level: self.level,
+                        })))
+                    }
+                } else {
+                    Row::Empty
+                };
+
+                // Add effects in reverse order (so first effect is outermost)
+                for eff in eff_row.effects.iter().rev() {
+                    let params: Result<Vec<_>, _> = eff
+                        .params
+                        .iter()
+                        .map(|p| self.type_expr_to_type_with_fresh_vars(p, var_names, fresh_vars))
+                        .collect();
+                    row = Row::Extend {
+                        effect: Effect {
+                            name: eff.name.clone(),
+                            params: params?,
+                        },
+                        rest: Rc::new(row),
+                    };
+                }
+
+                Ok(row)
+            }
+        }
+    }
+
+    /// Convert an EffectRowExpr to a Row type, using param_map for generic vars
+    fn effect_row_expr_to_row_with_param_map(
+        &mut self,
+        expr: Option<&EffectRowExpr>,
+        param_map: &HashMap<String, TypeVarId>,
+    ) -> Result<Row, TypeError> {
+        match expr {
+            None => {
+                // No effect annotation - use empty row (pure)
+                Ok(Row::Empty)
+            }
+            Some(eff_row) => {
+                // Build row from effects
+                let mut row = if let Some(ref rest) = eff_row.rest {
+                    // Has a row variable - look it up
+                    if let Some(&id) = param_map.get(rest) {
+                        Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Generic(id))))
+                    } else {
+                        // Not in param_map, create fresh row var
+                        let id = self.next_var;
+                        self.next_var += 1;
+                        Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Unbound {
+                            id,
+                            level: self.level,
+                        })))
+                    }
+                } else {
+                    Row::Empty
+                };
+
+                // Add effects in reverse order (so first effect is outermost)
+                for eff in eff_row.effects.iter().rev() {
+                    let params: Result<Vec<_>, _> = eff
+                        .params
+                        .iter()
+                        .map(|p| self.type_expr_to_type(p, param_map))
+                        .collect();
+                    row = Row::Extend {
+                        effect: Effect {
+                            name: eff.name.clone(),
+                            params: params?,
+                        },
+                        rest: Rc::new(row),
+                    };
+                }
+
+                Ok(row)
             }
         }
     }
@@ -2618,29 +2720,11 @@ impl Inferencer {
                     }),
                 }
             }
-            TypeExprKind::Arrow { from, to, ans_in, ans_out } => {
+            TypeExprKind::Arrow { from, to, effects } => {
                 let from_ty = self.type_expr_to_type(from, param_map)?;
                 let to_ty = self.type_expr_to_type(to, param_map)?;
-                match (ans_in, ans_out) {
-                    (Some(ai), Some(ao)) => {
-                        let ans_in_ty = self.type_expr_to_type(ai, param_map)?;
-                        let ans_out_ty = self.type_expr_to_type(ao, param_map)?;
-                        Ok(Type::effectful_arrow(from_ty, to_ty, ans_in_ty, ans_out_ty))
-                    }
-                    (Some(ai), None) => {
-                        let ans_ty = self.type_expr_to_type(ai, param_map)?;
-                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
-                    }
-                    (None, Some(ao)) => {
-                        let ans_ty = self.type_expr_to_type(ao, param_map)?;
-                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
-                    }
-                    (None, None) => {
-                        // For trait method types and instances, use the original placeholder vars.
-                        // These work correctly for trait contexts.
-                        Ok(Type::arrow(from_ty, to_ty))
-                    }
-                }
+                let eff_row = self.effect_row_expr_to_row_with_param_map(effects.as_ref(), param_map)?;
+                Ok(Type::arrow_with_effects(from_ty, to_ty, eff_row))
             }
             TypeExprKind::Tuple(types) => {
                 let tys: Result<Vec<_>, _> = types
