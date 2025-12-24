@@ -117,10 +117,10 @@ let non_empty s = string_length s > 0
 let main () =
     let path = "/Users/zachfontenot/dev/adventofcode/haskell/inputs/2023-1.txt" in
     match file_open path "r" with
-    | Ok handle ->
-        match file_read handle 100000 with
+    | Ok fh ->
+        match file_read fh 100000 with
         | Ok bytes ->
-            let _ = file_close handle in
+            let _ = file_close fh in
             let content = bytes_to_string bytes in
             let lines = filter non_empty (string_split "\n" content) in
             let a = part_a lines in

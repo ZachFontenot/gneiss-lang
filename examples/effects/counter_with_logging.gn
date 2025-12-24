@@ -1,0 +1,66 @@
+-- Counter with Logging: State + Writer Effect Composition
+--
+-- This example demonstrates composing two effects:
+-- - Counter effect: mutable counter operations
+-- - Log effect: logging operations
+--
+-- Shows how multiple effects can be handled by nested handlers.
+
+-- Define our effects
+effect Counter =
+    | inc : () -> ()
+    | dec : () -> ()
+    | get : () -> Int
+end
+
+effect Log =
+    | log : String -> ()
+end
+
+-- Counter operations with logging
+let increment () =
+    perform Log.log "Incrementing counter...";
+    perform Counter.inc ()
+
+let decrement () =
+    perform Log.log "Decrementing counter...";
+    perform Counter.dec ()
+
+let read_counter () =
+    let v = perform Counter.get () in
+    perform Log.log ("Counter value: " ++ int_to_string v);
+    v
+
+-- Example program using both effects
+let counter_program () =
+    increment ();
+    increment ();
+    increment ();
+    let x = read_counter () in
+    decrement ();
+    let y = read_counter () in
+    x + y
+
+-- Main: Demonstrates nested effect handling
+let main () =
+    -- Inner handler: Counter effect (with fixed state = 0)
+    -- Outer handler: Log effect (prints messages)
+    let result =
+        handle (
+            handle (counter_program ()) with
+            | return x -> x
+            | inc () k -> k ()
+            | dec () k -> k ()
+            | get () k -> k 0  -- simplified: always returns 0
+            end
+        ) with
+        | return x -> x
+        | log msg k ->
+            print msg;
+            k ()
+        end
+    in
+
+    print "";
+    print ("Final result: " ++ int_to_string result);
+    0

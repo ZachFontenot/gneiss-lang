@@ -370,11 +370,10 @@ impl Inferencer {
                 let ret_ty = self.type_expr_to_type(to, param_map)?;
 
                 // If arg is a tuple, extract its components as params
-                // Otherwise, single param (or unit for no params)
+                // Otherwise, single param (Unit counts as a single unit argument)
                 let param_types = match arg_ty {
-                    Type::Unit => vec![],
                     Type::Tuple(ts) => ts,
-                    other => vec![other],
+                    other => vec![other],  // Unit is still a param that must be passed
                 };
 
                 Ok((param_types, ret_ty))

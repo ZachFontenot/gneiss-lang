@@ -1,0 +1,150 @@
+-- Parser Combinators: Effect-Based Parsing
+--
+-- This example demonstrates simple parsing using effects.
+-- Shows how effects can provide clean control flow for parsers.
+
+-- Result type for parsing
+type ParseResult a =
+    | ParseOk a String   -- success with remaining input
+    | ParseFail String   -- failure message
+
+-- Parser effect (simplified)
+effect Parser =
+    | peek : () -> String
+    | advance : Int -> ()
+    | get_pos : () -> Int
+end
+
+-- Match a specific string prefix
+let match_string expected input =
+    let len = string_length expected in
+    let actual = string_substring 0 len input in
+    if actual == expected then
+        ParseOk expected (string_substring len (string_length input) input)
+    else
+        ParseFail ("Expected '" ++ expected ++ "'")
+
+-- Match a single character
+let match_char input =
+    if string_length input == 0 then
+        ParseFail "Unexpected end of input"
+    else
+        let c = string_substring 0 1 input in
+        ParseOk c (string_substring 1 (string_length input) input)
+
+-- Combine two parsers sequentially
+let then_parse p1 p2 input =
+    match p1 input with
+    | ParseFail msg -> ParseFail msg
+    | ParseOk v1 rest1 ->
+        match p2 rest1 with
+        | ParseFail msg -> ParseFail msg
+        | ParseOk v2 rest2 -> ParseOk (v1, v2) rest2
+        end
+    end
+
+-- Try first parser, if it fails try second
+let or_parse p1 p2 input =
+    match p1 input with
+    | ParseOk v rest -> ParseOk v rest
+    | ParseFail _ -> p2 input
+    end
+
+-- Parse with effect-based input handling
+let parse_with_effects parser input =
+    let pos_ref = 0 in
+    handle parser () with
+    | return x -> ParseOk x (string_substring pos_ref (string_length input) input)
+    | peek () k -> k (string_substring pos_ref (string_length input) input)
+    | advance n k ->
+        -- Note: simplified - can't update pos_ref
+        k ()
+    | get_pos () k -> k pos_ref
+    end
+
+-- Example: Parse a greeting
+let parse_greeting () =
+    -- Get current input
+    let input = perform Parser.peek () in
+
+    -- Try to match "hello"
+    match match_string "hello" input with
+    | ParseFail msg -> ("failed", msg)
+    | ParseOk word rest ->
+        perform Parser.advance 5;
+        -- Skip space
+        match match_char rest with
+        | ParseFail msg -> (word, "no more")
+        | ParseOk space rest2 ->
+            -- Try to match "world"
+            match match_string "world" rest2 with
+            | ParseFail msg -> (word, "partial")
+            | ParseOk word2 rest3 -> (word, word2)
+            end
+        end
+    end
+
+-- Main: demonstrate parser usage
+let main () =
+    print "=== Parser Combinators Example ===";
+    print "";
+
+    -- Test parsing with effects
+    print "--- Parsing with effects ---";
+
+    let result1 = parse_with_effects parse_greeting "hello world!" in
+    match result1 with
+    | ParseOk (w1, w2) rest ->
+        print ("Parsed: " ++ w1 ++ " " ++ w2)
+    | ParseFail msg ->
+        print ("Failed: " ++ msg)
+    end;
+
+    let result2 = parse_with_effects parse_greeting "goodbye world" in
+    match result2 with
+    | ParseOk (w1, w2) rest ->
+        print ("Parsed: " ++ w1 ++ " " ++ w2)
+    | ParseFail msg ->
+        print ("Failed: " ++ msg)
+    end;
+
+    print "";
+    print "--- Direct combinator parsing ---";
+
+    -- String matching
+    let r1 = match_string "hello" "hello world" in
+    match r1 with
+    | ParseOk matched rest -> print ("Matched: '" ++ matched ++ "', rest: '" ++ rest ++ "'")
+    | ParseFail msg -> print ("Failed: " ++ msg)
+    end;
+
+    -- Failed match
+    let r2 = match_string "goodbye" "hello world" in
+    match r2 with
+    | ParseOk matched rest -> print ("Matched: '" ++ matched ++ "'")
+    | ParseFail msg -> print ("Failed: " ++ msg)
+    end;
+
+    -- Sequential parsing with then_parse
+    let r3 = then_parse
+        (match_string "hello")
+        (fun rest -> match_string " world" rest)
+        "hello world!" in
+    match r3 with
+    | ParseOk (w1, w2) rest ->
+        print ("Sequential: '" ++ w1 ++ "' ++ '" ++ w2 ++ "', rest: '" ++ rest ++ "'")
+    | ParseFail msg ->
+        print ("Failed: " ++ msg)
+    end;
+
+    -- Choice with or_parse
+    let r4 = or_parse
+        (match_string "goodbye")
+        (match_string "hello")
+        "hello there" in
+    match r4 with
+    | ParseOk matched rest -> print ("Choice: '" ++ matched ++ "', rest: '" ++ rest ++ "'")
+    | ParseFail msg -> print ("Failed: " ++ msg)
+    end;
+
+    0

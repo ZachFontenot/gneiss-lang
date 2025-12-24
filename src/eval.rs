@@ -1889,17 +1889,13 @@ impl Interpreter {
                         });
                     } else {
                         // This handler doesn't handle this operation - keep searching
+                        // Preserve the original return_pattern and return_body so when the
+                        // continuation resumes, this handler still works correctly
                         captured.push(Frame::HandleScope {
-                            effect_name: String::new(),
+                            effect_name,
                             handlers,
-                            return_pattern: Pattern {
-                                span: Span { start: 0, end: 0 },
-                                node: PatternKind::Wildcard,
-                            },
-                            return_body: Rc::new(Expr {
-                                span: Span { start: 0, end: 0 },
-                                node: ExprKind::Var("__dummy__".to_string()),
-                            }),
+                            return_pattern,
+                            return_body,
                             env,
                         });
                     }

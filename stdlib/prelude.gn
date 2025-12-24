@@ -18,6 +18,32 @@ type IoError =
     | InvalidInput String
     | IoOther String
 
+-- ============================================================================
+-- Standard Effects
+-- ============================================================================
+
+-- State effect: mutable state threading
+effect State s =
+    | get : () -> s
+    | put : s -> ()
+end
+
+-- Reader effect: read-only environment
+effect Reader r =
+    | ask : () -> r
+end
+
+-- Writer effect: accumulating output
+effect Writer w =
+    | tell : w -> ()
+end
+
+-- Exception effect: recoverable errors
+-- Note: raise returns () but the handler typically doesn't resume
+effect Exn e =
+    | raise : e -> ()
+end
+
 -- Identity combinator
 let id x = x
 
