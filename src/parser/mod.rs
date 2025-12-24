@@ -187,7 +187,7 @@ impl Parser {
                 self.current_span(),
             )),
             Token::Let => self.parse_let_item(),
-            Token::Type | Token::Trait | Token::Impl | Token::Val => {
+            Token::Type | Token::Trait | Token::Impl | Token::Val | Token::Effect => {
                 let decl = self.parse_decl()?;
                 self.match_token(&Token::DoubleSemi);
                 Ok(Item::Decl(decl))
@@ -596,6 +596,7 @@ impl Parser {
             Token::Trait => self.parse_trait_decl(),
             Token::Impl => self.parse_instance_decl(),
             Token::Val => self.parse_val_decl(),
+            Token::Effect => self.parse_effect_decl(),
             _ => Err(self.unexpected_token("declaration")),
         }
     }
@@ -902,6 +903,49 @@ impl Parser {
             traits.push(self.parse_upper_ident()?);
         }
         Ok(traits)
+    }
+
+    /// Parse an effect declaration:
+    /// ```gneiss
+    /// effect State s =
+    /// | get : () -> s
+    /// | put : s -> ()
+    /// end
+    /// ```
+    fn parse_effect_decl(&mut self) -> ParseResult<Decl> {
+        self.consume(Token::Effect)?;
+
+        let name = self.parse_upper_ident()?;
+
+        // Parse zero or more type parameters (lowercase identifiers)
+        let mut params = Vec::new();
+        while let Token::Ident(param_name) = self.peek().clone() {
+            self.advance();
+            params.push(param_name);
+        }
+
+        self.consume(Token::Eq)?;
+
+        // Parse operations: | name : type_sig
+        let mut operations = Vec::new();
+        while self.match_token(&Token::Pipe) {
+            let op_name = self.parse_ident()?;
+            self.consume(Token::Colon)?;
+            let type_sig = self.parse_type_expr()?;
+            operations.push(EffectOperation {
+                name: op_name,
+                type_sig,
+            });
+        }
+
+        self.consume(Token::End)?;
+
+        Ok(Decl::EffectDecl {
+            visibility: Visibility::Private,
+            name,
+            params,
+            operations,
+        })
     }
 
     fn parse_instance_decl(&mut self) -> ParseResult<Decl> {

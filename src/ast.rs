@@ -671,6 +671,14 @@ pub enum Decl {
         constraints: Vec<Constraint>,
     },
 
+    // effect State s = | get : () -> s | put : s -> () end
+    EffectDecl {
+        visibility: Visibility,
+        name: Ident,
+        params: Vec<Ident>,
+        operations: Vec<EffectOperation>,
+    },
+
     // Record type declaration: type Request = { method : String, path : String }
     Record {
         visibility: Visibility,
@@ -713,6 +721,13 @@ pub struct InstanceMethod {
 pub struct Constraint {
     pub type_var: Ident,
     pub trait_name: Ident,
+}
+
+/// An operation in an effect declaration: | get : () -> s
+#[derive(Debug, Clone)]
+pub struct EffectOperation {
+    pub name: Ident,
+    pub type_sig: TypeExpr,
 }
 
 // ============================================================================

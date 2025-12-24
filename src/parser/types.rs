@@ -6,7 +6,7 @@ use crate::ast::{EffectExpr, EffectRowExpr, Spanned, TypeExpr, TypeExprKind};
 use crate::lexer::Token;
 
 use super::cursor::TokenCursor;
-use super::error::{ParseError, ParseResult};
+use super::error::ParseResult;
 
 /// Extension trait for type expression parsing
 pub trait TypeParser {

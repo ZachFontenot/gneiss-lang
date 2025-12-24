@@ -3838,6 +3838,10 @@ impl Inferencer {
                 Item::Decl(Decl::Trait { .. } | Decl::Instance { .. }) => {
                     // Already handled in second/third pass
                 }
+                Item::Decl(Decl::EffectDecl { .. }) => {
+                    // Effect declarations will be registered in a separate pass
+                    // For now, just skip them
+                }
                 Item::Decl(Decl::Val { name, type_sig, constraints }) => {
                     // Register a type signature for the name
                     // The subsequent let declaration will be checked against this

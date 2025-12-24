@@ -1251,6 +1251,11 @@ impl Interpreter {
                 // At runtime, nothing to do (like ADT type declarations)
                 Ok(())
             }
+            Decl::EffectDecl { .. } => {
+                // Effect declarations are handled during type inference
+                // At runtime, nothing to do (handlers are processed separately)
+                Ok(())
+            }
         }
     }
 
@@ -5272,8 +5277,8 @@ let main () =
             r#"
 let main () =
     match file_open "{}" "r" with
-    | Ok handle ->
-        match file_close handle with
+    | Ok fh ->
+        match file_close fh with
         | Ok _ -> () -- success
         | Err e -> print e -- print error
         end
@@ -5298,11 +5303,11 @@ let main () =
             r#"
 let main () =
     match file_open "{}" "w" with
-    | Ok handle ->
+    | Ok fh ->
         let data = string_to_bytes "hello from gneiss" in
-        match file_write handle data with
+        match file_write fh data with
         | Ok _ ->
-            match file_close handle with
+            match file_close fh with
             | Ok _ -> ()
             | Err e -> print e
             end
@@ -5339,14 +5344,14 @@ let main () =
             r#"
 let main () =
     match file_open "{}" "r" with
-    | Ok handle ->
-        match file_read handle 100 with
+    | Ok fh ->
+        match file_read fh 100 with
         | Ok data ->
             let s = bytes_to_string data in
-            let _ = file_close handle in
+            let _ = file_close fh in
             print s
         | Err e ->
-            let _ = file_close handle in
+            let _ = file_close fh in
             print e
         end
     | Err e -> print e

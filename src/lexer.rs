@@ -43,6 +43,11 @@ pub enum Token {
     Where,
     Val,
 
+    // Effect keywords
+    Effect,
+    Handle,
+    Perform,
+
     // Module keywords
     Export,
     Import,
@@ -500,6 +505,10 @@ impl<'a> Lexer<'a> {
             "shift" => Token::Shift,
             // Typeclass keywords
             "trait" => Token::Trait,
+            // Effect keywords
+            "effect" => Token::Effect,
+            "handle" => Token::Handle,
+            "perform" => Token::Perform,
             "impl" => Token::Impl,
             "for" => Token::For,
             "where" => Token::Where,
