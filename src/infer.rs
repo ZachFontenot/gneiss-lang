@@ -21,16 +21,10 @@ fn substitute_generics(ty: &Type, args: &[Type]) -> Type {
             }
             _ => ty.clone(),
         },
-        Type::Arrow {
-            arg,
-            ret,
-            ans_in,
-            ans_out,
-        } => Type::Arrow {
+        Type::Arrow { arg, ret, effects } => Type::Arrow {
             arg: Rc::new(substitute_generics(&arg, args)),
             ret: Rc::new(substitute_generics(&ret, args)),
-            ans_in: Rc::new(substitute_generics(&ans_in, args)),
-            ans_out: Rc::new(substitute_generics(&ans_out, args)),
+            effects: substitute_generics_in_row(&effects, args),
         },
         Type::Tuple(ts) => {
             Type::Tuple(ts.iter().map(|t| substitute_generics(t, args)).collect())
@@ -43,6 +37,25 @@ fn substitute_generics(ty: &Type, args: &[Type]) -> Type {
             args: cargs.iter().map(|t| substitute_generics(t, args)).collect(),
         },
         other => other,
+    }
+}
+
+/// Substitute generic type variables in an effect row
+fn substitute_generics_in_row(row: &Row, args: &[Type]) -> Row {
+    match row.resolve() {
+        Row::Empty => Row::Empty,
+        Row::Var(var) => Row::Var(var), // Row variables don't get substituted by type args
+        Row::Extend { effect, rest } => Row::Extend {
+            effect: Effect {
+                name: effect.name.clone(),
+                params: effect
+                    .params
+                    .iter()
+                    .map(|t| substitute_generics(t, args))
+                    .collect(),
+            },
+            rest: Rc::new(substitute_generics_in_row(&rest, args)),
+        },
     }
 }
 
@@ -479,25 +492,22 @@ impl Inferencer {
                 }
             }
 
-            // Function types (all 4 components must unify)
+            // Function types (arg, ret, and effects must unify)
             (
                 Type::Arrow {
                     arg: a1,
                     ret: r1,
-                    ans_in: ai1,
-                    ans_out: ao1,
+                    effects: e1,
                 },
                 Type::Arrow {
                     arg: a2,
                     ret: r2,
-                    ans_in: ai2,
-                    ans_out: ao2,
+                    effects: e2,
                 },
             ) => {
                 self.unify_inner(a1, a2, span)?;
                 self.unify_inner(r1, r2, span)?;
-                self.unify_inner(ai1, ai2, span)?;
-                self.unify_inner(ao1, ao2, span)?;
+                self.unify_rows(&e1, &e2, span)?;
                 Ok(())
             }
 
@@ -541,6 +551,125 @@ impl Inferencer {
         }
     }
 
+    /// Unify two effect rows
+    fn unify_rows(&mut self, r1: &Row, r2: &Row, span: Option<&Span>) -> Result<(), TypeError> {
+        let r1 = r1.resolve();
+        let r2 = r2.resolve();
+
+        match (&r1, &r2) {
+            // Both empty - succeed
+            (Row::Empty, Row::Empty) => Ok(()),
+
+            // Row variable unifies with anything
+            (Row::Var(var), other) | (other, Row::Var(var)) => {
+                let other_row = other.clone();
+                match &*var.borrow() {
+                    RowVar::Unbound { id, .. } => {
+                        // Occurs check for row variables
+                        if other_row.occurs(*id) {
+                            // For now, just fail - could add a proper error type later
+                            return Err(TypeError::Other(format!(
+                                "Row occurs check failed: row variable would be infinite"
+                            )));
+                        }
+                        // Link the variable
+                        *var.borrow_mut() = RowVar::Link(other_row);
+                        Ok(())
+                    }
+                    RowVar::Generic(_) => {
+                        // Generic row vars shouldn't appear during unification
+                        Err(TypeError::Other(
+                            "Cannot unify generic row variable".to_string(),
+                        ))
+                    }
+                    RowVar::Link(_) => unreachable!("resolve should follow links"),
+                }
+            }
+
+            // Both extend - unify effect params and tails
+            (
+                Row::Extend {
+                    effect: e1,
+                    rest: rest1,
+                },
+                Row::Extend {
+                    effect: e2,
+                    rest: rest2,
+                },
+            ) => {
+                if e1.name == e2.name {
+                    // Same effect - unify parameters
+                    if e1.params.len() != e2.params.len() {
+                        return Err(TypeError::Other(format!(
+                            "Effect {} has mismatched parameter count",
+                            e1.name
+                        )));
+                    }
+                    for (p1, p2) in e1.params.iter().zip(&e2.params) {
+                        self.unify_inner(p1, p2, span)?;
+                    }
+                    self.unify_rows(rest1, rest2, span)
+                } else {
+                    // Different effects - need row rewriting
+                    // Try to find e1 in r2's tail
+                    self.unify_rows_rewrite(&e1, rest1, &r2, span)
+                }
+            }
+
+            // Empty vs Extend - fail (unless we allow effect subtyping)
+            (Row::Empty, Row::Extend { effect, .. })
+            | (Row::Extend { effect, .. }, Row::Empty) => Err(TypeError::Other(format!(
+                "Effect {} is not handled",
+                effect.name
+            ))),
+        }
+    }
+
+    /// Row rewriting: find effect e1 somewhere in r2 and unify the remainders
+    fn unify_rows_rewrite(
+        &mut self,
+        e1: &Effect,
+        rest1: &Row,
+        r2: &Row,
+        span: Option<&Span>,
+    ) -> Result<(), TypeError> {
+        match r2.resolve() {
+            Row::Empty => Err(TypeError::Other(format!(
+                "Effect {} not found in row",
+                e1.name
+            ))),
+            Row::Var(var) => {
+                // Extend r2 with e1 and unify rest1 with new tail
+                let new_tail = Row::new_var(self.next_var, self.level);
+                self.next_var += 1;
+                let extended = Row::Extend {
+                    effect: e1.clone(),
+                    rest: Rc::new(new_tail.clone()),
+                };
+                *var.borrow_mut() = RowVar::Link(extended);
+                self.unify_rows(rest1, &new_tail, span)
+            }
+            Row::Extend { effect: e2, rest: rest2 } => {
+                if e1.name == e2.name {
+                    // Found it - unify parameters and tails
+                    if e1.params.len() != e2.params.len() {
+                        return Err(TypeError::Other(format!(
+                            "Effect {} has mismatched parameter count",
+                            e1.name
+                        )));
+                    }
+                    for (p1, p2) in e1.params.iter().zip(&e2.params) {
+                        self.unify_inner(p1, p2, span)?;
+                    }
+                    self.unify_rows(rest1, &rest2, span)
+                } else {
+                    // Keep looking - e2 stays, we look in rest2
+                    self.unify_rows_rewrite(e1, rest1, &rest2, span)
+                }
+            }
+        }
+    }
+
     /// Update type variable levels for let-polymorphism
     fn update_levels(&self, ty: &Type, level: u32) {
         match ty.resolve() {
@@ -553,16 +682,10 @@ impl Inferencer {
                     *var_level = (*var_level).min(level);
                 }
             }
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => {
+            Type::Arrow { arg, ret, effects } => {
                 self.update_levels(&arg, level);
                 self.update_levels(&ret, level);
-                self.update_levels(&ans_in, level);
-                self.update_levels(&ans_out, level);
+                self.update_levels_in_row(&effects, level);
             }
             Type::Tuple(ts) => {
                 for t in ts {
@@ -577,6 +700,28 @@ impl Inferencer {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Update row variable levels for let-polymorphism
+    fn update_levels_in_row(&self, row: &Row, level: u32) {
+        match row.resolve() {
+            Row::Var(var) => {
+                let mut var = var.borrow_mut();
+                if let RowVar::Unbound {
+                    level: var_level, ..
+                } = &mut *var
+                {
+                    *var_level = (*var_level).min(level);
+                }
+            }
+            Row::Extend { effect, rest } => {
+                for param in &effect.params {
+                    self.update_levels(param, level);
+                }
+                self.update_levels_in_row(&rest, level);
+            }
+            Row::Empty => {}
         }
     }
 
@@ -611,16 +756,10 @@ impl Inferencer {
                 TypeVar::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| resolved.clone()),
                 _ => resolved.clone(),
             },
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => Type::Arrow {
+            Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(self.substitute(arg, subst)),
                 ret: Rc::new(self.substitute(ret, subst)),
-                ans_in: Rc::new(self.substitute(ans_in, subst)),
-                ans_out: Rc::new(self.substitute(ans_out, subst)),
+                effects: self.substitute_in_row(&effects, subst),
             },
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
             Type::Channel(t) => Type::Channel(Rc::new(self.substitute(t, subst))),
@@ -631,6 +770,25 @@ impl Inferencer {
                 args: args.iter().map(|t| self.substitute(t, subst)).collect(),
             },
             _ => resolved.clone(),
+        }
+    }
+
+    /// Substitute generic type variables in an effect row
+    fn substitute_in_row(&self, row: &Row, subst: &HashMap<TypeVarId, Type>) -> Row {
+        match row.resolve() {
+            Row::Empty => Row::Empty,
+            Row::Var(var) => Row::Var(var), // Row variables not affected by type substitution
+            Row::Extend { effect, rest } => Row::Extend {
+                effect: Effect {
+                    name: effect.name.clone(),
+                    params: effect
+                        .params
+                        .iter()
+                        .map(|t| self.substitute(t, subst))
+                        .collect(),
+                },
+                rest: Rc::new(self.substitute_in_row(&rest, subst)),
+            },
         }
     }
 
@@ -673,11 +831,10 @@ impl Inferencer {
                     }
                 }
             }
-            Type::Arrow { arg, ret, ans_in, ans_out } => {
+            Type::Arrow { arg, ret, effects } => {
                 Self::collect_level_zero_vars(&arg, subst, inferencer);
                 Self::collect_level_zero_vars(&ret, subst, inferencer);
-                Self::collect_level_zero_vars(&ans_in, subst, inferencer);
-                Self::collect_level_zero_vars(&ans_out, subst, inferencer);
+                Self::collect_level_zero_vars_in_row(&effects, subst, inferencer);
             }
             Type::Tuple(ts) => {
                 for t in ts.iter() {
@@ -693,6 +850,24 @@ impl Inferencer {
                 Self::collect_level_zero_vars(&t, subst, inferencer);
             }
             _ => {}
+        }
+    }
+
+    /// Collect level-0 type variables in an effect row
+    fn collect_level_zero_vars_in_row(
+        row: &Row,
+        subst: &mut HashMap<TypeVarId, Type>,
+        inferencer: &mut Inferencer,
+    ) {
+        match row.resolve() {
+            Row::Empty => {}
+            Row::Var(_) => {} // Row vars are separate from type vars
+            Row::Extend { effect, rest } => {
+                for param in &effect.params {
+                    Self::collect_level_zero_vars(param, subst, inferencer);
+                }
+                Self::collect_level_zero_vars_in_row(&rest, subst, inferencer);
+            }
         }
     }
 
@@ -719,16 +894,10 @@ impl Inferencer {
                 }
                 _ => false,
             },
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => {
+            Type::Arrow { arg, ret, effects } => {
                 Self::type_mentions_generalized_vars_static(arg, generics, current_level)
                     || Self::type_mentions_generalized_vars_static(ret, generics, current_level)
-                    || Self::type_mentions_generalized_vars_static(ans_in, generics, current_level)
-                    || Self::type_mentions_generalized_vars_static(ans_out, generics, current_level)
+                    || Self::row_mentions_generalized_vars_static(&effects, generics, current_level)
             }
             Type::Tuple(ts) => ts
                 .iter()
@@ -740,6 +909,25 @@ impl Inferencer {
                 .iter()
                 .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level)),
             _ => false,
+        }
+    }
+
+    /// Check if a row mentions any generalized type variables
+    fn row_mentions_generalized_vars_static(
+        row: &Row,
+        generics: &HashMap<TypeVarId, TypeVarId>,
+        current_level: u32,
+    ) -> bool {
+        match row.resolve() {
+            Row::Empty => false,
+            Row::Var(_) => false, // Row vars are separate
+            Row::Extend { effect, rest } => {
+                effect
+                    .params
+                    .iter()
+                    .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level))
+                    || Self::row_mentions_generalized_vars_static(&rest, generics, current_level)
+            }
         }
     }
 
@@ -773,12 +961,7 @@ impl Inferencer {
                 }
                 _ => resolved.clone(),
             },
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => Type::Arrow {
+            Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(Self::apply_generic_subst_to_type_static(
                     arg,
                     generics,
@@ -789,16 +972,7 @@ impl Inferencer {
                     generics,
                     current_level,
                 )),
-                ans_in: Rc::new(Self::apply_generic_subst_to_type_static(
-                    ans_in,
-                    generics,
-                    current_level,
-                )),
-                ans_out: Rc::new(Self::apply_generic_subst_to_type_static(
-                    ans_out,
-                    generics,
-                    current_level,
-                )),
+                effects: Self::apply_generic_subst_to_row_static(&effects, generics, current_level),
             },
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
@@ -831,6 +1005,33 @@ impl Inferencer {
         }
     }
 
+    /// Apply generic substitution to an effect row (static version)
+    fn apply_generic_subst_to_row_static(
+        row: &Row,
+        generics: &HashMap<TypeVarId, TypeVarId>,
+        current_level: u32,
+    ) -> Row {
+        match row.resolve() {
+            Row::Empty => Row::Empty,
+            Row::Var(var) => Row::Var(var), // Row vars not affected by type generics
+            Row::Extend { effect, rest } => Row::Extend {
+                effect: Effect {
+                    name: effect.name.clone(),
+                    params: effect
+                        .params
+                        .iter()
+                        .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level))
+                        .collect(),
+                },
+                rest: Rc::new(Self::apply_generic_subst_to_row_static(
+                    &rest,
+                    generics,
+                    current_level,
+                )),
+            },
+        }
+    }
+
     fn generalize_inner(&self, ty: &Type, generics: &mut HashMap<TypeVarId, TypeVarId>) -> Type {
         let resolved = ty.resolve();
         match &resolved {
@@ -847,16 +1048,10 @@ impl Inferencer {
                 }
                 _ => resolved.clone(),
             },
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => Type::Arrow {
+            Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(self.generalize_inner(arg, generics)),
                 ret: Rc::new(self.generalize_inner(ret, generics)),
-                ans_in: Rc::new(self.generalize_inner(ans_in, generics)),
-                ans_out: Rc::new(self.generalize_inner(ans_out, generics)),
+                effects: self.generalize_inner_row(&effects, generics),
             },
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
@@ -874,6 +1069,25 @@ impl Inferencer {
                     .collect(),
             },
             _ => resolved.clone(),
+        }
+    }
+
+    /// Generalize type variables in an effect row
+    fn generalize_inner_row(&self, row: &Row, generics: &mut HashMap<TypeVarId, TypeVarId>) -> Row {
+        match row.resolve() {
+            Row::Empty => Row::Empty,
+            Row::Var(var) => Row::Var(var), // Row vars generalize separately (not implemented yet)
+            Row::Extend { effect, rest } => Row::Extend {
+                effect: Effect {
+                    name: effect.name.clone(),
+                    params: effect
+                        .params
+                        .iter()
+                        .map(|t| self.generalize_inner(t, generics))
+                        .collect(),
+                },
+                rest: Rc::new(self.generalize_inner_row(&rest, generics)),
+            },
         }
     }
 
@@ -1015,24 +1229,21 @@ impl Inferencer {
                 // Infer body with full answer-type tracking
                 let body_result = self.infer_expr_full(&current_env, body)?;
 
-                // Build the function type that captures the body's answer types
+                // Build the function type
                 // For multi-param lambdas, fold from right: a -> b -> c becomes a -> (b -> c)
-                // The innermost function has the body's answer types
+                // TODO: Track effects properly once effect inference is implemented
                 let mut func_ty = Type::Arrow {
                     arg: Rc::new(param_types.pop().unwrap()),
                     ret: Rc::new(body_result.ty),
-                    ans_in: Rc::new(body_result.answer_before),
-                    ans_out: Rc::new(body_result.answer_after),
+                    effects: Row::Empty, // Pure for now - effect inference will fill this in
                 };
 
                 // Add remaining params as pure intermediate arrows
                 for param_ty in param_types.into_iter().rev() {
-                    let ans_var = self.fresh_var();
                     func_ty = Type::Arrow {
                         arg: Rc::new(param_ty),
                         ret: Rc::new(func_ty),
-                        ans_in: Rc::new(ans_var.clone()),
-                        ans_out: Rc::new(ans_var), // Pure - returning a function doesn't execute effects
+                        effects: Row::Empty, // Pure - returning a function doesn't execute effects
                     };
                 }
 
@@ -1065,12 +1276,12 @@ impl Inferencer {
                 let alpha = self.fresh_var(); // α: function's latent ans_in
                 let beta = self.fresh_var(); // β: function's latent ans_out
 
-                // Function must have type (σ/α → τ/β)
+                // Function must have type σ → τ { effects }
+                // TODO: Track effects properly once effect inference is implemented
                 let expected_fun = Type::Arrow {
                     arg: Rc::new(param_ty.clone()),
                     ret: Rc::new(ret_ty.clone()),
-                    ans_in: Rc::new(alpha.clone()),
-                    ans_out: Rc::new(beta.clone()),
+                    effects: Row::Empty, // Pure for now
                 };
                 self.unify_at(&fun_result.ty, &expected_fun, &func.span)?;
 
@@ -1247,20 +1458,18 @@ impl Inferencer {
                         body_result.ty.clone()
                     } else {
                         // Build arrow type from right to left
+                        // TODO: Track effects properly once effect inference is implemented
                         let mut func_ty = Type::Arrow {
                             arg: Rc::new(param_types.pop().unwrap()),
                             ret: Rc::new(body_result.ty.clone()),
-                            ans_in: Rc::new(body_result.answer_before.clone()),
-                            ans_out: Rc::new(body_result.answer_after.clone()),
+                            effects: Row::Empty, // Pure for now
                         };
 
                         while let Some(param_ty) = param_types.pop() {
-                            let pure_ans = self.fresh_var();
                             func_ty = Type::Arrow {
                                 arg: Rc::new(param_ty),
                                 ret: Rc::new(func_ty),
-                                ans_in: Rc::new(pure_ans.clone()),
-                                ans_out: Rc::new(pure_ans),
+                                effects: Row::Empty, // Pure
                             };
                         }
                         func_ty
@@ -1463,12 +1672,10 @@ impl Inferencer {
                         let mut ty = result_ty;
                         for field_ty in info.field_types.iter().rev() {
                             let param_ty = self.substitute(field_ty, &subst);
-                            let ans_var = self.fresh_var();
                             ty = Type::Arrow {
                                 arg: Rc::new(param_ty),
                                 ret: Rc::new(ty),
-                                ans_in: Rc::new(ans_var.clone()),
-                                ans_out: Rc::new(ans_var),
+                                effects: Row::Empty, // Pure
                             };
                         }
                         return Ok(InferResult::pure(ty, ans));
@@ -1771,13 +1978,13 @@ impl Inferencer {
                 // α = the captured answer type (what the context expected)
                 let alpha = self.fresh_var();
 
-                // k : ∀t.(τ/t → α/t) - truly polymorphic in answer type
-                // Each use of k gets fresh answer type variables via instantiation
+                // k : ∀r.(τ → α { r }) - polymorphic in effect row
+                // Each use of k gets fresh effect row via instantiation
+                // TODO: Once row polymorphism is fully implemented, this should use a generic row var
                 let k_type = Type::Arrow {
                     arg: Rc::new(tau.clone()),
                     ret: Rc::new(alpha.clone()),
-                    ans_in: Rc::new(Type::new_generic(0)), // Generic 't'
-                    ans_out: Rc::new(Type::new_generic(0)), // Same 't' (pure)
+                    effects: Row::Empty, // Pure for now
                 };
                 let k_scheme = Scheme {
                     num_generics: 1,
@@ -2313,8 +2520,10 @@ impl Inferencer {
                         Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
                     }
                     (None, None) => {
-                        // No explicit answer types - use default (pure)
-                        Ok(Type::arrow(from_ty, to_ty))
+                        // No explicit answer types - use fresh vars at current level
+                        // so they get properly generalized in val declarations
+                        let ans = self.fresh_var();
+                        Ok(Type::arrow_with_ans(from_ty, to_ty, ans))
                     }
                 }
             }
@@ -2427,6 +2636,8 @@ impl Inferencer {
                         Ok(Type::arrow_with_ans(from_ty, to_ty, ans_ty))
                     }
                     (None, None) => {
+                        // For trait method types and instances, use the original placeholder vars.
+                        // These work correctly for trait contexts.
                         Ok(Type::arrow(from_ty, to_ty))
                     }
                 }
@@ -2669,8 +2880,7 @@ impl Inferencer {
             ty: Type::Arrow {
                 arg: Rc::new(Type::new_generic(0)), // Generic arg type
                 ret: Rc::new(Type::Unit),
-                ans_in: Rc::new(Type::new_generic(1)), // Generic answer type
-                ans_out: Rc::new(Type::new_generic(1)), // Same (pure)
+                effects: Row::Empty, // Pure for now - TODO: should have IO effect
             },
         };
         env.insert("print".into(), print_scheme);
@@ -2998,82 +3208,75 @@ impl Inferencer {
         // spawn : forall a. (() -> a) -> Pid (backwards compatibility)
         // Note: This is the old spawn syntax, returns Pid not Fiber
         let spawn_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1, // Only need generic for return type now
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Unit),
                     ret: Rc::new(Type::new_generic(0)),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
                 ret: Rc::new(Type::Pid),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty, // TODO: should have Async effect
             },
         };
         env.insert("spawn".into(), spawn_scheme);
 
-        // Fiber.spawn : forall a t. (() -> a) -> Fiber a
+        // Fiber.spawn : forall a. (() -> a) -> Fiber a
         let fiber_spawn_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Unit),
                     ret: Rc::new(Type::new_generic(0)),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
                 ret: Rc::new(Type::Fiber(Rc::new(Type::new_generic(0)))),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty, // TODO: should have Async effect
             },
         };
         env.insert("Fiber.spawn".into(), fiber_spawn_scheme);
 
-        // Fiber.join : forall a t. Fiber a -> a
+        // Fiber.join : forall a. Fiber a -> a
         let fiber_join_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Fiber(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::new_generic(0)),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty, // TODO: should have Async effect
             },
         };
         env.insert("Fiber.join".into(), fiber_join_scheme);
 
-        // Fiber.yield : forall t. () -> ()
+        // Fiber.yield : () -> ()
         let fiber_yield_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Unit),
                 ret: Rc::new(Type::Unit),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty, // TODO: should have Async effect
             },
         };
         env.insert("Fiber.yield".into(), fiber_yield_scheme);
 
-        // Dict.new : forall a t. () -> Dict a
+        // Dict.new : forall a. () -> Dict a
         let dict_new_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Unit),
                 ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.new".into(), dict_new_scheme);
 
-        // Dict.insert : forall a t. String -> a -> Dict a -> Dict a
+        // Dict.insert : forall a. String -> a -> Dict a -> Dict a
         let dict_insert_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
@@ -3082,21 +3285,18 @@ impl Inferencer {
                     ret: Rc::new(Type::Arrow {
                         arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                         ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
-                        ans_in: Rc::new(Type::new_generic(1)),
-                        ans_out: Rc::new(Type::new_generic(1)),
+                        effects: Row::Empty,
                     }),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.insert".into(), dict_insert_scheme);
 
-        // Dict.get : forall a t. String -> Dict a -> Option a
+        // Dict.get : forall a. String -> Dict a -> Option a
         let dict_get_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
@@ -3106,106 +3306,96 @@ impl Inferencer {
                         name: "Option".into(),
                         args: vec![Type::new_generic(0)],
                     }),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.get".into(), dict_get_scheme);
 
-        // Dict.remove : forall a t. String -> Dict a -> Dict a
+        // Dict.remove : forall a. String -> Dict a -> Dict a
         let dict_remove_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                     ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.remove".into(), dict_remove_scheme);
 
-        // Dict.contains : forall a t. String -> Dict a -> Bool
+        // Dict.contains : forall a. String -> Dict a -> Bool
         let dict_contains_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                     ret: Rc::new(Type::Bool),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.contains".into(), dict_contains_scheme);
 
-        // Dict.keys : forall a t. Dict a -> [String]
+        // Dict.keys : forall a. Dict a -> [String]
         let dict_keys_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::list(Type::String)),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.keys".into(), dict_keys_scheme);
 
-        // Dict.values : forall a t. Dict a -> [a]
+        // Dict.values : forall a. Dict a -> [a]
         let dict_values_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::list(Type::new_generic(0))),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.values".into(), dict_values_scheme);
 
-        // Dict.size : forall a t. Dict a -> Int
+        // Dict.size : forall a. Dict a -> Int
         let dict_size_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::Int),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.size".into(), dict_size_scheme);
 
-        // Dict.isEmpty : forall a t. Dict a -> Bool
+        // Dict.isEmpty : forall a. Dict a -> Bool
         let dict_is_empty_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::Bool),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.isEmpty".into(), dict_is_empty_scheme);
 
-        // Dict.toList : forall a t. Dict a -> [(String, a)]
+        // Dict.toList : forall a. Dict a -> [(String, a)]
         let dict_to_list_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
@@ -3213,15 +3403,14 @@ impl Inferencer {
                     Type::String,
                     Type::new_generic(0),
                 ]))),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.toList".into(), dict_to_list_scheme);
 
-        // Dict.fromList : forall a t. [(String, a)] -> Dict a
+        // Dict.fromList : forall a. [(String, a)] -> Dict a
         let dict_from_list_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::list(Type::Tuple(vec![
@@ -3229,33 +3418,30 @@ impl Inferencer {
                     Type::new_generic(0),
                 ]))),
                 ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.fromList".into(), dict_from_list_scheme);
 
-        // Dict.merge : forall a t. Dict a -> Dict a -> Dict a
+        // Dict.merge : forall a. Dict a -> Dict a -> Dict a
         let dict_merge_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                     ret: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.merge".into(), dict_merge_scheme);
 
-        // Dict.getOrDefault : forall a t. a -> String -> Dict a -> a
+        // Dict.getOrDefault : forall a. a -> String -> Dict a -> a
         let dict_get_or_default_scheme = Scheme {
-            num_generics: 2,
+            num_generics: 1,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::new_generic(0)),
@@ -3264,14 +3450,11 @@ impl Inferencer {
                     ret: Rc::new(Type::Arrow {
                         arg: Rc::new(Type::Dict(Rc::new(Type::new_generic(0)))),
                         ret: Rc::new(Type::new_generic(0)),
-                        ans_in: Rc::new(Type::new_generic(1)),
-                        ans_out: Rc::new(Type::new_generic(1)),
+                        effects: Row::Empty,
                     }),
-                    ans_in: Rc::new(Type::new_generic(1)),
-                    ans_out: Rc::new(Type::new_generic(1)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(1)),
-                ans_out: Rc::new(Type::new_generic(1)),
+                effects: Row::Empty,
             },
         };
         env.insert("Dict.getOrDefault".into(), dict_get_or_default_scheme);
@@ -3288,144 +3471,130 @@ impl Inferencer {
             Scheme::mono(Type::arrow(Type::String, Type::String)),
         );
 
-        // Set.new : forall t. () -> Set
+        // Set.new : () -> Set
         let set_new_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Unit),
                 ret: Rc::new(Type::Set),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.new".into(), set_new_scheme);
 
-        // Set.insert : forall t. String -> Set -> Set
+        // Set.insert : String -> Set -> Set
         let set_insert_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Set),
                     ret: Rc::new(Type::Set),
-                    ans_in: Rc::new(Type::new_generic(0)),
-                    ans_out: Rc::new(Type::new_generic(0)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.insert".into(), set_insert_scheme);
 
-        // Set.contains : forall t. String -> Set -> Bool
+        // Set.contains : String -> Set -> Bool
         let set_contains_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Set),
                     ret: Rc::new(Type::Bool),
-                    ans_in: Rc::new(Type::new_generic(0)),
-                    ans_out: Rc::new(Type::new_generic(0)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.contains".into(), set_contains_scheme);
 
-        // Set.remove : forall t. String -> Set -> Set
+        // Set.remove : String -> Set -> Set
         let set_remove_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::String),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Set),
                     ret: Rc::new(Type::Set),
-                    ans_in: Rc::new(Type::new_generic(0)),
-                    ans_out: Rc::new(Type::new_generic(0)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.remove".into(), set_remove_scheme);
 
         // Set.union : forall t. Set -> Set -> Set
         let set_union_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Set),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Set),
                     ret: Rc::new(Type::Set),
-                    ans_in: Rc::new(Type::new_generic(0)),
-                    ans_out: Rc::new(Type::new_generic(0)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.union".into(), set_union_scheme);
 
-        // Set.intersect : forall t. Set -> Set -> Set
+        // Set.intersect : Set -> Set -> Set
         let set_intersect_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Set),
                 ret: Rc::new(Type::Arrow {
                     arg: Rc::new(Type::Set),
                     ret: Rc::new(Type::Set),
-                    ans_in: Rc::new(Type::new_generic(0)),
-                    ans_out: Rc::new(Type::new_generic(0)),
+                    effects: Row::Empty,
                 }),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.intersect".into(), set_intersect_scheme);
 
-        // Set.size : forall t. Set -> Int
+        // Set.size : Set -> Int
         let set_size_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Set),
                 ret: Rc::new(Type::Int),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.size".into(), set_size_scheme);
 
-        // Set.toList : forall t. Set -> [String]
+        // Set.toList : Set -> [String]
         let set_tolist_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Set),
                 ret: Rc::new(Type::list(Type::String)),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
             },
         };
         env.insert("Set.toList".into(), set_tolist_scheme);
 
-        // get_args : forall t. () -> [String]
+        // get_args : () -> [String]
         let get_args_scheme = Scheme {
-            num_generics: 1,
+            num_generics: 0,
             predicates: vec![],
             ty: Type::Arrow {
                 arg: Rc::new(Type::Unit),
                 ret: Rc::new(Type::list(Type::String)),
-                ans_in: Rc::new(Type::new_generic(0)),
-                ans_out: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty, // TODO: should have IO effect
             },
         };
         env.insert("get_args".into(), get_args_scheme);
@@ -3534,23 +3703,19 @@ impl Inferencer {
                         let func_ty = if param_types.is_empty() {
                             body_result.ty
                         } else {
-                            // Build function type that captures body's answer types
-                            // For multi-param functions: a -> b -> c becomes a/α₁ -> (b/α₂ -> c/α/β)
-                            // The innermost arrow captures the body's actual answer types
+                            // Build function type
+                            // TODO: Track effects properly once effect inference is implemented
                             let mut result = Type::Arrow {
                                 arg: Rc::new(param_types.pop().unwrap()),
                                 ret: Rc::new(body_result.ty),
-                                ans_in: Rc::new(body_result.answer_before),
-                                ans_out: Rc::new(body_result.answer_after),
+                                effects: Row::Empty, // Pure for now
                             };
                             // Wrap remaining params as pure arrows (returning a closure is pure)
                             for param_ty in param_types.into_iter().rev() {
-                                let ans = self.fresh_var();
                                 result = Type::Arrow {
                                     arg: Rc::new(param_ty),
                                     ret: Rc::new(result),
-                                    ans_in: Rc::new(ans.clone()),
-                                    ans_out: Rc::new(ans),
+                                    effects: Row::Empty, // Pure
                                 };
                             }
                             result
@@ -3653,16 +3818,13 @@ impl Inferencer {
                             let mut result = Type::Arrow {
                                 arg: Rc::new(param_types.pop().unwrap()),
                                 ret: Rc::new(body_result.ty),
-                                ans_in: Rc::new(body_result.answer_before),
-                                ans_out: Rc::new(body_result.answer_after),
+                                effects: Row::Empty, // Pure for now
                             };
                             for param_ty in param_types.into_iter().rev() {
-                                let ans = self.fresh_var();
                                 result = Type::Arrow {
                                     arg: Rc::new(param_ty),
                                     ret: Rc::new(result),
-                                    ans_in: Rc::new(ans.clone()),
-                                    ans_out: Rc::new(ans),
+                                    effects: Row::Empty, // Pure
                                 };
                             }
                             result
@@ -3759,16 +3921,13 @@ impl Inferencer {
                                 let mut result = Type::Arrow {
                                     arg: Rc::new(param_types.pop().unwrap()),
                                     ret: Rc::new(body_result.ty),
-                                    ans_in: Rc::new(body_result.answer_before),
-                                    ans_out: Rc::new(body_result.answer_after),
+                                    effects: Row::Empty, // Pure for now
                                 };
                                 for param_ty in param_types.into_iter().rev() {
-                                    let ans = self.fresh_var();
                                     result = Type::Arrow {
                                         arg: Rc::new(param_ty),
                                         ret: Rc::new(result),
-                                        ans_in: Rc::new(ans.clone()),
-                                        ans_out: Rc::new(ans),
+                                        effects: Row::Empty, // Pure
                                     };
                                 }
                                 result

@@ -69,6 +69,7 @@ let any_char () =
         set_input rest;
         c
     )
+    end
 
 -- Parse a specific character
 let char expected =
@@ -88,6 +89,7 @@ let eof () =
     match input with
     | [] -> ()
     | _ -> parse_fail "expected end of input"
+    end
 
 -- =============================================================================
 -- Part 3: Combinators
@@ -101,6 +103,7 @@ let (<|>) p1 p2 =
             match run_parser p1 input with
             | Parsed v rest -> k v rest
             | ParseFail _ -> run_parser p2 input
+            end
     )
 
 -- Sequence: run p1 then p2, return pair
@@ -115,8 +118,8 @@ let (<<) p1 p2 =
     let _ = p2 () in
     a
 
--- Map a function over parse result
-let map f p =
+-- Map a function over parse result (renamed to avoid shadowing prelude's map)
+let parser_map f p =
     let x = p () in
     f x
 
@@ -128,6 +131,7 @@ let list_reverse xs =
     match ys with
     | [] -> acc
     | y :: rest -> go (y :: acc) rest
+    end
   in
   go [] xs
   
@@ -139,6 +143,7 @@ let many p =
                 match run_parser p input with
                 | Parsed v rest -> loop (v :: acc) rest
                 | ParseFail _ -> k (list_reverse acc) input
+                end
             in
             fun input -> loop [] input
         )
@@ -169,15 +174,18 @@ let sep_by p sep =
             let rec loop first acc input =
                 if first then
                     match run_parser p input with
-                    | Parsed v rest -> loop false (v :: acc) rest  
+                    | Parsed v rest -> loop false (v :: acc) rest
                     | ParseFail _ -> k (list_reverse acc) input
+                    end
                 else
                     match run_parser sep input with
                     | Parsed _ rest2 ->
                         (match run_parser p rest2 with
                         | Parsed v rest3 -> loop false (v :: acc) rest3
-                        | ParseFail _ -> k (list_reverse acc) input)
+                        | ParseFail _ -> k (list_reverse acc) input
+                        end)
                     | ParseFail _ -> k (list_reverse acc) input
+                    end
             in
             fun input -> loop true [] input
         )
@@ -204,6 +212,7 @@ let chars_to_int cs =
         match digits with
         | [] -> acc
         | d :: rest -> go (acc * 10 + (char_to_int d - char_to_int '0')) rest
+        end
     in
     go 0 cs
 
@@ -293,6 +302,7 @@ let rec eval_expr e =
     | Sub a b -> eval_expr a - eval_expr b
     | Mul a b -> eval_expr a * eval_expr b
     | Div a b -> eval_expr a / eval_expr b
+    end
 
 -- =============================================================================
 -- Part 6: JSON Parser Example
@@ -364,14 +374,15 @@ and json_object () =
     let _ = char '}' in
     JObject pairs
 
--- Helper: convert list of digit chars to int
-let chars_to_int cs =
-    let rec go acc digits =
-        match digits with
-        | [] -> acc
-        | d :: rest -> go (acc * 10 + (char_to_int d - char_to_int '0')) rest
-    in
-    go 0 cs
+-- Helper: convert list of digit chars to int (duplicate, already defined above)
+-- let chars_to_int cs =
+--     let rec go acc digits =
+--         match digits with
+--         | [] -> acc
+--         | d :: rest -> go (acc * 10 + (char_to_int d - char_to_int '0')) rest
+--         end
+--     in
+--     go 0 cs
 
 let main () =
     print "=== Expression Parser ===";
@@ -380,8 +391,9 @@ let main () =
     | Parsed e _ ->
         print (eval_expr e)  -- 14
     | ParseFail msg ->
-        print ("Parse error: " ++ msg);
-    
+        print ("Parse error: " ++ msg)
+    end;
+
     print "";
     print "=== JSON Parser ===";
     let json_input = string_to_chars "{\"name\": \"test\", \"value\": 42}" in
@@ -389,3 +401,4 @@ let main () =
     match json_result with
     | Parsed j _ -> print "JSON parsed successfully"
     | ParseFail msg -> print ("JSON parse error: " ++ msg)
+    end

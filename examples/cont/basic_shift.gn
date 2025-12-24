@@ -17,12 +17,13 @@ let run_parser parser input =
     k input
 
 let (<|>) p1 p2 =
-  fun () -> 
+  fun () ->
       shift (fun k ->
         fun input ->
             match run_parser p1 input with
             | Parsed v rest -> k v rest
             | ParseFail _ -> run_parser p2 input
+            end
     )
 
 

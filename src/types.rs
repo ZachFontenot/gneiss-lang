@@ -28,14 +28,13 @@ pub enum Type {
     TcpSocket,
     TcpListener,
 
-    /// Function type with answer-type modification: σ/α → τ/β
-    /// "Function from σ to τ that changes answer type from α to β"
-    /// For pure functions, ans_in == ans_out (same type variable)
+    /// Function type with effect row: σ -> τ { effects }
+    /// For pure functions, effects is Row::Empty
+    /// For effectful functions, effects contains the required effects
     Arrow {
-        arg: Rc<Type>,     // σ: argument type
-        ret: Rc<Type>,     // τ: return type
-        ans_in: Rc<Type>,  // α: answer type before application
-        ans_out: Rc<Type>, // β: answer type after application
+        arg: Rc<Type>,    // σ: argument type
+        ret: Rc<Type>,    // τ: return type
+        effects: Row,     // effect row (empty for pure, non-empty for effectful)
     },
 
     /// Tuple type: (a, b, c)
@@ -73,6 +72,262 @@ pub enum TypeVar {
     Link(Type),
     /// Generic type variable (for polymorphic types)
     Generic(TypeVarId),
+}
+
+// ============================================================================
+// Effect Row Types (for Koka-style Algebraic Effects)
+// ============================================================================
+
+/// An effect row representing a set of effects with optional extension variable.
+/// Syntax: `{ eff1, eff2 s | r }` where r is the row extension variable.
+#[derive(Debug, Clone)]
+pub enum Row {
+    /// Empty row - pure, no effects
+    Empty,
+    /// Effect present with tail: { eff | rest }
+    Extend {
+        effect: Effect,
+        rest: Rc<Row>,
+    },
+    /// Row variable for polymorphism
+    Var(Rc<RefCell<RowVar>>),
+}
+
+/// A row variable that may or may not be bound
+#[derive(Debug, Clone)]
+pub enum RowVar {
+    /// Unbound row variable with ID and level
+    Unbound { id: TypeVarId, level: u32 },
+    /// Bound to another row
+    Link(Row),
+    /// Generic row variable (for polymorphic effect rows)
+    Generic(TypeVarId),
+}
+
+/// A named effect with optional type parameters
+/// e.g., State s, Reader r, IO
+#[derive(Debug, Clone)]
+pub struct Effect {
+    /// Effect name (e.g., "State", "IO", "Reader")
+    pub name: String,
+    /// Type parameters for the effect (e.g., [s] for State s)
+    pub params: Vec<Type>,
+}
+
+impl PartialEq for Effect {
+    fn eq(&self, other: &Self) -> bool {
+        // For effect comparison, we only compare names
+        // Type parameters are handled during unification
+        self.name == other.name
+    }
+}
+
+impl Eq for Effect {}
+
+/// Information about an effect operation
+#[derive(Debug, Clone)]
+pub struct OperationInfo {
+    /// Operation name (e.g., "get", "put", "ask")
+    pub name: String,
+    /// Parameter types (may contain Generic vars for effect type params)
+    pub param_types: Vec<Type>,
+    /// Return type
+    pub result_type: Type,
+}
+
+/// Information about a declared effect
+#[derive(Debug, Clone)]
+pub struct EffectInfo {
+    /// Effect name
+    pub name: String,
+    /// Type parameter names (e.g., ["s"] for State s)
+    pub type_params: Vec<String>,
+    /// Operations provided by this effect
+    pub operations: Vec<OperationInfo>,
+}
+
+/// Environment storing effect declarations
+#[derive(Debug, Clone, Default)]
+pub struct EffectEnv {
+    /// Effect declarations: effect_name -> EffectInfo
+    pub effects: HashMap<String, EffectInfo>,
+    /// Operation lookup: operation_name -> (effect_name, OperationInfo)
+    pub operations: HashMap<String, (String, OperationInfo)>,
+}
+
+impl Row {
+    /// Create a new unbound row variable
+    pub fn new_var(id: TypeVarId, level: u32) -> Row {
+        Row::Var(Rc::new(RefCell::new(RowVar::Unbound { id, level })))
+    }
+
+    /// Create a new generic row variable
+    pub fn new_generic(id: TypeVarId) -> Row {
+        Row::Var(Rc::new(RefCell::new(RowVar::Generic(id))))
+    }
+
+    /// Extend a row with an effect
+    pub fn extend(effect: Effect, rest: Row) -> Row {
+        Row::Extend {
+            effect,
+            rest: Rc::new(rest),
+        }
+    }
+
+    /// Follow all links to get the actual row
+    pub fn resolve(&self) -> Row {
+        match self {
+            Row::Var(var) => match &*var.borrow() {
+                RowVar::Link(row) => row.resolve(),
+                _ => self.clone(),
+            },
+            _ => self.clone(),
+        }
+    }
+
+    /// Check if this row contains a given row variable (occurs check for row vars)
+    pub fn occurs(&self, id: TypeVarId) -> bool {
+        match self.resolve() {
+            Row::Empty => false,
+            Row::Var(var) => match &*var.borrow() {
+                RowVar::Unbound { id: vid, .. } => *vid == id,
+                RowVar::Generic(vid) => *vid == id,
+                RowVar::Link(_) => unreachable!("resolve should have followed links"),
+            },
+            Row::Extend { effect: _, rest } => rest.occurs(id),
+        }
+    }
+
+    /// Check if a type variable occurs in this row (including in effect parameters)
+    pub fn type_var_occurs(&self, id: TypeVarId) -> bool {
+        match self.resolve() {
+            Row::Empty => false,
+            Row::Var(_) => false, // Row vars are separate from type vars
+            Row::Extend { effect, rest } => {
+                effect.params.iter().any(|t| t.occurs(id)) || rest.type_var_occurs(id)
+            }
+        }
+    }
+
+    /// Check if this row is empty (pure)
+    pub fn is_empty(&self) -> bool {
+        matches!(self.resolve(), Row::Empty)
+    }
+
+    /// Check if this row contains a specific effect
+    pub fn contains_effect(&self, effect_name: &str) -> bool {
+        match self.resolve() {
+            Row::Empty => false,
+            Row::Var(_) => false, // Unknown - could contain anything
+            Row::Extend { effect, rest } => {
+                effect.name == effect_name || rest.contains_effect(effect_name)
+            }
+        }
+    }
+
+    /// Display the row for user-friendly output
+    pub fn display_user_friendly(&self) -> String {
+        let mut var_map: HashMap<TypeVarId, char> = HashMap::new();
+        let mut next_var = 'r'; // Start row vars at 'r'
+        self.display_with_map(&mut var_map, &mut next_var)
+    }
+
+    fn display_with_map(
+        &self,
+        var_map: &mut HashMap<TypeVarId, char>,
+        next_var: &mut char,
+    ) -> String {
+        match self.resolve() {
+            Row::Empty => String::new(),
+            Row::Var(var) => {
+                let id = match &*var.borrow() {
+                    RowVar::Unbound { id, .. } => *id,
+                    RowVar::Generic(id) => *id,
+                    RowVar::Link(_) => unreachable!(),
+                };
+                let c = *var_map.entry(id).or_insert_with(|| {
+                    let c = *next_var;
+                    *next_var = (*next_var as u8 + 1) as char;
+                    c
+                });
+                c.to_string()
+            }
+            Row::Extend { effect, rest } => {
+                let rest_str = rest.display_with_map(var_map, next_var);
+                let effect_str = effect.display_user_friendly();
+                if rest_str.is_empty() {
+                    effect_str
+                } else if rest_str.len() == 1 && rest_str.chars().next().unwrap().is_alphabetic() {
+                    // Row variable at end
+                    format!("{} | {}", effect_str, rest_str)
+                } else {
+                    format!("{}, {}", effect_str, rest_str)
+                }
+            }
+        }
+    }
+}
+
+impl Effect {
+    /// Create a simple effect with no type parameters
+    pub fn simple(name: impl Into<String>) -> Effect {
+        Effect {
+            name: name.into(),
+            params: vec![],
+        }
+    }
+
+    /// Create an effect with type parameters
+    pub fn with_params(name: impl Into<String>, params: Vec<Type>) -> Effect {
+        Effect {
+            name: name.into(),
+            params,
+        }
+    }
+
+    /// Display the effect for user-friendly output
+    pub fn display_user_friendly(&self) -> String {
+        if self.params.is_empty() {
+            self.name.clone()
+        } else {
+            let params_str: Vec<String> = self.params.iter()
+                .map(|t| t.display_user_friendly())
+                .collect();
+            format!("{} {}", self.name, params_str.join(" "))
+        }
+    }
+}
+
+impl EffectEnv {
+    /// Create a new empty effect environment
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an effect declaration
+    pub fn register_effect(&mut self, info: EffectInfo) {
+        let effect_name = info.name.clone();
+
+        // Register each operation
+        for op in &info.operations {
+            self.operations.insert(
+                op.name.clone(),
+                (effect_name.clone(), op.clone()),
+            );
+        }
+
+        self.effects.insert(effect_name, info);
+    }
+
+    /// Look up an effect by name
+    pub fn get_effect(&self, name: &str) -> Option<&EffectInfo> {
+        self.effects.get(name)
+    }
+
+    /// Look up an operation by name, returns (effect_name, operation_info)
+    pub fn get_operation(&self, name: &str) -> Option<&(String, OperationInfo)> {
+        self.operations.get(name)
+    }
 }
 
 impl Type {
@@ -121,12 +376,9 @@ impl Type {
                 TypeVar::Generic(vid) => *vid == id,
                 TypeVar::Link(_) => unreachable!("resolve should have followed links"),
             },
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => arg.occurs(id) || ret.occurs(id) || ans_in.occurs(id) || ans_out.occurs(id),
+            Type::Arrow { arg, ret, effects } => {
+                arg.occurs(id) || ret.occurs(id) || effects.type_var_occurs(id)
+            }
             Type::Tuple(types) => types.iter().any(|t| t.occurs(id)),
             Type::Constructor { args, .. } => args.iter().any(|t| t.occurs(id)),
             Type::Channel(t) => t.occurs(id),
@@ -147,43 +399,44 @@ impl Type {
         }
     }
 
-    /// Sentinel ID for placeholder answer type vars - won't collide with Generic IDs
-    pub const PLACEHOLDER_ANS_ID: TypeVarId = TypeVarId::MAX;
-
-    /// Create a pure function type (ans_in == ans_out)
-    /// Uses a shared type variable for both answer types
+    /// Create a pure function type (empty effect row)
     pub fn arrow(from: Type, to: Type) -> Type {
-        // For a pure function, we use the same Rc for both answer types
-        // This ensures they're always unified together
-        // Use PLACEHOLDER_ANS_ID to avoid collision with Generic(0) in trait methods
-        let ans = Rc::new(Type::new_var(Self::PLACEHOLDER_ANS_ID, 0));
         Type::Arrow {
             arg: Rc::new(from),
             ret: Rc::new(to),
-            ans_in: ans.clone(),
-            ans_out: ans,
+            effects: Row::Empty,
         }
     }
 
-    /// Create a pure function type with explicit answer type variable
-    pub fn arrow_with_ans(from: Type, to: Type, ans: Type) -> Type {
-        let ans = Rc::new(ans);
+    /// Create a function type with a specific effect row
+    pub fn arrow_with_effects(from: Type, to: Type, effects: Row) -> Type {
         Type::Arrow {
             arg: Rc::new(from),
             ret: Rc::new(to),
-            ans_in: ans.clone(),
-            ans_out: ans,
+            effects,
         }
     }
 
-    /// Create an effectful function type with explicit answer types
-    pub fn effectful_arrow(from: Type, to: Type, ans_in: Type, ans_out: Type) -> Type {
+    /// Create a function type with a polymorphic effect row variable
+    /// This is used for functions that can have any effects (polymorphic in their effect row)
+    pub fn arrow_with_effect_var(from: Type, to: Type, var_id: TypeVarId, level: u32) -> Type {
         Type::Arrow {
             arg: Rc::new(from),
             ret: Rc::new(to),
-            ans_in: Rc::new(ans_in),
-            ans_out: Rc::new(ans_out),
+            effects: Row::new_var(var_id, level),
         }
+    }
+
+    /// DEPRECATED: Kept for backward compatibility during migration
+    /// Creates a pure function type - same as arrow()
+    pub fn arrow_with_ans(from: Type, to: Type, _ans: Type) -> Type {
+        Type::arrow(from, to)
+    }
+
+    /// DEPRECATED: Kept for backward compatibility during migration
+    /// Creates a pure function type - same as arrow()
+    pub fn effectful_arrow(from: Type, to: Type, _ans_in: Type, _ans_out: Type) -> Type {
+        Type::arrow(from, to)
     }
 
     /// Create a multi-argument function type: a -> b -> c -> d
@@ -259,12 +512,7 @@ impl Type {
             Type::TcpSocket => "TcpSocket".to_string(),
             Type::TcpListener => "TcpListener".to_string(),
             Type::Pid => "Pid".to_string(),
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => {
+            Type::Arrow { arg, ret, effects } => {
                 let arg_str = match arg.resolve() {
                     Type::Arrow { .. } => format!(
                         "({})",
@@ -274,32 +522,25 @@ impl Type {
                 };
                 let ret_str = ret.display_with_map(var_map, next_var, hide_answer_types);
 
-                if hide_answer_types {
-                    // Always hide answer types for user-friendly display
-                    format!("{} -> {}", arg_str, ret_str)
-                } else {
-                    // Check if pure
-                    let ans_in_resolved = ans_in.resolve();
-                    let ans_out_resolved = ans_out.resolve();
-                    let is_pure = match (&ans_in_resolved, &ans_out_resolved) {
-                        (Type::Var(v1), Type::Var(v2)) => match (&*v1.borrow(), &*v2.borrow()) {
-                            (
-                                TypeVar::Unbound { id: id1, .. },
-                                TypeVar::Unbound { id: id2, .. },
-                            ) => id1 == id2,
-                            (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
-                            _ => false,
-                        },
-                        _ => false,
-                    };
-                    if is_pure {
+                // Check if pure (empty effects) or polymorphic
+                let effects_resolved = effects.resolve();
+                match effects_resolved {
+                    Row::Empty => {
+                        // Pure function: a -> b
                         format!("{} -> {}", arg_str, ret_str)
-                    } else {
-                        let ans_in_str =
-                            ans_in.display_with_map(var_map, next_var, hide_answer_types);
-                        let ans_out_str =
-                            ans_out.display_with_map(var_map, next_var, hide_answer_types);
-                        format!("{}/{} -> {}/{}", arg_str, ans_in_str, ret_str, ans_out_str)
+                    }
+                    Row::Var(_) if hide_answer_types => {
+                        // Polymorphic effects, hide for user-friendly display
+                        format!("{} -> {}", arg_str, ret_str)
+                    }
+                    _ => {
+                        // Show effects: a -> b { eff1, eff2 | r }
+                        let effects_str = effects_resolved.display_user_friendly();
+                        if effects_str.is_empty() {
+                            format!("{} -> {}", arg_str, ret_str)
+                        } else {
+                            format!("{} -> {} {{ {} }}", arg_str, ret_str, effects_str)
+                        }
                     }
                 }
             }
@@ -385,39 +626,27 @@ impl fmt::Display for Type {
             Type::TcpSocket => write!(f, "TcpSocket"),
             Type::TcpListener => write!(f, "TcpListener"),
             Type::Pid => write!(f, "Pid"),
-            Type::Arrow {
-                arg,
-                ret,
-                ans_in,
-                ans_out,
-            } => {
+            Type::Arrow { arg, ret, effects } => {
                 let arg_str = match arg.resolve() {
                     Type::Arrow { .. } => format!("({})", arg),
                     _ => format!("{}", arg),
                 };
-                // Check if pure (same answer types) by comparing resolved forms
-                let ans_in_resolved = ans_in.resolve();
-                let ans_out_resolved = ans_out.resolve();
-                let is_pure = match (&ans_in_resolved, &ans_out_resolved) {
-                    (Type::Var(v1), Type::Var(v2)) => {
-                        // Check if same variable by comparing IDs
-                        match (&*v1.borrow(), &*v2.borrow()) {
-                            (
-                                TypeVar::Unbound { id: id1, .. },
-                                TypeVar::Unbound { id: id2, .. },
-                            ) => id1 == id2,
-                            (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
-                            _ => false,
-                        }
+                // Check if pure (empty effects) or has effects
+                let effects_resolved = effects.resolve();
+                match effects_resolved {
+                    Row::Empty => {
+                        // Pure function: show as σ → τ
+                        write!(f, "{} -> {}", arg_str, ret)
                     }
-                    _ => false, // If not both variables, check structural equality
-                };
-                if is_pure {
-                    // Pure function: show as σ → τ
-                    write!(f, "{} -> {}", arg_str, ret)
-                } else {
-                    // Effectful: show as σ/α → τ/β
-                    write!(f, "{}/{} -> {}/{}", arg_str, ans_in, ret, ans_out)
+                    Row::Var(_) => {
+                        // Polymorphic effects - show as pure for simplicity
+                        write!(f, "{} -> {}", arg_str, ret)
+                    }
+                    _ => {
+                        // Has effects: show as σ → τ { effects }
+                        let effects_str = effects_resolved.display_user_friendly();
+                        write!(f, "{} -> {} {{ {} }}", arg_str, ret, effects_str)
+                    }
                 }
             }
             Type::Tuple(types) => {
@@ -729,21 +958,14 @@ pub fn types_equal(t1: &Type, t2: &Type) -> bool {
             Type::Arrow {
                 arg: a1,
                 ret: r1,
-                ans_in: ai1,
-                ans_out: ao1,
+                effects: e1,
             },
             Type::Arrow {
                 arg: a2,
                 ret: r2,
-                ans_in: ai2,
-                ans_out: ao2,
+                effects: e2,
             },
-        ) => {
-            types_equal(a1, a2)
-                && types_equal(r1, r2)
-                && types_equal(ai1, ai2)
-                && types_equal(ao1, ao2)
-        }
+        ) => types_equal(a1, a2) && types_equal(r1, r2) && rows_equal(e1, e2),
         (Type::Tuple(ts1), Type::Tuple(ts2)) => {
             ts1.len() == ts2.len() && ts1.iter().zip(ts2).all(|(x, y)| types_equal(x, y))
         }
@@ -751,6 +973,40 @@ pub fn types_equal(t1: &Type, t2: &Type) -> bool {
             n1 == n2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| types_equal(x, y))
         }
         (Type::Channel(e1), Type::Channel(e2)) => types_equal(e1, e2),
+        _ => false,
+    }
+}
+
+/// Check if two effect rows are structurally equal (resolving links)
+pub fn rows_equal(r1: &Row, r2: &Row) -> bool {
+    let r1 = r1.resolve();
+    let r2 = r2.resolve();
+
+    match (&r1, &r2) {
+        (Row::Empty, Row::Empty) => true,
+        (Row::Var(v1), Row::Var(v2)) => match (&*v1.borrow(), &*v2.borrow()) {
+            (RowVar::Unbound { id: id1, .. }, RowVar::Unbound { id: id2, .. }) => id1 == id2,
+            (RowVar::Generic(id1), RowVar::Generic(id2)) => id1 == id2,
+            _ => false,
+        },
+        (
+            Row::Extend {
+                effect: e1,
+                rest: rest1,
+            },
+            Row::Extend {
+                effect: e2,
+                rest: rest2,
+            },
+        ) => {
+            e1.name == e2.name
+                && e1
+                    .params
+                    .iter()
+                    .zip(&e2.params)
+                    .all(|(t1, t2)| types_equal(t1, t2))
+                && rows_equal(rest1, rest2)
+        }
         _ => false,
     }
 }
@@ -786,16 +1042,10 @@ pub fn apply_subst(ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
             TypeVar::Unbound { id, .. } => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
             TypeVar::Link(_) => unreachable!("resolve should follow links"),
         },
-        Type::Arrow {
-            arg,
-            ret,
-            ans_in,
-            ans_out,
-        } => Type::Arrow {
+        Type::Arrow { arg, ret, effects } => Type::Arrow {
             arg: Rc::new(apply_subst(&arg, subst)),
             ret: Rc::new(apply_subst(&ret, subst)),
-            ans_in: Rc::new(apply_subst(&ans_in, subst)),
-            ans_out: Rc::new(apply_subst(&ans_out, subst)),
+            effects: apply_subst_to_row(&effects, subst),
         },
         Type::Tuple(types) => Type::Tuple(types.iter().map(|t| apply_subst(t, subst)).collect()),
         Type::Constructor { name, args } => Type::Constructor {
@@ -804,6 +1054,21 @@ pub fn apply_subst(ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
         },
         Type::Channel(t) => Type::Channel(Rc::new(apply_subst(&t, subst))),
         t => t, // Primitives unchanged
+    }
+}
+
+/// Apply a substitution to an effect row (for type parameters in effects)
+pub fn apply_subst_to_row(row: &Row, subst: &HashMap<TypeVarId, Type>) -> Row {
+    match row.resolve() {
+        Row::Empty => Row::Empty,
+        Row::Var(var) => Row::Var(var), // Row variables are not substituted by type subst
+        Row::Extend { effect, rest } => Row::Extend {
+            effect: Effect {
+                name: effect.name.clone(),
+                params: effect.params.iter().map(|t| apply_subst(t, subst)).collect(),
+            },
+            rest: Rc::new(apply_subst_to_row(&rest, subst)),
+        },
     }
 }
 
@@ -967,28 +1232,60 @@ fn types_overlap(t1: &Type, t2: &Type) -> bool {
             t1.len() == t2.len() && t1.iter().zip(t2).all(|(x, y)| types_overlap(x, y))
         }
 
-        // Arrows might overlap (check all 4 components)
+        // Arrows might overlap (check arg, ret, and effects)
         (
             Type::Arrow {
                 arg: a1,
                 ret: r1,
-                ans_in: ai1,
-                ans_out: ao1,
+                effects: e1,
             },
             Type::Arrow {
                 arg: a2,
                 ret: r2,
-                ans_in: ai2,
-                ans_out: ao2,
+                effects: e2,
             },
-        ) => {
-            types_overlap(a1, a2)
-                && types_overlap(r1, r2)
-                && types_overlap(ai1, ai2)
-                && types_overlap(ao1, ao2)
-        }
+        ) => types_overlap(a1, a2) && types_overlap(r1, r2) && rows_overlap(e1, e2),
 
         // Different type constructors don't overlap
+        _ => false,
+    }
+}
+
+/// Check if two effect rows might overlap (for instance checking)
+/// Two rows overlap if they could unify
+pub fn rows_overlap(r1: &Row, r2: &Row) -> bool {
+    let r1 = r1.resolve();
+    let r2 = r2.resolve();
+
+    match (&r1, &r2) {
+        // Empty rows overlap only with empty or variables
+        (Row::Empty, Row::Empty) => true,
+        (Row::Empty, Row::Var(_)) | (Row::Var(_), Row::Empty) => true,
+        // Variables overlap with anything
+        (Row::Var(_), _) | (_, Row::Var(_)) => true,
+        // Extend rows overlap if effects are compatible
+        (
+            Row::Extend {
+                effect: e1,
+                rest: rest1,
+            },
+            Row::Extend {
+                effect: e2,
+                rest: rest2,
+            },
+        ) => {
+            // Effects with same name might overlap
+            if e1.name == e2.name {
+                e1.params
+                    .iter()
+                    .zip(&e2.params)
+                    .all(|(t1, t2)| types_overlap(t1, t2))
+                    && rows_overlap(rest1, rest2)
+            } else {
+                // Different effect names could still unify via row reordering
+                true
+            }
+        }
         _ => false,
     }
 }
@@ -1079,28 +1376,62 @@ fn match_type_inner(pattern: &Type, target: &Type, subst: &mut Substitution) -> 
             .zip(ts)
             .all(|(p, t)| match_type_inner(p, t, subst)),
 
-        // Arrows (match all 4 components)
+        // Arrows (match arg, ret, and effects)
         (
             Type::Arrow {
                 arg: pa,
                 ret: pr,
-                ans_in: pai,
-                ans_out: pao,
+                effects: pe,
             },
             Type::Arrow {
                 arg: ta,
                 ret: tr,
-                ans_in: tai,
-                ans_out: tao,
+                effects: te,
             },
         ) => {
             match_type_inner(pa, ta, subst)
                 && match_type_inner(pr, tr, subst)
-                && match_type_inner(pai, tai, subst)
-                && match_type_inner(pao, tao, subst)
+                && match_row_inner(pe, te, subst)
         }
 
         // No match
+        _ => false,
+    }
+}
+
+/// Helper for matching effect rows during instance resolution
+fn match_row_inner(pattern: &Row, target: &Row, subst: &mut Substitution) -> bool {
+    let pattern = pattern.resolve();
+    let target = target.resolve();
+
+    match (&pattern, &target) {
+        (Row::Empty, Row::Empty) => true,
+        (Row::Var(v), _) => {
+            // Row variables in pattern are like wildcards for now
+            // Could be extended to track row substitutions
+            match &*v.borrow() {
+                RowVar::Generic(_) | RowVar::Unbound { .. } => true,
+                RowVar::Link(_) => unreachable!(),
+            }
+        }
+        (
+            Row::Extend {
+                effect: pe,
+                rest: pr,
+            },
+            Row::Extend {
+                effect: te,
+                rest: tr,
+            },
+        ) => {
+            pe.name == te.name
+                && pe
+                    .params
+                    .iter()
+                    .zip(&te.params)
+                    .all(|(p, t)| match_type_inner(p, t, subst))
+                && match_row_inner(pr, tr, subst)
+        }
         _ => false,
     }
 }

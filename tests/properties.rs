@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gneiss::ast::*;
 use gneiss::infer::Inferencer;
-use gneiss::types::*;
+use gneiss::types::{Row, *};
 use gneiss::{Interpreter, Lexer, Parser, Value};
 
 // ============================================================================
@@ -42,13 +42,11 @@ fn arb_ground_type(depth: usize) -> BoxedStrategy<Type> {
             1 => arb_ground_type(depth - 1).prop_map(|t| Type::list(t)),
             1 => (arb_ground_type(depth - 1), arb_ground_type(depth - 1))
                 .prop_map(|(a, b)| {
-                    // Create a pure arrow type (same answer type for both)
-                    let ans = Type::new_var(9999, 0);
+                    // Create a pure arrow type with empty effects
                     Type::Arrow {
                         arg: Rc::new(a),
                         ret: Rc::new(b),
-                        ans_in: Rc::new(ans.clone()),
-                        ans_out: Rc::new(ans),
+                        effects: Row::Empty,
                     }
                 }),
             1 => prop::collection::vec(arb_ground_type(depth - 1), 2..=3)
@@ -81,13 +79,11 @@ fn arb_type_with_vars(depth: usize) -> BoxedStrategy<Type> {
             1 => arb_type_with_vars(depth - 1).prop_map(|t| Type::list(t)),
             1 => (arb_type_with_vars(depth - 1), arb_type_with_vars(depth - 1))
                 .prop_map(|(a, b)| {
-                    // Create a pure arrow type (same answer type for both)
-                    let ans = Type::new_var(9999, 0);
+                    // Create a pure arrow type with empty effects
                     Type::Arrow {
                         arg: Rc::new(a),
                         ret: Rc::new(b),
-                        ans_in: Rc::new(ans.clone()),
-                        ans_out: Rc::new(ans),
+                        effects: Row::Empty,
                     }
                 }),
         ]
@@ -412,12 +408,10 @@ proptest! {
             "Type variable t{} should occur in itself", var_id);
 
         // The variable should occur in a function type containing it
-        let ans = Type::new_var(9999, 0);
         let arrow = Type::Arrow {
             arg: Rc::new(var.clone()),
             ret: Rc::new(Type::Int),
-            ans_in: Rc::new(ans.clone()),
-            ans_out: Rc::new(ans),
+            effects: Row::Empty,
         };
         prop_assert!(arrow.occurs(var_id),
             "Type variable t{} should occur in {} -> Int", var_id, var);
