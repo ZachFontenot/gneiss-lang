@@ -196,6 +196,33 @@ pub enum Frame {
         remaining_args: Vec<Expr>,
         env: Env,
     },
+
+    // === Algebraic effect frames ===
+    /// Handler scope delimiter for algebraic effects
+    HandleScope {
+        /// Effect name this handler handles
+        effect_name: String,
+        /// Handlers for each operation: operation_name -> RuntimeHandler
+        handlers: Vec<RuntimeHandler>,
+        /// Return clause: pattern and body
+        return_pattern: Pattern,
+        return_body: Rc<Expr>,
+        /// Environment for handlers
+        env: Env,
+    },
+}
+
+/// Runtime representation of an effect handler arm
+#[derive(Debug, Clone)]
+pub struct RuntimeHandler {
+    /// Operation name (e.g., "get", "put")
+    pub operation: String,
+    /// Parameter patterns for the operation
+    pub params: Vec<Pattern>,
+    /// Continuation parameter name
+    pub continuation: String,
+    /// Handler body
+    pub body: Rc<Expr>,
 }
 
 /// What kind of collection we're building
@@ -205,6 +232,8 @@ pub enum CollectKind {
     Tuple,
     Constructor { name: String },
     Record { type_name: String, field_names: Vec<String> },
+    /// Collecting arguments for a perform operation
+    PerformArgs { effect: String, operation: String },
 }
 
 // ============================================================================
@@ -1615,21 +1644,69 @@ impl Interpreter {
             }
 
             // ========================================================================
-            // Algebraic Effects (stubs - full implementation in Phase 4)
+            // Algebraic Effects
             // ========================================================================
-            ExprKind::Perform { effect, operation, .. } => {
-                // TODO: Implement perform dispatch to handlers
-                StepResult::Error(EvalError::RuntimeError(format!(
-                    "perform {}.{} not yet implemented - handlers coming in Phase 4",
-                    effect, operation
-                )))
+            ExprKind::Perform { effect, operation, args } => {
+                if args.is_empty() {
+                    // No arguments - perform immediately
+                    self.perform_operation(effect, operation, vec![], env, cont)
+                } else {
+                    // Need to evaluate arguments first
+                    // Use Collect to gather all args, then perform
+                    let mut remaining = args.clone();
+                    let first = remaining.remove(0);
+                    cont.push(Frame::Collect {
+                        kind: CollectKind::PerformArgs {
+                            effect: effect.clone(),
+                            operation: operation.clone(),
+                        },
+                        remaining,
+                        acc: vec![],
+                        env: env.clone(),
+                    });
+                    StepResult::Continue(State::Eval {
+                        expr: Rc::new(first),
+                        env,
+                        cont,
+                    })
+                }
             }
 
-            ExprKind::Handle { .. } => {
-                // TODO: Implement handler scope
-                StepResult::Error(EvalError::RuntimeError(
-                    "handle expressions not yet implemented - coming in Phase 4".into(),
-                ))
+            ExprKind::Handle { body, return_clause, handlers } => {
+                // Determine the effect name from handlers (all should be same effect)
+                // For now, use the first handler's operation to look up the effect
+                let effect_name = if !handlers.is_empty() {
+                    // We'll match on operation names; effect name comes from usage
+                    // For simplicity, store empty - matching is by operation name
+                    String::new()
+                } else {
+                    String::new()
+                };
+
+                // Convert AST handlers to runtime handlers
+                let runtime_handlers: Vec<RuntimeHandler> = handlers.iter().map(|h| {
+                    RuntimeHandler {
+                        operation: h.operation.clone(),
+                        params: h.params.clone(),
+                        continuation: h.continuation.clone(),
+                        body: Rc::new((*h.body).clone()),
+                    }
+                }).collect();
+
+                // Push handler scope and evaluate body
+                cont.push(Frame::HandleScope {
+                    effect_name,
+                    handlers: runtime_handlers,
+                    return_pattern: return_clause.pattern.clone(),
+                    return_body: Rc::new((*return_clause.body).clone()),
+                    env: env.clone(),
+                });
+
+                StepResult::Continue(State::Eval {
+                    expr: body.clone(),
+                    env,
+                    cont,
+                })
             }
 
             ExprKind::Select { arms } => {
@@ -1743,6 +1820,10 @@ impl Interpreter {
                     type_name,
                     fields: im::HashMap::new(),
                 },
+                CollectKind::PerformArgs { effect, operation } => {
+                    // No arguments - perform operation with empty args
+                    return self.perform_operation(&effect, &operation, vec![], env, cont);
+                }
             };
             StepResult::Continue(State::Apply { value, cont })
         } else {
@@ -1760,6 +1841,96 @@ impl Interpreter {
                 env,
                 cont,
             })
+        }
+    }
+
+    /// Perform an effect operation - search for handler and dispatch
+    fn perform_operation(
+        &mut self,
+        effect: &str,
+        operation: &str,
+        args: Vec<Value>,
+        _env: Env,
+        mut cont: Cont,
+    ) -> StepResult {
+        // Search for a handler that handles this operation
+        let mut captured = Vec::new();
+
+        loop {
+            match cont.pop() {
+                None => {
+                    return StepResult::Error(EvalError::RuntimeError(format!(
+                        "Unhandled effect operation: {}.{}",
+                        effect, operation
+                    )));
+                }
+                Some(Frame::HandleScope { handlers, return_pattern, return_body, env, effect_name }) => {
+                    // Check if any handler matches this operation
+                    let handler_idx = handlers.iter().position(|h| h.operation == operation);
+
+                    if let Some(idx) = handler_idx {
+                        // Clone what we need from the handler before moving handlers
+                        let handler_params = handlers[idx].params.clone();
+                        let handler_continuation = handlers[idx].continuation.clone();
+                        let handler_body = handlers[idx].body.clone();
+
+                        // For deep handlers: include the HandleScope in the continuation
+                        // so that subsequent operations in the resumed computation are still handled
+                        captured.push(Frame::HandleScope {
+                            effect_name,
+                            handlers,
+                            return_pattern,
+                            return_body,
+                            env: env.clone(),
+                        });
+
+                        // Found a handler! Create continuation from captured frames
+                        // Reverse so outermost is first (for restore)
+                        captured.reverse();
+                        let continuation = Value::Continuation { frames: captured };
+
+                        // Create handler environment with bound parameters and continuation
+                        let handler_env = EnvInner::with_parent(&env);
+
+                        // Bind operation parameters
+                        for (param, arg_val) in handler_params.iter().zip(args.iter()) {
+                            if !self.try_bind_pattern(&handler_env, param, arg_val) {
+                                return StepResult::Error(EvalError::MatchFailed);
+                            }
+                        }
+
+                        // Bind continuation to k
+                        handler_env.borrow_mut().define(handler_continuation, continuation);
+
+                        // Handler body runs outside the handle scope
+                        // When it invokes k, the captured frames (including HandleScope) are restored
+                        return StepResult::Continue(State::Eval {
+                            expr: handler_body,
+                            env: handler_env,
+                            cont,
+                        });
+                    } else {
+                        // This handler doesn't handle this operation - keep searching
+                        captured.push(Frame::HandleScope {
+                            effect_name: String::new(),
+                            handlers,
+                            return_pattern: Pattern {
+                                span: Span { start: 0, end: 0 },
+                                node: PatternKind::Wildcard,
+                            },
+                            return_body: Rc::new(Expr {
+                                span: Span { start: 0, end: 0 },
+                                node: ExprKind::Var("__dummy__".to_string()),
+                            }),
+                            env,
+                        });
+                    }
+                }
+                Some(frame) => {
+                    // Keep capturing frames
+                    captured.push(frame);
+                }
+            }
         }
     }
 
@@ -1928,11 +2099,18 @@ impl Interpreter {
                 acc.push(value);
                 if remaining.is_empty() {
                     // All collected, produce the value
-                    let result = match kind {
-                        CollectKind::List => Value::List(acc.into_iter().collect()),
-                        CollectKind::Tuple => Value::Tuple(acc),
+                    match kind {
+                        CollectKind::List => {
+                            let result = Value::List(acc.into_iter().collect());
+                            StepResult::Continue(State::Apply { value: result, cont })
+                        }
+                        CollectKind::Tuple => {
+                            let result = Value::Tuple(acc);
+                            StepResult::Continue(State::Apply { value: result, cont })
+                        }
                         CollectKind::Constructor { name } => {
-                            Value::Constructor { name, fields: acc }
+                            let result = Value::Constructor { name, fields: acc };
+                            StepResult::Continue(State::Apply { value: result, cont })
                         }
                         CollectKind::Record {
                             type_name,
@@ -1942,13 +2120,14 @@ impl Interpreter {
                                 .into_iter()
                                 .zip(acc)
                                 .collect();
-                            Value::Record { type_name, fields }
+                            let result = Value::Record { type_name, fields };
+                            StepResult::Continue(State::Apply { value: result, cont })
                         }
-                    };
-                    StepResult::Continue(State::Apply {
-                        value: result,
-                        cont,
-                    })
+                        CollectKind::PerformArgs { effect, operation } => {
+                            // All args collected, now perform the operation
+                            self.perform_operation(&effect, &operation, acc, env, cont)
+                        }
+                    }
                 } else {
                     // More to collect
                     let next = Rc::new(remaining[0].clone());
@@ -1997,6 +2176,21 @@ impl Interpreter {
             Some(Frame::Prompt) => {
                 // reset body completed, value passes through
                 StepResult::Continue(State::Apply { value, cont })
+            }
+
+            // === Algebraic effect frames ===
+            Some(Frame::HandleScope { return_pattern, return_body, env, .. }) => {
+                // Handler body completed normally (no effect performed)
+                // Execute the return clause with the final value
+                let return_env = EnvInner::with_parent(&env);
+                if !self.try_bind_pattern(&return_env, &return_pattern, &value) {
+                    return StepResult::Error(EvalError::MatchFailed);
+                }
+                StepResult::Continue(State::Eval {
+                    expr: return_body,
+                    env: return_env,
+                    cont,
+                })
             }
 
             // === Concurrency frames ===
