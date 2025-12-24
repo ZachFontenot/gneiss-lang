@@ -260,6 +260,8 @@ pub struct Inferencer {
     type_ctx: TypeContext,
     /// Class environment for typeclasses
     class_env: ClassEnv,
+    /// Effect environment for algebraic effects
+    effect_env: EffectEnv,
     /// Wanted predicates (constraints collected during inference)
     wanted_preds: Vec<Pred>,
     /// Module environments: module name -> TypeEnv of exports
@@ -283,6 +285,7 @@ impl Inferencer {
             level: 0,
             type_ctx: TypeContext::new(),
             class_env: ClassEnv::new(),
+            effect_env: EffectEnv::default(),
             wanted_preds: Vec::new(),
             module_envs: HashMap::new(),
             imports: HashMap::new(),
@@ -306,6 +309,84 @@ impl Inferencer {
     /// Add a module alias: `import Module as Alias`
     pub fn add_module_alias(&mut self, alias: String, module_name: String) {
         self.module_aliases.insert(alias, module_name);
+    }
+
+    /// Register an effect declaration
+    /// Converts the AST effect declaration into EffectInfo and OperationInfo
+    pub fn register_effect(
+        &mut self,
+        name: &str,
+        params: &[String],
+        operations: &[crate::ast::EffectOperation],
+    ) -> Result<(), TypeError> {
+        // Build a param_map: type param name -> generic ID
+        let mut param_map: HashMap<String, TypeVarId> = HashMap::new();
+        for (i, param) in params.iter().enumerate() {
+            param_map.insert(param.clone(), i as TypeVarId);
+        }
+
+        // Convert each operation's type signature
+        let mut op_infos = Vec::new();
+        for op in operations {
+            // The operation's type_sig is a function type like () -> s or s -> ()
+            // We need to extract param types and result type
+            let (param_types, result_type) = self.extract_operation_signature(&op.type_sig, &param_map)?;
+
+            let op_info = OperationInfo {
+                name: op.name.clone(),
+                param_types,
+                result_type,
+            };
+            op_infos.push(op_info.clone());
+
+            // Also register in operations lookup (for qualified access like State.get)
+            self.effect_env.operations.insert(
+                op.name.clone(),
+                (name.to_string(), op_info),
+            );
+        }
+
+        let effect_info = EffectInfo {
+            name: name.to_string(),
+            type_params: params.to_vec(),
+            operations: op_infos,
+        };
+
+        self.effect_env.effects.insert(name.to_string(), effect_info);
+        Ok(())
+    }
+
+    /// Extract parameter types and result type from an operation signature
+    /// e.g., `() -> s` gives ([], s), `s -> ()` gives ([s], ())
+    fn extract_operation_signature(
+        &mut self,
+        type_sig: &TypeExpr,
+        param_map: &HashMap<String, TypeVarId>,
+    ) -> Result<(Vec<Type>, Type), TypeError> {
+        match &type_sig.node {
+            TypeExprKind::Arrow { from, to, .. } => {
+                // Convert from and to to Types
+                let arg_ty = self.type_expr_to_type(from, param_map)?;
+                let ret_ty = self.type_expr_to_type(to, param_map)?;
+
+                // If arg is a tuple, extract its components as params
+                // Otherwise, single param (or unit for no params)
+                let param_types = match arg_ty {
+                    Type::Unit => vec![],
+                    Type::Tuple(ts) => ts,
+                    other => vec![other],
+                };
+
+                Ok((param_types, ret_ty))
+            }
+            _ => {
+                // Not a function type - this is an error
+                Err(TypeError::Other(format!(
+                    "Operation signature must be a function type, got {:?}",
+                    type_sig.node
+                )))
+            }
+        }
     }
 
     /// Clear imports for a new module context
@@ -2001,16 +2082,68 @@ impl Inferencer {
             // ========================================================================
             // Algebraic Effects (stubs - full inference in Phase 3)
             // ========================================================================
-            ExprKind::Perform { effect, operation: _, args } => {
-                // TODO: Look up effect declaration, find operation signature,
-                // infer argument types, and add effect to row
-                // For now, return a fresh type variable
-                let result_ty = self.fresh_var();
+            ExprKind::Perform { effect, operation, args } => {
+                // Look up the operation in the effect environment
+                let op_name = operation;
+                let (effect_name, op_info) = if let Some(info) = self.effect_env.operations.get(op_name).cloned() {
+                    info
+                } else {
+                    // Operation not found - fall back to fresh type variable
+                    // This allows gradual migration and handles unknown effects
+                    let result_ty = self.fresh_var();
+                    let mut combined_effects = Row::Empty;
+                    for arg in args {
+                        let arg_result = self.infer_expr_full(env, arg)?;
+                        combined_effects = self.union_rows(&combined_effects, &arg_result.effects);
+                    }
+                    let effect_row = Row::Extend {
+                        effect: Effect {
+                            name: effect.clone(),
+                            params: vec![],
+                        },
+                        rest: Rc::new(combined_effects),
+                    };
+                    return Ok(InferResult::with_effects(result_ty, effect_row));
+                };
 
-                // Infer types for arguments and collect their effects
+                // Verify the effect name matches
+                if effect_name != *effect {
+                    return Err(TypeError::Other(format!(
+                        "Operation '{}' belongs to effect '{}', not '{}'",
+                        op_name, effect_name, effect
+                    )));
+                }
+
+                // Get the effect info to know type params
+                let effect_info = self.effect_env.effects.get(&effect_name).cloned();
+                let type_params = effect_info.map(|e| e.type_params).unwrap_or_default();
+
+                // Create fresh type variables for the effect's type parameters
+                let mut effect_type_args: Vec<Type> = Vec::new();
+                for _ in &type_params {
+                    effect_type_args.push(self.fresh_var());
+                }
+
+                // Instantiate the operation's param types and result type
+                // by substituting Generic(i) with effect_type_args[i]
+                let instantiated_params: Vec<Type> = op_info.param_types.iter()
+                    .map(|t| substitute_generics(t, &effect_type_args))
+                    .collect();
+                let instantiated_result = substitute_generics(&op_info.result_type, &effect_type_args);
+
+                // Check argument count
+                if args.len() != instantiated_params.len() {
+                    return Err(TypeError::Other(format!(
+                        "Effect operation '{}' expects {} arguments, got {}",
+                        op_name, instantiated_params.len(), args.len()
+                    )));
+                }
+
+                // Infer types for arguments, unify with expected types, and collect effects
                 let mut combined_effects = Row::Empty;
-                for arg in args {
+                for (arg, expected_ty) in args.iter().zip(instantiated_params.iter()) {
                     let arg_result = self.infer_expr_full(env, arg)?;
+                    self.unify_at(&arg_result.ty, expected_ty, &arg.span)?;
                     combined_effects = self.union_rows(&combined_effects, &arg_result.effects);
                 }
 
@@ -2018,12 +2151,12 @@ impl Inferencer {
                 let effect_row = Row::Extend {
                     effect: Effect {
                         name: effect.clone(),
-                        params: vec![], // TODO: get params from effect declaration
+                        params: effect_type_args,
                     },
                     rest: Rc::new(combined_effects),
                 };
 
-                Ok(InferResult::with_effects(result_ty, effect_row))
+                Ok(InferResult::with_effects(instantiated_result, effect_row))
             }
 
             ExprKind::Handle { body, return_clause, handlers } => {
@@ -3880,9 +4013,12 @@ impl Inferencer {
                 Item::Decl(Decl::Trait { .. } | Decl::Instance { .. }) => {
                     // Already handled in second/third pass
                 }
-                Item::Decl(Decl::EffectDecl { .. }) => {
-                    // Effect declarations will be registered in a separate pass
-                    // For now, just skip them
+                Item::Decl(Decl::EffectDecl { name, params, operations, .. }) => {
+                    // Register the effect declaration in the effect environment
+                    let param_strs: Vec<String> = params.iter().cloned().collect();
+                    if let Err(e) = self.register_effect(name, &param_strs, operations) {
+                        self.record_error(e);
+                    }
                 }
                 Item::Decl(Decl::Val { name, type_sig, constraints }) => {
                     // Register a type signature for the name
