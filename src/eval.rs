@@ -100,10 +100,6 @@ pub enum Frame {
     Spawn,
 
     // === Fiber effect frames (unified runtime) ===
-    /// Implicit delimiter for fiber continuations.
-    /// Unlike Prompt, FiberBoundary remains on stack after capture.
-    FiberBoundary,
-
     /// After evaluating channel expr in fiber recv
     FiberRecv,
 
@@ -490,13 +486,37 @@ pub enum StepResult {
     Error(EvalError),
 }
 
+/// Effect stub - represents an effect without its continuation.
+/// Combined with a captured continuation to create RuntimeEffect.
+#[derive(Debug, Clone)]
+pub enum EffectStub {
+    Fork { thunk: Box<Value> },
+    Join { fiber_id: FiberId },
+    Yield,
+    ChanNew,
+    Io { op: IoOp },
+}
+
+impl EffectStub {
+    /// Combine this stub with a continuation to create a RuntimeEffect
+    pub fn with_cont(self, cont: Cont) -> RuntimeEffect {
+        match self {
+            EffectStub::Fork { thunk } => RuntimeEffect::Fork { thunk, cont },
+            EffectStub::Join { fiber_id } => RuntimeEffect::Join { fiber_id, cont },
+            EffectStub::Yield => RuntimeEffect::Yield { cont },
+            EffectStub::ChanNew => RuntimeEffect::ChanNew { cont },
+            EffectStub::Io { op } => RuntimeEffect::Io { op, cont },
+        }
+    }
+}
+
 /// Result of applying an effectful builtin function
-/// Used for Fiber.spawn, Fiber.join, Fiber.yield
+/// Used for Fiber.spawn, Fiber.join, Fiber.yield, I/O operations
 pub enum BuiltinResult {
     /// Builtin completed with a value
     Value(Value),
-    /// Builtin needs to produce a fiber effect (requires continuation capture)
-    Effect(FiberEffect),
+    /// Builtin needs to produce an effect (requires continuation capture)
+    Effect(EffectStub),
     /// Builtin needs more arguments (partial application)
     Partial { name: String, args: Vec<Value> },
 }
@@ -508,95 +528,7 @@ pub enum BuiltinResult {
 /// Unique fiber identifier (typed alternative to Pid)
 pub type FiberId = u64;
 
-/// Effects that fibers can perform, requiring runtime/scheduler intervention.
-/// Each variant captures the continuation to resume after the effect is handled.
-/// This unifies channel operations, spawning, and other fiber effects into a single model.
-#[derive(Debug, Clone)]
-pub enum FiberEffect {
-    /// Fiber completed with a value
-    Done(Box<Value>),
-
-    /// Fork a new fiber
-    /// - `thunk`: The computation to run in the new fiber (a closure)
-    /// - `cont`: Continuation expecting the child's Fiber handle
-    Fork {
-        thunk: Box<Value>,
-        cont: Option<Box<Cont>>,
-    },
-
-    /// Yield control to scheduler (cooperative multitasking)
-    /// - `cont`: Continuation to resume with Unit
-    Yield { cont: Option<Box<Cont>> },
-
-    /// Create a new channel
-    /// - `cont`: Continuation expecting the new Channel
-    NewChan { cont: Option<Box<Cont>> },
-
-    /// Send a value on a channel (blocks until receiver ready)
-    /// - `channel`: Target channel ID
-    /// - `value`: Value to send
-    /// - `cont`: Continuation to resume with Unit after send completes
-    Send {
-        channel: ChannelId,
-        value: Box<Value>,
-        cont: Option<Box<Cont>>,
-    },
-
-    /// Receive a value from a channel (blocks until sender ready)
-    /// - `channel`: Source channel ID
-    /// - `cont`: Continuation expecting the received Value
-    Recv {
-        channel: ChannelId,
-        cont: Option<Box<Cont>>,
-    },
-
-    /// Wait for a fiber to complete (type-safe join)
-    /// - `fiber_id`: The fiber to wait for
-    /// - `cont`: Continuation expecting the fiber's result Value
-    Join {
-        fiber_id: FiberId,
-        cont: Option<Box<Cont>>,
-    },
-
-    /// Select on multiple channels (blocks until one ready)
-    /// - `arms`: Channel IDs with their patterns and body expressions
-    /// - `cont`: Outer continuation (used after arm body evaluates)
-    Select {
-        arms: Vec<SelectEffectArm>,
-        cont: Option<Box<Cont>>,
-    },
-
-    /// Perform an I/O operation (handled by reactor or blocking pool)
-    /// - `op`: The I/O operation to perform
-    /// - `cont`: Continuation expecting the operation result (usually Result IoError a)
-    Io {
-        op: IoOp,
-        cont: Option<Box<Cont>>,
-    },
-}
-
-impl FiberEffect {
-    /// Attach a captured continuation to this effect.
-    /// Used after capture_to_fiber_boundary captures the continuation.
-    pub fn with_cont(self, captured: Cont) -> Self {
-        let boxed = Some(Box::new(captured));
-        match self {
-            FiberEffect::Done(v) => FiberEffect::Done(v),
-            FiberEffect::Fork { thunk, .. } => FiberEffect::Fork { thunk, cont: boxed },
-            FiberEffect::Yield { .. } => FiberEffect::Yield { cont: boxed },
-            FiberEffect::NewChan { .. } => FiberEffect::NewChan { cont: boxed },
-            FiberEffect::Send { channel, value, .. } => {
-                FiberEffect::Send { channel, value, cont: boxed }
-            }
-            FiberEffect::Recv { channel, .. } => FiberEffect::Recv { channel, cont: boxed },
-            FiberEffect::Join { fiber_id, .. } => FiberEffect::Join { fiber_id, cont: boxed },
-            FiberEffect::Select { arms, .. } => FiberEffect::Select { arms, cont: boxed },
-            FiberEffect::Io { op, .. } => FiberEffect::Io { op, cont: boxed },
-        }
-    }
-}
-
-/// A select arm for the FiberEffect::Select variant
+/// A select arm for the RuntimeEffect::Select variant
 #[derive(Debug, Clone)]
 pub struct SelectEffectArm {
     pub channel: ChannelId,
@@ -665,10 +597,7 @@ pub enum Value {
     /// A typed fiber handle (returned by Fiber.spawn, consumed by Fiber.join)
     Fiber(FiberId),
 
-    /// A suspended fiber effect awaiting runtime/scheduler handling
-    FiberEffect(FiberEffect),
-
-    /// A runtime effect awaiting scheduler handling (new unified system)
+    /// A runtime effect awaiting scheduler handling (unified algebraic effects)
     RuntimeEffect(RuntimeEffect),
 
     /// A composed function (f >> g or f << g)
@@ -720,7 +649,6 @@ impl Value {
             Value::BuiltinPartial { .. } => "BuiltinPartial",
             Value::Continuation { .. } => "Continuation",
             Value::Fiber(_) => "Fiber",
-            Value::FiberEffect(_) => "FiberEffect",
             Value::RuntimeEffect(_) => "RuntimeEffect",
             Value::ComposedFn { .. } => "Function",
             Value::Dict { .. } => "Dict",
@@ -2274,24 +2202,8 @@ impl Interpreter {
                 })
             }
 
-            // === Fiber effect frames ===
-            Some(Frame::FiberBoundary) => {
-                // Check if this is a runtime effect propagating to scheduler
-                if let Value::RuntimeEffect(effect) = value {
-                    // RuntimeEffect should pass through FiberBoundary to the scheduler
-                    self.return_runtime_effect(effect, cont)
-                } else if let Value::FiberEffect(effect) = value {
-                    // Already a fiber effect - propagate directly without wrapping
-                    self.return_fiber_effect(effect, cont)
-                } else {
-                    // Normal value - fiber completed, wrap in Done effect
-                    let effect = FiberEffect::Done(Box::new(value));
-                    self.return_fiber_effect(effect, cont)
-                }
-            }
-
-            // === Runtime effect scope (new unified system) ===
-            Some(Frame::RuntimeScope { handlers }) => {
+            // === Runtime effect scope (unified algebraic effects) ===
+            Some(Frame::RuntimeScope { handlers: _ }) => {
                 // Check if this is a runtime effect propagating to scheduler
                 if let Value::RuntimeEffect(effect) = value {
                     // Already a runtime effect - propagate directly
@@ -2314,21 +2226,21 @@ impl Interpreter {
                     }
                 };
 
-                // Capture continuation to FiberBoundary
-                match self.capture_to_fiber_boundary(&mut cont) {
+                // Capture continuation to RuntimeScope
+                match self.capture_to_runtime_scope(&mut cont) {
                     Ok(captured) => {
-                        let effect = FiberEffect::Recv {
+                        let effect = RuntimeEffect::Recv {
                             channel,
-                            cont: Some(Box::new(captured)),
+                            cont: captured,
                         };
-                        self.return_fiber_effect(effect, cont)
+                        self.return_runtime_effect(effect, cont)
                     }
                     Err(e) => StepResult::Error(e),
                 }
             }
 
             Some(Frame::FiberSendValue { value_expr, env }) => {
-                // Phase 4: Channel evaluated, now evaluate value
+                // Channel evaluated, now evaluate value
                 let channel = match &value {
                     Value::Channel(id) => *id,
                     _ => {
@@ -2347,14 +2259,14 @@ impl Interpreter {
 
             Some(Frame::FiberSendReady { channel }) => {
                 // Value evaluated, capture continuation and return Send effect
-                match self.capture_to_fiber_boundary(&mut cont) {
+                match self.capture_to_runtime_scope(&mut cont) {
                     Ok(captured) => {
-                        let effect = FiberEffect::Send {
+                        let effect = RuntimeEffect::Send {
                             channel,
                             value: Box::new(value),
-                            cont: Some(Box::new(captured)),
+                            cont: captured,
                         };
-                        self.return_fiber_effect(effect, cont)
+                        self.return_runtime_effect(effect, cont)
                     }
                     Err(e) => StepResult::Error(e),
                 }
@@ -2362,13 +2274,13 @@ impl Interpreter {
 
             Some(Frame::FiberFork) => {
                 // Thunk evaluated, capture continuation and return Fork effect
-                match self.capture_to_fiber_boundary(&mut cont) {
+                match self.capture_to_runtime_scope(&mut cont) {
                     Ok(captured) => {
-                        let effect = FiberEffect::Fork {
+                        let effect = RuntimeEffect::Fork {
                             thunk: Box::new(value),
-                            cont: Some(Box::new(captured)),
+                            cont: captured,
                         };
-                        self.return_fiber_effect(effect, cont)
+                        self.return_runtime_effect(effect, cont)
                     }
                     Err(e) => StepResult::Error(e),
                 }
@@ -2385,13 +2297,13 @@ impl Interpreter {
                     }
                 };
 
-                match self.capture_to_fiber_boundary(&mut cont) {
+                match self.capture_to_runtime_scope(&mut cont) {
                     Ok(captured) => {
-                        let effect = FiberEffect::Join {
+                        let effect = RuntimeEffect::Join {
                             fiber_id,
-                            cont: Some(Box::new(captured)),
+                            cont: captured,
                         };
-                        self.return_fiber_effect(effect, cont)
+                        self.return_runtime_effect(effect, cont)
                     }
                     Err(e) => StepResult::Error(e),
                 }
@@ -2453,7 +2365,7 @@ impl Interpreter {
                 env,
             }) => {
                 // All channels collected, capture continuation and return Select effect
-                match self.capture_to_fiber_boundary(&mut cont) {
+                match self.capture_to_runtime_scope(&mut cont) {
                     Ok(captured) => {
                         // Convert patterns/bodies/env into SelectEffectArms
                         let arms: Vec<SelectEffectArm> = channels
@@ -2468,11 +2380,11 @@ impl Interpreter {
                             })
                             .collect();
 
-                        let effect = FiberEffect::Select {
+                        let effect = RuntimeEffect::Select {
                             arms,
-                            cont: Some(Box::new(captured)),
+                            cont: captured,
                         };
-                        self.return_fiber_effect(effect, cont)
+                        self.return_runtime_effect(effect, cont)
                     }
                     Err(e) => StepResult::Error(e),
                 }
@@ -2667,12 +2579,14 @@ impl Interpreter {
                     // All args collected, produce the IoOp effect
                     match Self::build_io_op(op_kind, collected_args) {
                         Ok(io_op) => {
-                            // Create the effect - continuation will be attached by capture
-                            let effect = FiberEffect::Io { op: io_op, cont: None };
-                            StepResult::Continue(State::Apply {
-                                value: Value::FiberEffect(effect),
-                                cont,
-                            })
+                            // Capture continuation and create RuntimeEffect::Io
+                            match self.capture_to_runtime_scope(&mut cont) {
+                                Ok(captured) => {
+                                    let effect = RuntimeEffect::Io { op: io_op, cont: captured };
+                                    self.return_runtime_effect(effect, cont)
+                                }
+                                Err(e) => StepResult::Error(e),
+                            }
                         }
                         Err(e) => StepResult::Error(e),
                     }
@@ -2986,12 +2900,12 @@ impl Interpreter {
                         Ok(BuiltinResult::Value(value)) => {
                             StepResult::Continue(State::Apply { value, cont })
                         }
-                        Ok(BuiltinResult::Effect(mut effect)) => {
-                            // Capture continuation to FiberBoundary and attach to effect
-                            match self.capture_to_fiber_boundary(&mut cont) {
+                        Ok(BuiltinResult::Effect(effect_stub)) => {
+                            // Capture continuation to RuntimeScope and create RuntimeEffect
+                            match self.capture_to_runtime_scope(&mut cont) {
                                 Ok(captured) => {
-                                    effect = effect.with_cont(captured);
-                                    self.return_fiber_effect(effect, cont)
+                                    let effect = effect_stub.with_cont(captured);
+                                    self.return_runtime_effect(effect, cont)
                                 }
                                 Err(e) => StepResult::Error(e),
                             }
@@ -3470,12 +3384,11 @@ impl Interpreter {
                     ("file_open", 2) => {
                         match Self::build_io_op(PartialIoOp::FileOpen, args) {
                             Ok(io_op) => {
-                                // Capture continuation and attach to effect
-                                match self.capture_to_fiber_boundary(&mut cont) {
+                                // Capture continuation and create RuntimeEffect::Io
+                                match self.capture_to_runtime_scope(&mut cont) {
                                     Ok(captured) => {
-                                        let effect = FiberEffect::Io { op: io_op, cont: None }
-                                            .with_cont(captured);
-                                        self.return_fiber_effect(effect, cont)
+                                        let effect = RuntimeEffect::Io { op: io_op, cont: captured };
+                                        self.return_runtime_effect(effect, cont)
                                     }
                                     Err(e) => StepResult::Error(e),
                                 }
@@ -3487,11 +3400,10 @@ impl Interpreter {
                     ("file_read", 2) => {
                         match Self::build_io_op(PartialIoOp::Read, args) {
                             Ok(io_op) => {
-                                match self.capture_to_fiber_boundary(&mut cont) {
+                                match self.capture_to_runtime_scope(&mut cont) {
                                     Ok(captured) => {
-                                        let effect = FiberEffect::Io { op: io_op, cont: None }
-                                            .with_cont(captured);
-                                        self.return_fiber_effect(effect, cont)
+                                        let effect = RuntimeEffect::Io { op: io_op, cont: captured };
+                                        self.return_runtime_effect(effect, cont)
                                     }
                                     Err(e) => StepResult::Error(e),
                                 }
@@ -3503,11 +3415,10 @@ impl Interpreter {
                     ("file_write", 2) => {
                         match Self::build_io_op(PartialIoOp::Write, args) {
                             Ok(io_op) => {
-                                match self.capture_to_fiber_boundary(&mut cont) {
+                                match self.capture_to_runtime_scope(&mut cont) {
                                     Ok(captured) => {
-                                        let effect = FiberEffect::Io { op: io_op, cont: None }
-                                            .with_cont(captured);
-                                        self.return_fiber_effect(effect, cont)
+                                        let effect = RuntimeEffect::Io { op: io_op, cont: captured };
+                                        self.return_runtime_effect(effect, cont)
                                     }
                                     Err(e) => StepResult::Error(e),
                                 }
@@ -3519,11 +3430,10 @@ impl Interpreter {
                     ("tcp_connect", 2) => {
                         match Self::build_io_op(PartialIoOp::TcpConnect, args) {
                             Ok(io_op) => {
-                                match self.capture_to_fiber_boundary(&mut cont) {
+                                match self.capture_to_runtime_scope(&mut cont) {
                                     Ok(captured) => {
-                                        let effect = FiberEffect::Io { op: io_op, cont: None }
-                                            .with_cont(captured);
-                                        self.return_fiber_effect(effect, cont)
+                                        let effect = RuntimeEffect::Io { op: io_op, cont: captured };
+                                        self.return_runtime_effect(effect, cont)
                                     }
                                     Err(e) => StepResult::Error(e),
                                 }
@@ -3535,11 +3445,10 @@ impl Interpreter {
                     ("tcp_listen", 2) => {
                         match Self::build_io_op(PartialIoOp::TcpListen, args) {
                             Ok(io_op) => {
-                                match self.capture_to_fiber_boundary(&mut cont) {
+                                match self.capture_to_runtime_scope(&mut cont) {
                                     Ok(captured) => {
-                                        let effect = FiberEffect::Io { op: io_op, cont: None }
-                                            .with_cont(captured);
-                                        self.return_fiber_effect(effect, cont)
+                                        let effect = RuntimeEffect::Io { op: io_op, cont: captured };
+                                        self.return_runtime_effect(effect, cont)
                                     }
                                     Err(e) => StepResult::Error(e),
                                 }
@@ -3969,18 +3878,16 @@ impl Interpreter {
         match name {
             "Fiber.spawn" => {
                 // arg should be a thunk (() -> a)
-                // Return a Fork effect - continuation capture happens at call site
-                Ok(BuiltinResult::Effect(FiberEffect::Fork {
+                // Return a Fork effect stub - continuation capture happens at call site
+                Ok(BuiltinResult::Effect(EffectStub::Fork {
                     thunk: Box::new(arg),
-                    cont: None, // Will be filled in by caller after capture
                 }))
             }
             "Fiber.join" => {
                 // arg should be a Fiber<A>
                 match arg {
-                    Value::Fiber(fiber_id) => Ok(BuiltinResult::Effect(FiberEffect::Join {
+                    Value::Fiber(fiber_id) => Ok(BuiltinResult::Effect(EffectStub::Join {
                         fiber_id,
-                        cont: None, // Will be filled in by caller after capture
                     })),
                     _ => Err(EvalError::TypeError(
                         "Fiber.join expects a Fiber value".into(),
@@ -3989,15 +3896,18 @@ impl Interpreter {
             }
             "Fiber.yield" => {
                 // arg should be ()
-                Ok(BuiltinResult::Effect(FiberEffect::Yield { cont: None }))
+                Ok(BuiltinResult::Effect(EffectStub::Yield))
+            }
+            "Channel.new" => {
+                // arg should be ()
+                Ok(BuiltinResult::Effect(EffectStub::ChanNew))
             }
             "sleep_ms" => {
                 // arg should be Int (milliseconds)
                 match arg {
                     Value::Int(ms) if ms >= 0 => {
-                        Ok(BuiltinResult::Effect(FiberEffect::Io {
+                        Ok(BuiltinResult::Effect(EffectStub::Io {
                             op: IoOp::Sleep { duration_ms: ms as u64 },
-                            cont: None,
                         }))
                     }
                     Value::Int(ms) => Err(EvalError::TypeError(format!(
@@ -4021,9 +3931,8 @@ impl Interpreter {
             "file_close" => {
                 match arg {
                     Value::FileHandle(id) => {
-                        Ok(BuiltinResult::Effect(FiberEffect::Io {
+                        Ok(BuiltinResult::Effect(EffectStub::Io {
                             op: IoOp::Close { handle: id },
-                            cont: None,
                         }))
                     }
                     _ => Err(EvalError::TypeError(format!(
@@ -4043,9 +3952,8 @@ impl Interpreter {
             "tcp_accept" => {
                 match arg {
                     Value::TcpListener(id) => {
-                        Ok(BuiltinResult::Effect(FiberEffect::Io {
+                        Ok(BuiltinResult::Effect(EffectStub::Io {
                             op: IoOp::TcpAccept { listener: id },
-                            cont: None,
                         }))
                     }
                     _ => Err(EvalError::TypeError(format!(
@@ -4068,6 +3976,7 @@ impl Interpreter {
             "Fiber.spawn"
                 | "Fiber.join"
                 | "Fiber.yield"
+                | "Channel.new"
                 | "sleep_ms"
                 | "file_open"
                 | "file_read"
@@ -4128,7 +4037,6 @@ impl Interpreter {
             Value::Continuation { .. } => print!("<continuation>"),
             Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
             Value::Fiber(id) => print!("<fiber:{}>", id),
-            Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
             Value::Record { type_name, fields } => {
                 print!("{} {{ ", type_name);
                 let mut first = true;
@@ -4174,24 +4082,24 @@ impl Interpreter {
         }
     }
 
-    // === Fiber effect helpers ===
+    // === Runtime effect helpers ===
 
-    /// Capture frames from continuation up to (but not including) FiberBoundary.
-    /// Unlike shift's capture to Prompt, FiberBoundary remains on the stack.
+    /// Capture frames from continuation up to (but not including) RuntimeScope.
+    /// RuntimeScope remains on the stack (it's a persistent delimiter).
     /// Returns the captured frames as a new Cont.
-    fn capture_to_fiber_boundary(&self, cont: &mut Cont) -> Result<Cont, EvalError> {
+    fn capture_to_runtime_scope(&self, cont: &mut Cont) -> Result<Cont, EvalError> {
         let mut captured = Vec::new();
 
         loop {
             match cont.pop() {
                 None => {
                     return Err(EvalError::RuntimeError(
-                        "fiber effect without enclosing FiberBoundary".into(),
+                        "runtime effect without enclosing RuntimeScope".into(),
                     ));
                 }
-                Some(Frame::FiberBoundary) => {
-                    // Found delimiter - put it back (unlike Prompt, we keep it)
-                    cont.push(Frame::FiberBoundary);
+                Some(Frame::RuntimeScope { handlers }) => {
+                    // Found delimiter - put it back (persistent delimiter)
+                    cont.push(Frame::RuntimeScope { handlers });
                     break;
                 }
                 Some(frame) => {
@@ -4203,15 +4111,6 @@ impl Interpreter {
         // Frames were popped innermost-first; reverse so outermost is first
         captured.reverse();
         Ok(Cont::from_frames(captured))
-    }
-
-    /// Return a FiberEffect value via the Apply state.
-    /// This allows the scheduler to pattern match on the effect.
-    fn return_fiber_effect(&self, effect: FiberEffect, cont: Cont) -> StepResult {
-        StepResult::Continue(State::Apply {
-            value: Value::FiberEffect(effect),
-            cont,
-        })
     }
 
     /// Return a RuntimeEffect value via the Apply state.
@@ -4228,7 +4127,7 @@ impl Interpreter {
     fn build_runtime_effect(
         &self,
         kind: &RuntimeHandlerKind,
-        operation: &str,
+        _operation: &str,
         args: Vec<Value>,
         cont: Cont,
     ) -> Result<RuntimeEffect, EvalError> {
@@ -4411,9 +4310,7 @@ impl Interpreter {
                         ProcessContinuation::ResumeFiber(value) => {
                             // Resume fiber with a value using fiber_cont
                             if let Some(mut fiber_cont) = self.runtime.take_fiber_cont(pid) {
-                                // Insert both frames at bottom for backward compatibility
-                                // TODO: Remove FiberBoundary once all code uses perform Async.* syntax
-                                fiber_cont.insert_at_bottom(Frame::FiberBoundary);
+                                // Insert RuntimeScope at bottom for effect handling
                                 fiber_cont.insert_at_bottom(Frame::RuntimeScope {
                                     handlers: RuntimeHandlerSet::async_handlers(),
                                 });
@@ -4435,8 +4332,7 @@ impl Interpreter {
                                     if self.try_bind_pattern(&new_env, &arm.pattern, &value) {
                                         // Build continuation with fiber_cont
                                         let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_default();
-                                        // Insert both frames for backward compatibility
-                                        cont.insert_at_bottom(Frame::FiberBoundary);
+                                        // Insert RuntimeScope at bottom for effect handling
                                         cont.insert_at_bottom(Frame::RuntimeScope {
                                             handlers: RuntimeHandlerSet::async_handlers(),
                                         });
@@ -4485,11 +4381,7 @@ impl Interpreter {
     fn run_process(&mut self, pid: Pid, thunk: Value) -> Result<(), EvalError> {
         // Build initial state: apply thunk to Unit
         let mut cont = Cont::new();
-        // Push both FiberBoundary (for old API: Fiber.spawn, Channel.send, etc.)
-        // and RuntimeScope (for new API: perform Async.*) at the bottom of the stack.
-        // This provides backward compatibility during the migration.
-        // TODO: Remove FiberBoundary once all code uses perform Async.* syntax
-        cont.push(Frame::FiberBoundary);
+        // Push RuntimeScope at the bottom for unified algebraic effects handling
         cont.push(Frame::RuntimeScope {
             handlers: RuntimeHandlerSet::async_handlers(),
         });
@@ -4513,10 +4405,6 @@ impl Interpreter {
                     if let Value::RuntimeEffect(effect) = value {
                         return self.handle_runtime_effect(pid, effect);
                     }
-                    // Check if this is a fiber effect (from FiberBoundary - legacy path)
-                    if let Value::FiberEffect(effect) = value {
-                        return self.handle_fiber_effect(pid, effect);
-                    }
                     // Regular completion
                     self.runtime.mark_done(pid);
                     return Ok(());
@@ -4530,69 +4418,8 @@ impl Interpreter {
         }
     }
 
-    /// Handle a fiber effect that bubbled up from the interpreter.
-    /// This is the NEW effect-based scheduler interface (Phase 7).
-    fn handle_fiber_effect(&mut self, pid: Pid, effect: FiberEffect) -> Result<(), EvalError> {
-        match effect {
-            FiberEffect::Done(value) => {
-                // Fiber completed with a result
-                self.runtime.complete_fiber(pid, *value);
-            }
-            FiberEffect::Fork { thunk, cont } => {
-                // Store parent's continuation
-                if let Some(c) = cont {
-                    self.runtime.store_fiber_cont(pid, *c);
-                }
-                // Spawn child fiber
-                let child_pid = self.runtime.spawn(*thunk);
-                // Resume parent with child's handle
-                self.runtime.resume_fiber_with(pid, Value::Fiber(child_pid));
-            }
-            FiberEffect::Yield { cont } => {
-                // Store continuation and re-queue at back
-                if let Some(c) = cont {
-                    self.runtime.store_fiber_cont(pid, *c);
-                }
-                self.runtime.yield_fiber(pid);
-            }
-            FiberEffect::NewChan { cont } => {
-                // Create new channel and resume with it
-                let channel_id = self.runtime.new_channel();
-                if let Some(c) = cont {
-                    self.runtime.store_fiber_cont(pid, *c);
-                }
-                self.runtime.resume_fiber_with(pid, Value::Channel(channel_id));
-            }
-            FiberEffect::Send { channel, value, cont } => {
-                // Block fiber waiting to send (try immediate handoff first)
-                self.runtime
-                    .block_fiber_send(pid, channel, *value, cont.map(|c| *c));
-            }
-            FiberEffect::Recv { channel, cont } => {
-                // Block fiber waiting to receive (try immediate handoff first)
-                self.runtime.block_fiber_recv(pid, channel, cont.map(|c| *c));
-            }
-            FiberEffect::Join { fiber_id, cont } => {
-                // Block fiber waiting to join another fiber
-                self.runtime
-                    .block_fiber_join(pid, fiber_id, cont.map(|c| *c));
-            }
-            FiberEffect::Select { arms, cont } => {
-                // Block fiber on select (register on all channels)
-                self.runtime
-                    .block_fiber_select(pid, arms, cont.map(|c| *c));
-            }
-            FiberEffect::Io { op, cont } => {
-                // Dispatch to the appropriate I/O handler (reactor, pool, or timer)
-                self.runtime.dispatch_io(pid, op, cont.map(|c| *c));
-            }
-        }
-        Ok(())
-    }
-
     /// Handle a runtime effect that bubbled up from the interpreter via RuntimeScope.
-    /// This is the unified algebraic effects path that will replace handle_fiber_effect.
-    /// Unlike FiberEffect, RuntimeEffect always has a non-optional continuation.
+    /// This is the unified algebraic effects system for all scheduler operations.
     fn handle_runtime_effect(&mut self, pid: Pid, effect: RuntimeEffect) -> Result<(), EvalError> {
         match effect {
             RuntimeEffect::Done(value) => {

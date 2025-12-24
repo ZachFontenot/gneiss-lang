@@ -530,7 +530,6 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::Continuation { .. } => print!("<continuation>"),
         gneiss::Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
         gneiss::Value::Fiber(id) => print!("<fiber:{}>", id),
-        gneiss::Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
         gneiss::Value::Record { type_name, fields } => {
             print!("{} {{ ", type_name);
             let mut first = true;
