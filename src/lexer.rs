@@ -33,8 +33,6 @@ pub enum Token {
     Type,
     Select,
     End,
-    Reset,
-    Shift,
 
     // Typeclass keywords
     Trait,
@@ -502,8 +500,6 @@ impl<'a> Lexer<'a> {
             "not" => Token::Not,
             "select" => Token::Select,
             "end" => Token::End,
-            "reset" => Token::Reset,
-            "shift" => Token::Shift,
             // Typeclass keywords
             "trait" => Token::Trait,
             // Effect keywords

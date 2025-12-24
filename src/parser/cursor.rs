@@ -154,8 +154,6 @@ impl TokenCursor {
                 | Token::UpperIdent(_)
                 | Token::LParen
                 | Token::LBracket
-                | Token::Reset
-                | Token::Shift
         )
     }
 

@@ -1932,30 +1932,6 @@ impl Parser {
                     ))
                 }
             }
-            Token::Reset => {
-                self.advance();
-                let body = self.parse_expr_atom()?;
-                let span = start.merge(&body.span);
-                Ok(Spanned::new(ExprKind::Reset(Rc::new(body)), span))
-            }
-            Token::Shift => {
-                self.advance();
-                let func = self.parse_expr_atom()?;
-
-                match &func.node {
-                    ExprKind::Lambda { params, body } if params.len() == 1 => {
-                        let span = start.merge(&func.span);
-                        Ok(Spanned::new(
-                            ExprKind::Shift {
-                                param: params[0].clone(),
-                                body: body.clone(),
-                            },
-                            span,
-                        ))
-                    }
-                    _ => Err(self.unexpected_token("function (fun k -> ...)")),
-                }
-            }
             Token::Perform => self.parse_perform_expr(start),
             Token::Handle => self.parse_handle_expr(start),
             Token::LParen => {

@@ -282,20 +282,6 @@ pub enum ExprKind {
     },
 
     // ========================================================================
-    // Delimited continuations
-    // ========================================================================
-    /// Delimited continuation boundary: reset expr
-    Reset(Rc<Expr>),
-
-    /// Capture continuation: shift (fun k -> body)
-    Shift {
-        /// Parameter that binds the captured continuation
-        param: Pattern,
-        /// Body to execute with continuation bound
-        body: Rc<Expr>,
-    },
-
-    // ========================================================================
     // Algebraic Effects
     // ========================================================================
     /// Perform an effect operation: perform State.get ()

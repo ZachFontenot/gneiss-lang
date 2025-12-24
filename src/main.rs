@@ -572,6 +572,7 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::FileHandle(id) => print!("<file-handle:{}>", id),
         gneiss::Value::TcpSocket(id) => print!("<tcp-socket:{}>", id),
         gneiss::Value::TcpListener(id) => print!("<tcp-listener:{}>", id),
+        gneiss::Value::RuntimeEffect(effect) => print!("<runtime-effect:{:?}>", effect),
     }
 }
 

@@ -99,10 +99,6 @@ pub enum Frame {
     /// After evaluating the thunk expression for spawn
     Spawn,
 
-    // === Delimited continuation frames ===
-    /// Delimiter marker for reset
-    Prompt,
-
     // === Fiber effect frames (unified runtime) ===
     /// Implicit delimiter for fiber continuations.
     /// Unlike Prompt, FiberBoundary remains on stack after capture.
@@ -210,6 +206,14 @@ pub enum Frame {
         /// Environment for handlers
         env: Env,
     },
+
+    /// Runtime effect scope - handles Async operations at fiber boundary.
+    /// Unlike HandleScope, RuntimeScope stays on stack after capture (persistent delimiter).
+    /// Unlike user handlers, it produces RuntimeEffect values for scheduler.
+    RuntimeScope {
+        /// Maps operation names to their runtime handler kinds
+        handlers: RuntimeHandlerSet,
+    },
 }
 
 /// Runtime representation of an effect handler arm
@@ -223,6 +227,98 @@ pub struct RuntimeHandler {
     pub continuation: String,
     /// Handler body
     pub body: Rc<Expr>,
+}
+
+/// Set of runtime handlers for Async effect operations
+#[derive(Debug, Clone)]
+pub struct RuntimeHandlerSet {
+    handlers: HashMap<String, RuntimeHandlerKind>,
+}
+
+impl RuntimeHandlerSet {
+    /// Create handler set for all Async operations
+    pub fn async_handlers() -> Self {
+        let mut handlers = HashMap::new();
+        handlers.insert("fork".to_string(), RuntimeHandlerKind::Fork);
+        handlers.insert("yield_".to_string(), RuntimeHandlerKind::Yield);
+        handlers.insert("chan_new".to_string(), RuntimeHandlerKind::ChanNew);
+        handlers.insert("send".to_string(), RuntimeHandlerKind::Send);
+        handlers.insert("recv".to_string(), RuntimeHandlerKind::Recv);
+        handlers.insert("join".to_string(), RuntimeHandlerKind::Join);
+        handlers.insert("select".to_string(), RuntimeHandlerKind::Select);
+        handlers.insert("io".to_string(), RuntimeHandlerKind::Io);
+        RuntimeHandlerSet { handlers }
+    }
+
+    /// Get handler kind for an operation
+    pub fn get(&self, operation: &str) -> Option<&RuntimeHandlerKind> {
+        self.handlers.get(operation)
+    }
+}
+
+/// Types of runtime effect operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeHandlerKind {
+    Fork,
+    Yield,
+    ChanNew,
+    Send,
+    Recv,
+    Join,
+    Select,
+    Io,
+}
+
+/// Effects that require runtime/scheduler handling.
+/// These are produced when an Async operation reaches RuntimeScope.
+/// Unlike FiberEffect, cont is always present (not optional).
+#[derive(Debug, Clone)]
+pub enum RuntimeEffect {
+    /// Fiber completed with a value
+    Done(Box<Value>),
+
+    /// Fork a new fiber: perform Async.fork thunk
+    Fork {
+        thunk: Box<Value>,
+        cont: Cont,
+    },
+
+    /// Yield control: perform Async.yield_ ()
+    Yield { cont: Cont },
+
+    /// Create channel: perform Async.chan_new ()
+    ChanNew { cont: Cont },
+
+    /// Send on channel: perform Async.send ch v
+    Send {
+        channel: ChannelId,
+        value: Box<Value>,
+        cont: Cont,
+    },
+
+    /// Receive from channel: perform Async.recv ch
+    Recv {
+        channel: ChannelId,
+        cont: Cont,
+    },
+
+    /// Join fiber: perform Async.join fiber
+    Join {
+        fiber_id: FiberId,
+        cont: Cont,
+    },
+
+    /// Select on multiple channels
+    Select {
+        arms: Vec<SelectEffectArm>,
+        cont: Cont,
+    },
+
+    /// I/O operation
+    Io {
+        op: IoOp,
+        cont: Cont,
+    },
 }
 
 /// What kind of collection we're building
@@ -572,6 +668,9 @@ pub enum Value {
     /// A suspended fiber effect awaiting runtime/scheduler handling
     FiberEffect(FiberEffect),
 
+    /// A runtime effect awaiting scheduler handling (new unified system)
+    RuntimeEffect(RuntimeEffect),
+
     /// A composed function (f >> g or f << g)
     ComposedFn {
         first: Box<Value>,
@@ -622,6 +721,7 @@ impl Value {
             Value::Continuation { .. } => "Continuation",
             Value::Fiber(_) => "Fiber",
             Value::FiberEffect(_) => "FiberEffect",
+            Value::RuntimeEffect(_) => "RuntimeEffect",
             Value::ComposedFn { .. } => "Function",
             Value::Dict { .. } => "Dict",
             Value::Record { .. } => "Record",
@@ -1593,56 +1693,6 @@ impl Interpreter {
                 })
             }
 
-            // === Delimited continuations ===
-            ExprKind::Reset(body) => {
-                cont.push(Frame::Prompt);
-                StepResult::Continue(State::Eval {
-                    expr: body.clone(),
-                    env,
-                    cont,
-                })
-            }
-
-            ExprKind::Shift { param, body } => {
-                // Capture frames up to Prompt
-                let mut captured = Vec::new();
-
-                loop {
-                    match cont.pop() {
-                        None => {
-                            return StepResult::Error(EvalError::RuntimeError(
-                                "shift without enclosing reset".into(),
-                            ));
-                        }
-                        Some(Frame::Prompt) => {
-                            break; // Found delimiter, stop capturing
-                        }
-                        Some(frame) => {
-                            captured.push(frame);
-                        }
-                    }
-                }
-
-                // Frames were popped innermost-first; reverse so outermost is first
-                // (This makes restore simpler: just push in order)
-                captured.reverse();
-
-                // Create continuation value
-                let continuation = Value::Continuation { frames: captured };
-
-                // Bind parameter to continuation and evaluate body
-                let new_env = EnvInner::with_parent(&env);
-                if !self.try_bind_pattern(&new_env, param, &continuation) {
-                    return StepResult::Error(EvalError::MatchFailed);
-                }
-
-                StepResult::Continue(State::Eval {
-                    expr: body.clone(),
-                    env: new_env,
-                    cont,
-                })
-            }
-
             // ========================================================================
             // Algebraic Effects
             // ========================================================================
@@ -1926,6 +1976,34 @@ impl Interpreter {
                         });
                     }
                 }
+
+                // RuntimeScope handles Async effect operations for the scheduler
+                Some(Frame::RuntimeScope { handlers }) => {
+                    if effect == "Async" {
+                        // Use &kind pattern to copy the value (RuntimeHandlerKind is Copy)
+                        // This releases the borrow on handlers before we move it
+                        if let Some(&kind) = handlers.get(operation) {
+                            // Put RuntimeScope back (it's a persistent delimiter)
+                            cont.push(Frame::RuntimeScope { handlers });
+
+                            // Captured frames become the continuation
+                            captured.reverse();
+                            let effect_cont = Cont::from_frames(captured);
+
+                            // Build RuntimeEffect based on handler kind
+                            match self.build_runtime_effect(&kind, operation, args, effect_cont) {
+                                Ok(runtime_effect) => {
+                                    // Return RuntimeEffect to scheduler
+                                    return self.return_runtime_effect(runtime_effect, cont);
+                                }
+                                Err(e) => return StepResult::Error(e),
+                            }
+                        }
+                    }
+                    // This RuntimeScope doesn't handle this effect - keep searching
+                    captured.push(Frame::RuntimeScope { handlers });
+                }
+
                 Some(frame) => {
                     // Keep capturing frames
                     captured.push(frame);
@@ -2172,12 +2250,6 @@ impl Interpreter {
                 }
             }
 
-            // === Delimited continuation frames ===
-            Some(Frame::Prompt) => {
-                // reset body completed, value passes through
-                StepResult::Continue(State::Apply { value, cont })
-            }
-
             // === Algebraic effect frames ===
             Some(Frame::HandleScope { return_pattern, return_body, env, .. }) => {
                 // Handler body completed normally (no effect performed)
@@ -2204,14 +2276,30 @@ impl Interpreter {
 
             // === Fiber effect frames ===
             Some(Frame::FiberBoundary) => {
-                // Check if this is a fiber effect propagating to scheduler
-                if let Value::FiberEffect(effect) = value {
+                // Check if this is a runtime effect propagating to scheduler
+                if let Value::RuntimeEffect(effect) = value {
+                    // RuntimeEffect should pass through FiberBoundary to the scheduler
+                    self.return_runtime_effect(effect, cont)
+                } else if let Value::FiberEffect(effect) = value {
                     // Already a fiber effect - propagate directly without wrapping
                     self.return_fiber_effect(effect, cont)
                 } else {
                     // Normal value - fiber completed, wrap in Done effect
                     let effect = FiberEffect::Done(Box::new(value));
                     self.return_fiber_effect(effect, cont)
+                }
+            }
+
+            // === Runtime effect scope (new unified system) ===
+            Some(Frame::RuntimeScope { handlers }) => {
+                // Check if this is a runtime effect propagating to scheduler
+                if let Value::RuntimeEffect(effect) = value {
+                    // Already a runtime effect - propagate directly
+                    self.return_runtime_effect(effect, cont)
+                } else {
+                    // Normal value - fiber completed, wrap in Done effect
+                    let effect = RuntimeEffect::Done(Box::new(value));
+                    self.return_runtime_effect(effect, cont)
                 }
             }
 
@@ -2937,12 +3025,9 @@ impl Interpreter {
             }
 
             Value::Continuation { frames } => {
-                // CRITICAL: Push a fresh Prompt before splicing - this is the "reset" that wraps k's invocation
-                // This implements the canonical shift/reset semantics: k x ≡ reset E[x]
-                // Without this, we'd have control/prompt semantics instead
-                cont.push(Frame::Prompt);
-
                 // Splice captured frames back onto stack
+                // For algebraic effect continuations, the HandleScope is already included
+                // in the captured frames for deep handler semantics
                 // Frames are stored outermost-first, push in order so innermost ends up on top
                 for frame in frames.into_iter() {
                     cont.push(frame);
@@ -4085,6 +4170,7 @@ impl Interpreter {
             Value::FileHandle(id) => print!("<file-handle:{}>", id),
             Value::TcpSocket(id) => print!("<tcp-socket:{}>", id),
             Value::TcpListener(id) => print!("<tcp-listener:{}>", id),
+            Value::RuntimeEffect(effect) => print!("<runtime-effect:{:?}>", effect),
         }
     }
 
@@ -4126,6 +4212,106 @@ impl Interpreter {
             value: Value::FiberEffect(effect),
             cont,
         })
+    }
+
+    /// Return a RuntimeEffect value via the Apply state.
+    /// This allows the scheduler to pattern match on the effect (new unified system).
+    fn return_runtime_effect(&self, effect: RuntimeEffect, cont: Cont) -> StepResult {
+        StepResult::Continue(State::Apply {
+            value: Value::RuntimeEffect(effect),
+            cont,
+        })
+    }
+
+    /// Build a RuntimeEffect from a handler kind and arguments.
+    /// Called when perform Async.op hits a RuntimeScope.
+    fn build_runtime_effect(
+        &self,
+        kind: &RuntimeHandlerKind,
+        operation: &str,
+        args: Vec<Value>,
+        cont: Cont,
+    ) -> Result<RuntimeEffect, EvalError> {
+        match kind {
+            RuntimeHandlerKind::Fork => {
+                if args.len() != 1 {
+                    return Err(EvalError::RuntimeError(format!(
+                        "Async.fork expects 1 argument, got {}", args.len()
+                    )));
+                }
+                Ok(RuntimeEffect::Fork {
+                    thunk: Box::new(args.into_iter().next().unwrap()),
+                    cont,
+                })
+            }
+            RuntimeHandlerKind::Yield => {
+                Ok(RuntimeEffect::Yield { cont })
+            }
+            RuntimeHandlerKind::ChanNew => {
+                Ok(RuntimeEffect::ChanNew { cont })
+            }
+            RuntimeHandlerKind::Send => {
+                if args.len() != 2 {
+                    return Err(EvalError::RuntimeError(format!(
+                        "Async.send expects 2 arguments, got {}", args.len()
+                    )));
+                }
+                let mut args = args.into_iter();
+                let channel = match args.next().unwrap() {
+                    Value::Channel(id) => id,
+                    other => return Err(EvalError::RuntimeError(format!(
+                        "Async.send expects Channel, got {}", other.type_name()
+                    ))),
+                };
+                let value = args.next().unwrap();
+                Ok(RuntimeEffect::Send {
+                    channel,
+                    value: Box::new(value),
+                    cont,
+                })
+            }
+            RuntimeHandlerKind::Recv => {
+                if args.len() != 1 {
+                    return Err(EvalError::RuntimeError(format!(
+                        "Async.recv expects 1 argument, got {}", args.len()
+                    )));
+                }
+                let channel = match args.into_iter().next().unwrap() {
+                    Value::Channel(id) => id,
+                    other => return Err(EvalError::RuntimeError(format!(
+                        "Async.recv expects Channel, got {}", other.type_name()
+                    ))),
+                };
+                Ok(RuntimeEffect::Recv { channel, cont })
+            }
+            RuntimeHandlerKind::Join => {
+                if args.len() != 1 {
+                    return Err(EvalError::RuntimeError(format!(
+                        "Async.join expects 1 argument, got {}", args.len()
+                    )));
+                }
+                let fiber_id = match args.into_iter().next().unwrap() {
+                    Value::Fiber(id) => id,
+                    other => return Err(EvalError::RuntimeError(format!(
+                        "Async.join expects Fiber, got {}", other.type_name()
+                    ))),
+                };
+                Ok(RuntimeEffect::Join { fiber_id, cont })
+            }
+            RuntimeHandlerKind::Select => {
+                // Select is complex - needs special handling
+                // For now, return an error; we'll implement this properly later
+                Err(EvalError::RuntimeError(
+                    "Async.select not yet implemented via perform".into()
+                ))
+            }
+            RuntimeHandlerKind::Io => {
+                // IO operations need special handling too
+                Err(EvalError::RuntimeError(
+                    "Async.io not yet implemented via perform".into()
+                ))
+            }
+        }
     }
 
     /// Try to bind a pattern, returning false if it doesn't match
@@ -4225,7 +4411,12 @@ impl Interpreter {
                         ProcessContinuation::ResumeFiber(value) => {
                             // Resume fiber with a value using fiber_cont
                             if let Some(mut fiber_cont) = self.runtime.take_fiber_cont(pid) {
+                                // Insert both frames at bottom for backward compatibility
+                                // TODO: Remove FiberBoundary once all code uses perform Async.* syntax
                                 fiber_cont.insert_at_bottom(Frame::FiberBoundary);
+                                fiber_cont.insert_at_bottom(Frame::RuntimeScope {
+                                    handlers: RuntimeHandlerSet::async_handlers(),
+                                });
                                 let state = State::Apply {
                                     value,
                                     cont: fiber_cont,
@@ -4244,7 +4435,11 @@ impl Interpreter {
                                     if self.try_bind_pattern(&new_env, &arm.pattern, &value) {
                                         // Build continuation with fiber_cont
                                         let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_default();
+                                        // Insert both frames for backward compatibility
                                         cont.insert_at_bottom(Frame::FiberBoundary);
+                                        cont.insert_at_bottom(Frame::RuntimeScope {
+                                            handlers: RuntimeHandlerSet::async_handlers(),
+                                        });
                                         let state = State::Eval {
                                             expr: arm.body,
                                             env: new_env,
@@ -4290,8 +4485,14 @@ impl Interpreter {
     fn run_process(&mut self, pid: Pid, thunk: Value) -> Result<(), EvalError> {
         // Build initial state: apply thunk to Unit
         let mut cont = Cont::new();
-        // Push FiberBoundary at the bottom of the stack to enable fiber effects
+        // Push both FiberBoundary (for old API: Fiber.spawn, Channel.send, etc.)
+        // and RuntimeScope (for new API: perform Async.*) at the bottom of the stack.
+        // This provides backward compatibility during the migration.
+        // TODO: Remove FiberBoundary once all code uses perform Async.* syntax
         cont.push(Frame::FiberBoundary);
+        cont.push(Frame::RuntimeScope {
+            handlers: RuntimeHandlerSet::async_handlers(),
+        });
         cont.push(Frame::AppArg { func: thunk });
         let state = State::Apply {
             value: Value::Unit,
@@ -4308,7 +4509,11 @@ impl Interpreter {
                     state = next;
                 }
                 StepResult::Done(value) => {
-                    // Check if this is a fiber effect
+                    // Check if this is a runtime effect (from RuntimeScope)
+                    if let Value::RuntimeEffect(effect) = value {
+                        return self.handle_runtime_effect(pid, effect);
+                    }
+                    // Check if this is a fiber effect (from FiberBoundary - legacy path)
                     if let Value::FiberEffect(effect) = value {
                         return self.handle_fiber_effect(pid, effect);
                     }
@@ -4380,6 +4585,58 @@ impl Interpreter {
             FiberEffect::Io { op, cont } => {
                 // Dispatch to the appropriate I/O handler (reactor, pool, or timer)
                 self.runtime.dispatch_io(pid, op, cont.map(|c| *c));
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a runtime effect that bubbled up from the interpreter via RuntimeScope.
+    /// This is the unified algebraic effects path that will replace handle_fiber_effect.
+    /// Unlike FiberEffect, RuntimeEffect always has a non-optional continuation.
+    fn handle_runtime_effect(&mut self, pid: Pid, effect: RuntimeEffect) -> Result<(), EvalError> {
+        match effect {
+            RuntimeEffect::Done(value) => {
+                // Process completed with a result
+                self.runtime.complete_fiber(pid, *value);
+            }
+            RuntimeEffect::Fork { thunk, cont } => {
+                // Store parent's continuation
+                self.runtime.store_fiber_cont(pid, cont);
+                // Spawn child fiber
+                let child_pid = self.runtime.spawn(*thunk);
+                // Resume parent with child's handle
+                self.runtime.resume_fiber_with(pid, Value::Fiber(child_pid));
+            }
+            RuntimeEffect::Yield { cont } => {
+                // Store continuation and re-queue at back
+                self.runtime.store_fiber_cont(pid, cont);
+                self.runtime.yield_fiber(pid);
+            }
+            RuntimeEffect::ChanNew { cont } => {
+                // Create new channel and resume with it
+                let channel_id = self.runtime.new_channel();
+                self.runtime.store_fiber_cont(pid, cont);
+                self.runtime.resume_fiber_with(pid, Value::Channel(channel_id));
+            }
+            RuntimeEffect::Send { channel, value, cont } => {
+                // Block fiber waiting to send (try immediate handoff first)
+                self.runtime.block_fiber_send(pid, channel, *value, Some(cont));
+            }
+            RuntimeEffect::Recv { channel, cont } => {
+                // Block fiber waiting to receive (try immediate handoff first)
+                self.runtime.block_fiber_recv(pid, channel, Some(cont));
+            }
+            RuntimeEffect::Join { fiber_id, cont } => {
+                // Block fiber waiting to join another fiber
+                self.runtime.block_fiber_join(pid, fiber_id, Some(cont));
+            }
+            RuntimeEffect::Select { arms, cont } => {
+                // Block fiber on select (register on all channels)
+                self.runtime.block_fiber_select(pid, arms, Some(cont));
+            }
+            RuntimeEffect::Io { op, cont } => {
+                // Dispatch to the appropriate I/O handler (reactor, pool, or timer)
+                self.runtime.dispatch_io(pid, op, Some(cont));
             }
         }
         Ok(())
@@ -4769,182 +5026,8 @@ let main () =
         run_program(program).unwrap();
     }
 
-    // ========================================================================
-    // Delimited continuation tests
-    // ========================================================================
-
-    #[test]
-    fn test_reset_no_shift() {
-        let val = eval("reset 42").unwrap();
-        assert!(matches!(val, Value::Int(42)));
-    }
-
-    #[test]
-    fn test_reset_with_expr() {
-        let val = eval("reset (1 + 2 + 3)").unwrap();
-        assert!(matches!(val, Value::Int(6)));
-    }
-
-    #[test]
-    fn test_shift_discard_continuation() {
-        // k not called - early exit
-        let val = eval("reset (1 + shift (fun k -> 42))").unwrap();
-        assert!(matches!(val, Value::Int(42)));
-    }
-
-    #[test]
-    fn test_shift_call_once() {
-        let val = eval("reset (1 + shift (fun k -> k 10))").unwrap();
-        assert!(matches!(val, Value::Int(11)));
-    }
-
-    #[test]
-    fn test_shift_call_twice() {
-        let val = eval("reset (1 + shift (fun k -> k (k 10)))").unwrap();
-        // k 10 = 11, k 11 = 12
-        assert!(matches!(val, Value::Int(12)));
-    }
-
-    #[test]
-    fn test_shift_in_let() {
-        let val = eval("reset (let x = shift (fun k -> k 5) in x * x)").unwrap();
-        assert!(matches!(val, Value::Int(25)));
-    }
-
-    #[test]
-    fn test_nested_reset_inner_shift() {
-        // Inner shift only captures to inner reset
-        let val = eval("reset (1 + reset (2 + shift (fun k -> k 10)))").unwrap();
-        // Inner: 2 + 10 = 12, Outer: 1 + 12 = 13
-        assert!(matches!(val, Value::Int(13)));
-    }
-
-    #[test]
-    fn test_nested_reset_outer_shift() {
-        // Outer shift captures outer context
-        let val = eval("reset (1 + shift (fun k -> k (reset (2 + 3))))").unwrap();
-        // reset (2+3) = 5, k 5 = 1 + 5 = 6
-        assert!(matches!(val, Value::Int(6)));
-    }
-
-    #[test]
-    fn test_shift_without_reset_errors() {
-        let result = eval("shift (fun k -> k 1)");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shift_return_continuation() {
-        // Return the continuation itself
-        let val = eval("reset (1 + shift (fun k -> k))").unwrap();
-        assert!(matches!(val, Value::Continuation { .. }));
-    }
-
-    #[test]
-    fn test_continuation_called_later() {
-        let val = eval(
-            "
-            let k = reset (1 + shift (fun k -> k)) in
-            k 10
-        ",
-        )
-        .unwrap();
-        assert!(matches!(val, Value::Int(11)));
-    }
-
-    #[test]
-    fn test_shift_with_multiple_invocations() {
-        let val = eval(
-            "
-            reset (
-                let x = shift (fun k -> k 1 + k 2) in
-                x * 10
-            )
-        ",
-        )
-        .unwrap();
-        // k 1 = 10, k 2 = 20, sum = 30
-        assert!(matches!(val, Value::Int(30)));
-    }
-
-    #[test]
-    fn test_reset_in_function() {
-        let program = r#"
-let with_reset f = reset (f ())
-
-let main () =
-    with_reset (fun () -> 1 + shift (fun k -> k 10))
-"#;
-        run_program(program).unwrap();
-    }
-
-    #[test]
-    fn test_shift_in_continuation_argument_cbv() {
-        // In strict CBV, the argument to a continuation is evaluated BEFORE the continuation
-        // is invoked. So `k (shift ...)` evaluates the shift in the current context, not inside k.
-        // Since the outer reset was consumed by the outer shift, this is "shift without reset".
-        let result = eval(
-            "
-            reset (
-                shift (fun k1 -> k1 (shift (fun k2 -> k2 100))) + 1
-            )
-        ",
-        );
-        // In CBV: outer shift consumes the reset, inner shift has no enclosing reset
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_continuation_body_is_delimited() {
-        // This tests the core fix: when a continuation IS invoked with a value,
-        // the body executes inside a fresh reset boundary.
-        // k 10 should work because the continuation execution is wrapped in reset.
-        let val = eval(
-            "
-            let k = reset (shift (fun k -> k)) in
-            k (1 + k 10)
-        ",
-        )
-        .unwrap();
-        // k = continuation that returns its argument (identity for this context)
-        // k 10 = reset (10) = 10
-        // 1 + k 10 = 11
-        // k 11 = reset (11) = 11
-        assert!(matches!(val, Value::Int(11)));
-    }
-
-    #[test]
-    fn test_nested_resets() {
-        let val = eval(
-            "
-            reset (
-                1 + reset (
-                    2 + shift (fun k -> k (k 10))
-                )
-            )
-        ",
-        )
-        .unwrap();
-        // Inner shift captures [2 + □] only (stopped at inner reset)
-        // k 10 = reset (2 + 10) = 12
-        // k 12 = reset (2 + 12) = 14
-        // Outer: 1 + 14 = 15
-        assert!(matches!(val, Value::Int(15)));
-    }
-
-    #[test]
-    fn test_discarded_continuation() {
-        let val = eval(
-            "
-            reset (
-                1 + shift (fun k -> 42)
-            )
-        ",
-        )
-        .unwrap();
-        // k is never called, result is just 42
-        assert!(matches!(val, Value::Int(42)));
-    }
+    // Note: Delimited continuation (shift/reset) tests were removed when shift/reset
+    // was replaced by algebraic effects. Use handle/perform for effect-based control flow.
 
     // ========================================================================
     // Local recursive function tests
