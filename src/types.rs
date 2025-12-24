@@ -745,55 +745,38 @@ impl fmt::Display for Scheme {
 // Answer-Type Polymorphism for Delimited Continuations
 // ============================================================================
 
-/// Result of type inference for an expression, tracking answer types.
+/// Result of type inference for an expression.
 ///
-/// The five-place judgment `Γ; α ⊢ e : τ; β` is represented as:
+/// The judgment `Γ ⊢ e : τ ! ε` (Koka-style) is represented as:
 /// - `ty` = τ (the expression's type)
-/// - `answer_before` = α (answer type before evaluation - what context expects)
-/// - `answer_after` = β (answer type after evaluation - what context receives)
+/// - `effects` = ε (the effects the expression may perform)
 ///
-/// Pure expressions have `answer_before == answer_after`.
+/// Pure expressions have `effects == Row::Empty`.
 #[derive(Debug, Clone)]
 pub struct InferResult {
     /// The expression's type (τ in the judgment)
     pub ty: Type,
-    /// Answer type before evaluation (α - what the evaluation context expects)
-    pub answer_before: Type,
-    /// Answer type after evaluation (β - what the evaluation context receives)
-    pub answer_after: Type,
+    /// The effects this expression may perform (ε in the judgment)
+    pub effects: Row,
 }
 
 impl InferResult {
-    /// Create result for a pure expression (doesn't modify answer type).
-    /// Pure expressions have α = β (answer type unchanged).
-    pub fn pure(ty: Type, answer: Type) -> Self {
+    /// Create result for a pure expression (no effects).
+    pub fn pure(ty: Type) -> Self {
         InferResult {
             ty,
-            answer_before: answer.clone(),
-            answer_after: answer,
+            effects: Row::Empty,
         }
     }
 
-    /// Check if this result represents a pure expression (no effect on answer type)
+    /// Create result with a specific effect row.
+    pub fn with_effects(ty: Type, effects: Row) -> Self {
+        InferResult { ty, effects }
+    }
+
+    /// Check if this result represents a pure expression (no effects)
     pub fn is_pure(&self) -> bool {
-        let before = self.answer_before.resolve();
-        let after = self.answer_after.resolve();
-        match (&before, &after) {
-            (Type::Var(v1), Type::Var(v2)) => {
-                // Check if same variable by comparing IDs or Rc pointer
-                if Rc::ptr_eq(v1, v2) {
-                    return true;
-                }
-                match (&*v1.borrow(), &*v2.borrow()) {
-                    (TypeVar::Unbound { id: id1, .. }, TypeVar::Unbound { id: id2, .. }) => {
-                        id1 == id2
-                    }
-                    (TypeVar::Generic(id1), TypeVar::Generic(id2)) => id1 == id2,
-                    _ => false,
-                }
-            }
-            _ => types_equal(&before, &after),
-        }
+        matches!(self.effects.resolve(), Row::Empty)
     }
 }
 
