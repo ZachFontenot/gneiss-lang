@@ -13,38 +13,38 @@ use thiserror::Error;
 
 /// Substitute Generic type variables with concrete types.
 /// Generic(0) is replaced with args[0], Generic(1) with args[1], etc.
+/// Note: This operates on unresolved types since Generic vars don't have bindings.
 fn substitute_generics(ty: &Type, args: &[Type]) -> Type {
-    match ty.resolve() {
-        Type::Var(var) => match &*var.borrow() {
-            TypeVar::Generic(id) => {
-                args.get(*id as usize).cloned().unwrap_or_else(|| ty.clone())
-            }
-            _ => ty.clone(),
-        },
+    match ty {
+        Type::Generic(id) => {
+            args.get(*id as usize).cloned().unwrap_or_else(|| ty.clone())
+        }
+        Type::Var(id) => Type::Var(*id), // Type variables pass through unchanged
         Type::Arrow { arg, ret, effects } => Type::Arrow {
-            arg: Rc::new(substitute_generics(&arg, args)),
-            ret: Rc::new(substitute_generics(&ret, args)),
-            effects: substitute_generics_in_row(&effects, args),
+            arg: Rc::new(substitute_generics(arg, args)),
+            ret: Rc::new(substitute_generics(ret, args)),
+            effects: substitute_generics_in_row(effects, args),
         },
         Type::Tuple(ts) => {
             Type::Tuple(ts.iter().map(|t| substitute_generics(t, args)).collect())
         }
-        Type::Channel(t) => Type::Channel(Rc::new(substitute_generics(&t, args))),
-        Type::Fiber(t) => Type::Fiber(Rc::new(substitute_generics(&t, args))),
-        Type::Dict(t) => Type::Dict(Rc::new(substitute_generics(&t, args))),
+        Type::Channel(t) => Type::Channel(Rc::new(substitute_generics(t, args))),
+        Type::Fiber(t) => Type::Fiber(Rc::new(substitute_generics(t, args))),
+        Type::Dict(t) => Type::Dict(Rc::new(substitute_generics(t, args))),
         Type::Constructor { name, args: cargs } => Type::Constructor {
-            name,
+            name: name.clone(),
             args: cargs.iter().map(|t| substitute_generics(t, args)).collect(),
         },
-        other => other,
+        other => other.clone(),
     }
 }
 
 /// Substitute generic type variables in an effect row
 fn substitute_generics_in_row(row: &Row, args: &[Type]) -> Row {
-    match row.resolve() {
+    match row {
         Row::Empty => Row::Empty,
-        Row::Var(var) => Row::Var(var), // Row variables don't get substituted by type args
+        Row::Var(id) => Row::Var(*id), // Row variables don't get substituted by type args
+        Row::Generic(id) => Row::Generic(*id), // Generic row variables pass through
         Row::Extend { effect, rest } => Row::Extend {
             effect: Effect {
                 name: effect.name.clone(),
@@ -54,7 +54,7 @@ fn substitute_generics_in_row(row: &Row, args: &[Type]) -> Row {
                     .map(|t| substitute_generics(t, args))
                     .collect(),
             },
-            rest: Rc::new(substitute_generics_in_row(&rest, args)),
+            rest: Rc::new(substitute_generics_in_row(rest, args)),
         },
     }
 }
@@ -252,8 +252,10 @@ impl TypeError {
 }
 
 pub struct Inferencer {
-    /// Counter for generating fresh type variables
-    next_var: TypeVarId,
+    /// Union-Find for type variables
+    type_uf: UnionFind,
+    /// Union-Find for row variables
+    row_uf: RowUnionFind,
     /// Current let-nesting level (for polymorphism)
     level: u32,
     /// Type context for constructors
@@ -281,7 +283,8 @@ pub struct Inferencer {
 impl Inferencer {
     pub fn new() -> Self {
         Self {
-            next_var: 0,
+            type_uf: UnionFind::new(),
+            row_uf: RowUnionFind::new(),
             level: 0,
             type_ctx: TypeContext::new(),
             class_env: ClassEnv::new(),
@@ -329,13 +332,15 @@ impl Inferencer {
         let mut op_infos = Vec::new();
         for op in operations {
             // The operation's type_sig is a function type like () -> s or s -> ()
-            // We need to extract param types and result type
-            let (param_types, result_type) = self.extract_operation_signature(&op.type_sig, &param_map)?;
+            // We need to extract param types, result type, and operation-local generics
+            let (param_types, result_type, generics) =
+                self.extract_operation_signature(&op.type_sig, &param_map)?;
 
             let op_info = OperationInfo {
                 name: op.name.clone(),
                 param_types,
                 result_type,
+                generics,
             };
             op_infos.push(op_info.clone());
 
@@ -356,18 +361,44 @@ impl Inferencer {
         Ok(())
     }
 
-    /// Extract parameter types and result type from an operation signature
-    /// e.g., `() -> s` gives ([], s), `s -> ()` gives ([s], ())
+    /// Extract parameter types, result type, and operation-local generics from a signature
+    /// e.g., `() -> s` gives ([], s, []), `String -> a` gives ([String], a, [0]) if `a` is local
+    ///
+    /// Supports operation-local polymorphic type variables: if `a` is used in the
+    /// signature but not declared as an effect type parameter, it becomes a
+    /// Generic type variable local to this operation. This allows patterns like:
+    ///   effect Error = | throw : String -> a end
+    /// where `a` is polymorphic (the operation never returns normally).
+    ///
+    /// Returns: (param_types, result_type, operation_generic_ids)
     fn extract_operation_signature(
         &mut self,
         type_sig: &TypeExpr,
-        param_map: &HashMap<String, TypeVarId>,
-    ) -> Result<(Vec<Type>, Type), TypeError> {
+        effect_param_map: &HashMap<String, TypeVarId>,
+    ) -> Result<(Vec<Type>, Type, Vec<TypeVarId>), TypeError> {
         match &type_sig.node {
             TypeExprKind::Arrow { from, to, .. } => {
-                // Convert from and to to Types
-                let arg_ty = self.type_expr_to_type(from, param_map)?;
-                let ret_ty = self.type_expr_to_type(to, param_map)?;
+                // Collect all type variables used in this operation's signature
+                let mut all_vars = Vec::new();
+                Self::collect_type_vars(type_sig, &mut all_vars);
+
+                // Find operation-local type vars (not in effect's param_map)
+                let mut extended_param_map = effect_param_map.clone();
+                let mut op_generic_ids = Vec::new();
+                let base_id = effect_param_map.len() as TypeVarId;
+
+                for var_name in &all_vars {
+                    if !extended_param_map.contains_key(var_name) {
+                        // This is an operation-local polymorphic type variable
+                        let id = base_id + op_generic_ids.len() as TypeVarId;
+                        extended_param_map.insert(var_name.clone(), id);
+                        op_generic_ids.push(id);
+                    }
+                }
+
+                // Convert from and to to Types using the extended map
+                let arg_ty = self.type_expr_to_type(from, &extended_param_map)?;
+                let ret_ty = self.type_expr_to_type(to, &extended_param_map)?;
 
                 // If arg is a tuple, extract its components as params
                 // Otherwise, single param (Unit counts as a single unit argument)
@@ -376,7 +407,7 @@ impl Inferencer {
                     other => vec![other],  // Unit is still a param that must be passed
                 };
 
-                Ok((param_types, ret_ty))
+                Ok((param_types, ret_ty, op_generic_ids))
             }
             _ => {
                 // Not a function type - this is an error
@@ -496,9 +527,12 @@ impl Inferencer {
 
     /// Generate a fresh type variable
     fn fresh_var(&mut self) -> Type {
-        let id = self.next_var;
-        self.next_var += 1;
-        Type::new_var(id, self.level)
+        Type::Var(self.type_uf.fresh(self.level))
+    }
+
+    /// Generate a fresh row variable for effect polymorphism
+    fn fresh_row_var(&mut self) -> Row {
+        Row::Var(self.row_uf.fresh(self.level))
     }
 
     /// Unify two types with source location for error reporting
@@ -525,8 +559,8 @@ impl Inferencer {
 
     /// Core unification logic with optional span for error reporting
     fn unify_inner(&mut self, t1: &Type, t2: &Type, span: Option<&Span>) -> Result<(), TypeError> {
-        let t1 = t1.resolve();
-        let t2 = t2.resolve();
+        let t1 = t1.resolve(&self.type_uf);
+        let t2 = t2.resolve(&self.type_uf);
 
         match (&t1, &t2) {
             // Same primitive types
@@ -542,35 +576,45 @@ impl Inferencer {
             (Type::TcpSocket, Type::TcpSocket) => Ok(()),
             (Type::TcpListener, Type::TcpListener) => Ok(()),
 
-            // Type variables
-            (Type::Var(v1), Type::Var(v2)) if Rc::ptr_eq(v1, v2) => Ok(()),
-            (Type::Var(var), other) | (other, Type::Var(var)) => {
-                let var_inner = var.borrow().clone();
-                match var_inner {
-                    TypeVar::Link(_) => unreachable!("resolve should have followed links"),
-                    TypeVar::Unbound { id, level } => {
-                        // Occurs check
-                        if other.occurs(id) {
-                            return Err(TypeError::OccursCheck {
-                                var_id: id,
-                                ty: other.clone(),
-                                span: span.cloned(),
-                            });
-                        }
-                        // Update levels for let-polymorphism
-                        self.update_levels(other, level);
-                        // Link the variable
-                        *var.borrow_mut() = TypeVar::Link(other.clone());
-                        Ok(())
-                    }
-                    TypeVar::Generic(_) => Err(TypeError::TypeMismatch {
-                        expected: t1.clone(),
-                        found: t2.clone(),
-                        span: span.cloned(),
-                        context: None,
-                    }),
+            // Two type variables - union them
+            (Type::Var(id1), Type::Var(id2)) => {
+                let root1 = self.type_uf.find(*id1);
+                let root2 = self.type_uf.find(*id2);
+                if root1 != root2 {
+                    self.type_uf.union(root1, root2);
                 }
+                Ok(())
             }
+
+            // Type variable and concrete type - bind the variable
+            (Type::Var(id), other) | (other, Type::Var(id)) => {
+                let root = self.type_uf.find(*id);
+
+                // Occurs check
+                if other.occurs(root, &self.type_uf) {
+                    return Err(TypeError::OccursCheck {
+                        var_id: root,
+                        ty: other.clone(),
+                        span: span.cloned(),
+                    });
+                }
+
+                // Update levels for let-polymorphism
+                let var_level = self.type_uf.get_level(root);
+                self.update_levels(other, var_level);
+
+                // Bind the variable
+                self.type_uf.bind(root, other.clone());
+                Ok(())
+            }
+
+            // Generic type variables shouldn't appear during unification
+            (Type::Generic(_), _) | (_, Type::Generic(_)) => Err(TypeError::TypeMismatch {
+                expected: t1.clone(),
+                found: t2.clone(),
+                span: span.cloned(),
+                context: None,
+            }),
 
             // Function types (arg, ret, and effects must unify)
             (
@@ -633,54 +677,50 @@ impl Inferencer {
 
     /// Unify two effect rows
     fn unify_rows(&mut self, r1: &Row, r2: &Row, span: Option<&Span>) -> Result<(), TypeError> {
-        let r1 = r1.resolve();
-        let r2 = r2.resolve();
+        let r1 = r1.resolve(&self.row_uf);
+        let r2 = r2.resolve(&self.row_uf);
 
         match (&r1, &r2) {
             // Both empty - succeed
             (Row::Empty, Row::Empty) => Ok(()),
 
-            // Row variable unifies with anything
-            (Row::Var(var), other) | (other, Row::Var(var)) => {
-                // Check for self-unification (same variable on both sides)
-                if let Row::Var(other_var) = other {
-                    if Rc::ptr_eq(var, other_var) {
-                        // Same row variable - trivially unifies
-                        return Ok(());
-                    }
+            // Two row variables - union them
+            (Row::Var(id1), Row::Var(id2)) => {
+                let root1 = self.row_uf.find(*id1);
+                let root2 = self.row_uf.find(*id2);
+                if root1 != root2 {
+                    self.row_uf.union(root1, root2);
                 }
-
-                let other_row = other.clone();
-                // Extract info from immutable borrow before potentially mutating
-                let var_state = {
-                    let borrowed = var.borrow();
-                    match &*borrowed {
-                        RowVar::Unbound { id, .. } => Some(*id),
-                        RowVar::Generic(_) => None, // Will error below
-                        RowVar::Link(_) => unreachable!("resolve should follow links"),
-                    }
-                };
-
-                match var_state {
-                    Some(id) => {
-                        // Occurs check for row variables
-                        if other_row.occurs(id) {
-                            return Err(TypeError::Other(format!(
-                                "Row occurs check failed: row variable would be infinite"
-                            )));
-                        }
-                        // Link the variable - borrow released above
-                        *var.borrow_mut() = RowVar::Link(other_row);
-                        Ok(())
-                    }
-                    None => {
-                        // Generic row vars shouldn't appear during unification
-                        Err(TypeError::Other(
-                            "Cannot unify generic row variable".to_string(),
-                        ))
-                    }
-                }
+                Ok(())
             }
+
+            // Row variable and empty - bind to empty
+            (Row::Var(id), Row::Empty) | (Row::Empty, Row::Var(id)) => {
+                let root = self.row_uf.find(*id);
+                self.row_uf.bind(root, Row::Empty);
+                Ok(())
+            }
+
+            // Row variable and extend - bind var to the extended row
+            (Row::Var(id), other @ Row::Extend { .. })
+            | (other @ Row::Extend { .. }, Row::Var(id)) => {
+                let root = self.row_uf.find(*id);
+
+                // Occurs check for row variable
+                if other.occurs(root, &self.row_uf) {
+                    return Err(TypeError::Other(
+                        "Row occurs check failed: row variable would be infinite".to_string(),
+                    ));
+                }
+
+                self.row_uf.bind(root, other.clone());
+                Ok(())
+            }
+
+            // Generic row vars shouldn't appear during unification
+            (Row::Generic(_), _) | (_, Row::Generic(_)) => Err(TypeError::Other(
+                "Cannot unify generic row variable".to_string(),
+            )),
 
             // Both extend - unify effect params and tails
             (
@@ -729,22 +769,25 @@ impl Inferencer {
         r2: &Row,
         span: Option<&Span>,
     ) -> Result<(), TypeError> {
-        match r2.resolve() {
+        match r2.resolve(&self.row_uf) {
             Row::Empty => Err(TypeError::Other(format!(
                 "Effect {} not found in row",
                 e1.name
             ))),
-            Row::Var(var) => {
+            Row::Var(id) => {
                 // Extend r2 with e1 and unify rest1 with new tail
-                let new_tail = Row::new_var(self.next_var, self.level);
-                self.next_var += 1;
+                let root = self.row_uf.find(id);
+                let new_tail = self.fresh_row_var();
                 let extended = Row::Extend {
                     effect: e1.clone(),
                     rest: Rc::new(new_tail.clone()),
                 };
-                *var.borrow_mut() = RowVar::Link(extended);
+                self.row_uf.bind(root, extended);
                 self.unify_rows(rest1, &new_tail, span)
             }
+            Row::Generic(_) => Err(TypeError::Other(
+                "Cannot unify generic row variable".to_string(),
+            )),
             Row::Extend { effect: e2, rest: rest2 } => {
                 if e1.name == e2.name {
                     // Found it - unify parameters and tails
@@ -777,8 +820,8 @@ impl Inferencer {
     /// The resulting row contains all effects from both inputs.
     /// Row variables are preserved with fresh tails for polymorphism.
     pub fn union_rows(&mut self, r1: &Row, r2: &Row) -> Row {
-        let r1 = r1.resolve();
-        let r2 = r2.resolve();
+        let r1 = r1.resolve(&self.row_uf);
+        let r2 = r2.resolve(&self.row_uf);
 
         match (&r1, &r2) {
             // Empty is identity for union
@@ -793,19 +836,22 @@ impl Inferencer {
 
             // Two row variables: create a fresh var that represents their union
             // The actual constraints will be resolved during later unification
-            (Row::Var(v1), Row::Var(v2)) => {
-                if Rc::ptr_eq(v1, v2) {
+            (Row::Var(id1), Row::Var(id2)) => {
+                let root1 = self.row_uf.find(*id1);
+                let root2 = self.row_uf.find(*id2);
+                if root1 == root2 {
                     // Same variable, just return it
                     r1.clone()
                 } else {
                     // Different variables - we need to be careful here
                     // For now, create a fresh var and leave the constraint implicit
                     // This is sound but may not be most general
-                    let fresh = Row::new_var(self.next_var, self.level);
-                    self.next_var += 1;
-                    fresh
+                    self.fresh_row_var()
                 }
             }
+
+            // Generic row variables - just return the other or a fresh var
+            (Row::Generic(_), other) | (other, Row::Generic(_)) => other.clone(),
 
             // Known row vs variable: variable's effects plus the known effects
             // We extend the known row with a fresh tail to preserve polymorphism
@@ -825,17 +871,18 @@ impl Inferencer {
     ///
     /// Returns the row with handled effects removed.
     pub fn subtract_effects(&mut self, row: &Row, handled: &HashSet<String>) -> Row {
-        let row = row.resolve();
+        let row = row.resolve(&self.row_uf);
 
         match row {
             Row::Empty => Row::Empty,
-            Row::Var(var) => {
+            Row::Var(id) => {
                 // Row variable - we can't remove effects statically
                 // Create a fresh variable for the result
                 // The constraint that it doesn't contain handled effects
                 // is implicit and should be checked elsewhere
-                Row::Var(var.clone())
+                Row::Var(id)
             }
+            Row::Generic(id) => Row::Generic(id),
             Row::Extend { effect, rest } => {
                 if handled.contains(&effect.name) {
                     // This effect is handled - remove it
@@ -852,32 +899,28 @@ impl Inferencer {
     }
 
     /// Update type variable levels for let-polymorphism
-    fn update_levels(&self, ty: &Type, level: u32) {
-        match ty.resolve() {
-            Type::Var(var) => {
-                let mut var = var.borrow_mut();
-                if let TypeVar::Unbound {
-                    level: var_level, ..
-                } = &mut *var
-                {
-                    *var_level = (*var_level).min(level);
-                }
+    fn update_levels(&mut self, ty: &Type, level: u32) {
+        match ty {
+            Type::Var(id) => {
+                self.type_uf.set_level(*id, level);
             }
+            Type::Generic(_) => {}
             Type::Arrow { arg, ret, effects } => {
-                self.update_levels(&arg, level);
-                self.update_levels(&ret, level);
-                self.update_levels_in_row(&effects, level);
+                self.update_levels(arg, level);
+                self.update_levels(ret, level);
+                self.update_levels_in_row(effects, level);
             }
             Type::Tuple(ts) => {
                 for t in ts {
-                    self.update_levels(&t, level);
+                    self.update_levels(t, level);
                 }
             }
-            Type::Channel(t) => self.update_levels(&t, level),
-            Type::Fiber(t) => self.update_levels(&t, level),
+            Type::Channel(t) => self.update_levels(t, level),
+            Type::Fiber(t) => self.update_levels(t, level),
+            Type::Dict(t) => self.update_levels(t, level),
             Type::Constructor { args, .. } => {
                 for t in args {
-                    self.update_levels(&t, level);
+                    self.update_levels(t, level);
                 }
             }
             _ => {}
@@ -885,22 +928,17 @@ impl Inferencer {
     }
 
     /// Update row variable levels for let-polymorphism
-    fn update_levels_in_row(&self, row: &Row, level: u32) {
-        match row.resolve() {
-            Row::Var(var) => {
-                let mut var = var.borrow_mut();
-                if let RowVar::Unbound {
-                    level: var_level, ..
-                } = &mut *var
-                {
-                    *var_level = (*var_level).min(level);
-                }
+    fn update_levels_in_row(&mut self, row: &Row, level: u32) {
+        match row {
+            Row::Var(id) => {
+                self.row_uf.set_level(*id, level);
             }
+            Row::Generic(_) => {}
             Row::Extend { effect, rest } => {
                 for param in &effect.params {
                     self.update_levels(param, level);
                 }
-                self.update_levels_in_row(&rest, level);
+                self.update_levels_in_row(rest, level);
             }
             Row::Empty => {}
         }
@@ -931,16 +969,13 @@ impl Inferencer {
 
     /// Substitute generic type variables
     fn substitute(&self, ty: &Type, subst: &HashMap<TypeVarId, Type>) -> Type {
-        let resolved = ty.resolve();
-        match &resolved {
-            Type::Var(var) => match &*var.borrow() {
-                TypeVar::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| resolved.clone()),
-                _ => resolved.clone(),
-            },
+        match ty {
+            Type::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
+            Type::Var(id) => Type::Var(*id), // Regular type variables pass through
             Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(self.substitute(arg, subst)),
                 ret: Rc::new(self.substitute(ret, subst)),
-                effects: self.substitute_in_row(&effects, subst),
+                effects: self.substitute_in_row(effects, subst),
             },
             Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| self.substitute(t, subst)).collect()),
             Type::Channel(t) => Type::Channel(Rc::new(self.substitute(t, subst))),
@@ -950,15 +985,16 @@ impl Inferencer {
                 name: name.clone(),
                 args: args.iter().map(|t| self.substitute(t, subst)).collect(),
             },
-            _ => resolved.clone(),
+            other => other.clone(),
         }
     }
 
     /// Substitute generic type variables in an effect row
     fn substitute_in_row(&self, row: &Row, subst: &HashMap<TypeVarId, Type>) -> Row {
-        match row.resolve() {
+        match row {
             Row::Empty => Row::Empty,
-            Row::Var(var) => Row::Var(var), // Row variables not affected by type substitution
+            Row::Var(id) => Row::Var(*id), // Row variables not affected by type substitution
+            Row::Generic(id) => Row::Generic(*id), // Generic row vars pass through
             Row::Extend { effect, rest } => Row::Extend {
                 effect: Effect {
                     name: effect.name.clone(),
@@ -968,7 +1004,7 @@ impl Inferencer {
                         .map(|t| self.substitute(t, subst))
                         .collect(),
                 },
-                rest: Rc::new(self.substitute_in_row(&rest, subst)),
+                rest: Rc::new(self.substitute_in_row(rest, subst)),
             },
         }
     }
@@ -983,14 +1019,14 @@ impl Inferencer {
 
         let (captured, remaining): (Vec<_>, Vec<_>) = all_preds
             .into_iter()
-            .partition(|pred| Self::pred_mentions_generalized_vars_static(pred, &generics, self.level));
+            .partition(|pred| Self::pred_mentions_generalized_vars_static(pred, &generics, self.level, &self.type_uf, &self.row_uf));
 
         self.wanted_preds = remaining;
 
         // Convert captured predicates to use Generic type vars
         let preds = captured
             .into_iter()
-            .map(|pred| Self::apply_generic_subst_to_pred_static(&pred, &generics, self.level))
+            .map(|pred| Self::apply_generic_subst_to_pred_static(&pred, &generics, self.level, &self.type_uf, &self.row_uf))
             .collect();
 
         Scheme {
@@ -1003,12 +1039,13 @@ impl Inferencer {
     /// Collect level-0 "placeholder" type vars from a type and add fresh var substitutions
     /// These are created by Type::arrow() and need to be replaced to avoid sharing across method calls
     fn collect_level_zero_vars(ty: &Type, subst: &mut HashMap<TypeVarId, Type>, inferencer: &mut Inferencer) {
-        match ty.resolve() {
-            Type::Var(var) => {
-                if let TypeVar::Unbound { id, level: 0 } = &*var.borrow() {
+        match ty.resolve(&inferencer.type_uf) {
+            Type::Var(id) => {
+                // Check if this is an unbound level-0 variable
+                if !inferencer.type_uf.is_bound(id) && inferencer.type_uf.get_level(id) == 0 {
                     // Level-0 var that's not already in subst - create fresh var for it
-                    if !subst.contains_key(id) {
-                        subst.insert(*id, inferencer.fresh_var());
+                    if !subst.contains_key(&id) {
+                        subst.insert(id, inferencer.fresh_var());
                     }
                 }
             }
@@ -1040,7 +1077,7 @@ impl Inferencer {
         subst: &mut HashMap<TypeVarId, Type>,
         inferencer: &mut Inferencer,
     ) {
-        match row.resolve() {
+        match row.resolve(&inferencer.row_uf) {
             Row::Empty => {}
             Row::Var(_) => {} // Row vars are separate from type vars
             Row::Extend { effect, rest } => {
@@ -1049,6 +1086,7 @@ impl Inferencer {
                 }
                 Self::collect_level_zero_vars_in_row(&rest, subst, inferencer);
             }
+            Row::Generic(_) => {} // Generic row vars are also separate
         }
     }
 
@@ -1057,8 +1095,10 @@ impl Inferencer {
         pred: &Pred,
         generics: &HashMap<TypeVarId, TypeVarId>,
         current_level: u32,
+        type_uf: &UnionFind,
+        row_uf: &RowUnionFind,
     ) -> bool {
-        Self::type_mentions_generalized_vars_static(&pred.ty, generics, current_level)
+        Self::type_mentions_generalized_vars_static(&pred.ty, generics, current_level, type_uf, row_uf)
     }
 
     /// Check if a type contains any of the generalized type variables (static version)
@@ -1066,29 +1106,33 @@ impl Inferencer {
         ty: &Type,
         generics: &HashMap<TypeVarId, TypeVarId>,
         current_level: u32,
+        type_uf: &UnionFind,
+        row_uf: &RowUnionFind,
     ) -> bool {
-        let resolved = ty.resolve();
+        let resolved = ty.resolve(type_uf);
         match &resolved {
-            Type::Var(var) => match &*var.borrow() {
-                TypeVar::Unbound { id, level } if *level > current_level => {
+            Type::Var(id) => {
+                // Check if this is an unbound variable with level > current_level
+                if !type_uf.is_bound(*id) && type_uf.get_level(*id) > current_level {
                     generics.contains_key(id)
+                } else {
+                    false
                 }
-                _ => false,
-            },
+            }
             Type::Arrow { arg, ret, effects } => {
-                Self::type_mentions_generalized_vars_static(arg, generics, current_level)
-                    || Self::type_mentions_generalized_vars_static(ret, generics, current_level)
-                    || Self::row_mentions_generalized_vars_static(&effects, generics, current_level)
+                Self::type_mentions_generalized_vars_static(arg, generics, current_level, type_uf, row_uf)
+                    || Self::type_mentions_generalized_vars_static(ret, generics, current_level, type_uf, row_uf)
+                    || Self::row_mentions_generalized_vars_static(&effects, generics, current_level, type_uf, row_uf)
             }
             Type::Tuple(ts) => ts
                 .iter()
-                .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level)),
+                .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level, type_uf, row_uf)),
             Type::Channel(t) | Type::Fiber(t) => {
-                Self::type_mentions_generalized_vars_static(t, generics, current_level)
+                Self::type_mentions_generalized_vars_static(t, generics, current_level, type_uf, row_uf)
             }
             Type::Constructor { args, .. } => args
                 .iter()
-                .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level)),
+                .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level, type_uf, row_uf)),
             _ => false,
         }
     }
@@ -1098,17 +1142,20 @@ impl Inferencer {
         row: &Row,
         generics: &HashMap<TypeVarId, TypeVarId>,
         current_level: u32,
+        type_uf: &UnionFind,
+        row_uf: &RowUnionFind,
     ) -> bool {
-        match row.resolve() {
+        match row.resolve(row_uf) {
             Row::Empty => false,
             Row::Var(_) => false, // Row vars are separate
             Row::Extend { effect, rest } => {
                 effect
                     .params
                     .iter()
-                    .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level))
-                    || Self::row_mentions_generalized_vars_static(&rest, generics, current_level)
+                    .any(|t| Self::type_mentions_generalized_vars_static(t, generics, current_level, type_uf, row_uf))
+                    || Self::row_mentions_generalized_vars_static(&rest, generics, current_level, type_uf, row_uf)
             }
+            Row::Generic(_) => false, // Generic row vars are separate
         }
     }
 
@@ -1117,10 +1164,12 @@ impl Inferencer {
         pred: &Pred,
         generics: &HashMap<TypeVarId, TypeVarId>,
         current_level: u32,
+        type_uf: &UnionFind,
+        row_uf: &RowUnionFind,
     ) -> Pred {
         Pred {
             trait_name: pred.trait_name.clone(),
-            ty: Self::apply_generic_subst_to_type_static(&pred.ty, generics, current_level),
+            ty: Self::apply_generic_subst_to_type_static(&pred.ty, generics, current_level, type_uf, row_uf),
         }
     }
 
@@ -1129,57 +1178,71 @@ impl Inferencer {
         ty: &Type,
         generics: &HashMap<TypeVarId, TypeVarId>,
         current_level: u32,
+        type_uf: &UnionFind,
+        row_uf: &RowUnionFind,
     ) -> Type {
-        let resolved = ty.resolve();
+        let resolved = ty.resolve(type_uf);
         match &resolved {
-            Type::Var(var) => match &*var.borrow() {
-                TypeVar::Unbound { id, level } if *level > current_level => {
+            Type::Var(id) => {
+                // Check if this is an unbound variable with level > current_level
+                if !type_uf.is_bound(*id) && type_uf.get_level(*id) > current_level {
                     if let Some(&gen_id) = generics.get(id) {
-                        Type::new_generic(gen_id)
+                        Type::Generic(gen_id)
                     } else {
                         resolved.clone()
                     }
+                } else {
+                    resolved.clone()
                 }
-                _ => resolved.clone(),
-            },
+            }
             Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(Self::apply_generic_subst_to_type_static(
                     arg,
                     generics,
                     current_level,
+                    type_uf,
+                    row_uf,
                 )),
                 ret: Rc::new(Self::apply_generic_subst_to_type_static(
                     ret,
                     generics,
                     current_level,
+                    type_uf,
+                    row_uf,
                 )),
-                effects: Self::apply_generic_subst_to_row_static(&effects, generics, current_level),
+                effects: Self::apply_generic_subst_to_row_static(&effects, generics, current_level, type_uf, row_uf),
             },
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
-                    .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level))
+                    .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level, type_uf, row_uf))
                     .collect(),
             ),
             Type::Channel(t) => Type::Channel(Rc::new(Self::apply_generic_subst_to_type_static(
                 t,
                 generics,
                 current_level,
+                type_uf,
+                row_uf,
             ))),
             Type::Fiber(t) => Type::Fiber(Rc::new(Self::apply_generic_subst_to_type_static(
                 t,
                 generics,
                 current_level,
+                type_uf,
+                row_uf,
             ))),
             Type::Dict(t) => Type::Dict(Rc::new(Self::apply_generic_subst_to_type_static(
                 t,
                 generics,
                 current_level,
+                type_uf,
+                row_uf,
             ))),
             Type::Constructor { name, args } => Type::Constructor {
                 name: name.clone(),
                 args: args
                     .iter()
-                    .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level))
+                    .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level, type_uf, row_uf))
                     .collect(),
             },
             _ => resolved.clone(),
@@ -1191,33 +1254,39 @@ impl Inferencer {
         row: &Row,
         generics: &HashMap<TypeVarId, TypeVarId>,
         current_level: u32,
+        type_uf: &UnionFind,
+        row_uf: &RowUnionFind,
     ) -> Row {
-        match row.resolve() {
+        match row.resolve(row_uf) {
             Row::Empty => Row::Empty,
-            Row::Var(var) => Row::Var(var), // Row vars not affected by type generics
+            Row::Var(id) => Row::Var(id), // Row vars not affected by type generics
             Row::Extend { effect, rest } => Row::Extend {
                 effect: Effect {
                     name: effect.name.clone(),
                     params: effect
                         .params
                         .iter()
-                        .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level))
+                        .map(|t| Self::apply_generic_subst_to_type_static(t, generics, current_level, type_uf, row_uf))
                         .collect(),
                 },
                 rest: Rc::new(Self::apply_generic_subst_to_row_static(
                     &rest,
                     generics,
                     current_level,
+                    type_uf,
+                    row_uf,
                 )),
             },
+            Row::Generic(id) => Row::Generic(id), // Generic row vars not affected by type generics
         }
     }
 
     fn generalize_inner(&self, ty: &Type, generics: &mut HashMap<TypeVarId, TypeVarId>) -> Type {
-        let resolved = ty.resolve();
+        let resolved = ty.resolve(&self.type_uf);
         match &resolved {
-            Type::Var(var) => match &*var.borrow() {
-                TypeVar::Unbound { id, level } if *level > self.level => {
+            Type::Var(id) => {
+                // Check if this is an unbound variable with level > self.level
+                if !self.type_uf.is_bound(*id) && self.type_uf.get_level(*id) > self.level {
                     let gen_id = if let Some(&gen_id) = generics.get(id) {
                         gen_id
                     } else {
@@ -1225,10 +1294,11 @@ impl Inferencer {
                         generics.insert(*id, gen_id);
                         gen_id
                     };
-                    Type::new_generic(gen_id)
+                    Type::Generic(gen_id)
+                } else {
+                    resolved.clone()
                 }
-                _ => resolved.clone(),
-            },
+            }
             Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(self.generalize_inner(arg, generics)),
                 ret: Rc::new(self.generalize_inner(ret, generics)),
@@ -1255,9 +1325,9 @@ impl Inferencer {
 
     /// Generalize type variables in an effect row
     fn generalize_inner_row(&self, row: &Row, generics: &mut HashMap<TypeVarId, TypeVarId>) -> Row {
-        match row.resolve() {
+        match row.resolve(&self.row_uf) {
             Row::Empty => Row::Empty,
-            Row::Var(var) => Row::Var(var), // Row vars generalize separately (not implemented yet)
+            Row::Var(id) => Row::Var(id), // Row vars generalize separately (not implemented yet)
             Row::Extend { effect, rest } => Row::Extend {
                 effect: Effect {
                     name: effect.name.clone(),
@@ -1269,6 +1339,7 @@ impl Inferencer {
                 },
                 rest: Rc::new(self.generalize_inner_row(&rest, generics)),
             },
+            Row::Generic(id) => Row::Generic(id), // Already generalized
         }
     }
 
@@ -1313,7 +1384,8 @@ impl Inferencer {
     /// Internally uses effect tracking for algebraic effects.
     pub fn infer_expr(&mut self, env: &TypeEnv, expr: &Expr) -> Result<Type, TypeError> {
         let result = self.infer_expr_full(env, expr)?;
-        Ok(result.ty)
+        // Resolve the type to follow union-find bindings
+        Ok(result.ty.resolve(&self.type_uf))
     }
 
     /// Infer a single expression with full effect tracking.
@@ -1441,8 +1513,7 @@ impl Inferencer {
                 // Fresh variables for function type components
                 let param_ty = self.fresh_var(); // σ
                 let ret_ty = self.fresh_var(); // τ
-                let latent_effects = Row::new_var(self.next_var, self.level);
-                self.next_var += 1;
+                let latent_effects = self.fresh_row_var();
 
                 // Function must have type σ → τ { latent_effects }
                 let expected_fun = Type::Arrow {
@@ -1511,7 +1582,7 @@ impl Inferencer {
 
                 // Check if binding is pure (no effects)
                 // Only pure expressions can be generalized
-                let is_pure = value_result.is_pure();
+                let is_pure = value_result.is_pure(&self.row_uf);
 
                 // Value restriction: only generalize syntactic values that are also pure
                 let scheme = if Self::is_syntactic_value(value) && is_pure {
@@ -1803,7 +1874,7 @@ impl Inferencer {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                         // Arithmetic works on Int or Float (ad-hoc polymorphism)
                         self.unify_at(&left_result.ty, &right_result.ty, &right.span)?;
-                        let resolved = left_result.ty.resolve();
+                        let resolved = left_result.ty.resolve(&self.type_uf);
                         match &resolved {
                             Type::Int | Type::Float => resolved,
                             Type::Var(_) => Type::Int, // Default unresolved to Int
@@ -2036,18 +2107,28 @@ impl Inferencer {
                 let effect_info = self.effect_env.effects.get(&effect_name).cloned();
                 let type_params = effect_info.map(|e| e.type_params).unwrap_or_default();
 
-                // Create fresh type variables for the effect's type parameters
-                let mut effect_type_args: Vec<Type> = Vec::new();
-                for _ in &type_params {
-                    effect_type_args.push(self.fresh_var());
-                }
+                // 1. Fresh vars for effect type params (e.g., 's' in State s)
+                let effect_type_args: Vec<Type> = type_params.iter()
+                    .map(|_| self.fresh_var())
+                    .collect();
+
+                // 2. Fresh vars for operation's own generics (e.g., 'a' in fail : String -> a)
+                let op_type_args: Vec<Type> = op_info.generics.iter()
+                    .map(|_| self.fresh_var())
+                    .collect();
+
+                // 3. Combine for substitution (effect params first, then operation generics)
+                let all_type_args: Vec<Type> = effect_type_args.iter()
+                    .chain(op_type_args.iter())
+                    .cloned()
+                    .collect();
 
                 // Instantiate the operation's param types and result type
-                // by substituting Generic(i) with effect_type_args[i]
+                // by substituting Generic(i) with all_type_args[i]
                 let instantiated_params: Vec<Type> = op_info.param_types.iter()
-                    .map(|t| substitute_generics(t, &effect_type_args))
+                    .map(|t| substitute_generics(t, &all_type_args))
                     .collect();
-                let instantiated_result = substitute_generics(&op_info.result_type, &effect_type_args);
+                let instantiated_result = substitute_generics(&op_info.result_type, &all_type_args);
 
                 // Check argument count
                 if args.len() != instantiated_params.len() {
@@ -2132,15 +2213,20 @@ impl Inferencer {
                         }
 
                         // Continuation takes the operation's result type and returns the handle result
+                        // For deep handlers, the continuation can re-perform the handled effects
+                        // (they'll be caught by the handler again), so use the body's full effects
                         let cont_arg = substitute_generics(&op.result_type, &effect_type_args);
                         let cont_type = Type::Arrow {
                             arg: Rc::new(cont_arg),
                             ret: Rc::new(result_ty.clone()),
-                            effects: Row::Empty, // Continuation is pure within handler
+                            effects: body_result.effects.clone(), // Continuation carries body's effects
                         };
                         handler_env.insert(handler.continuation.clone(), Scheme::mono(cont_type));
                     } else {
                         // Unknown operation - use fresh type variables
+                        // TODO: Add warning diagnostic for unknown operations
+                        // This is potentially unsound but we continue for error recovery
+
                         for param in &handler.params {
                             let param_ty = self.fresh_var();
                             self.bind_pattern(&mut handler_env, param, &param_ty)?;
@@ -2150,7 +2236,7 @@ impl Inferencer {
                         let cont_type = Type::Arrow {
                             arg: Rc::new(cont_arg),
                             ret: Rc::new(result_ty.clone()),
-                            effects: Row::Empty,
+                            effects: body_result.effects.clone(), // Continuation carries body's effects
                         };
                         handler_env.insert(handler.continuation.clone(), Scheme::mono(cont_type));
                     }
@@ -2268,7 +2354,7 @@ impl Inferencer {
 
                 // Regular record field access
                 let record_ty = self.infer_expr(env, record)?;
-                let record_ty_resolved = record_ty.resolve();
+                let record_ty_resolved = record_ty.resolve(&self.type_uf);
 
                 // The record type must be a Constructor type
                 match &record_ty_resolved {
@@ -2316,7 +2402,7 @@ impl Inferencer {
             ExprKind::RecordUpdate { base, updates } => {
                 // Infer the type of the base record
                 let base_ty = self.infer_expr(env, base)?;
-                let base_ty_resolved = base_ty.resolve();
+                let base_ty_resolved = base_ty.resolve(&self.type_uf);
 
                 match &base_ty_resolved {
                     Type::Constructor { name, args } => {
@@ -2535,6 +2621,7 @@ impl Inferencer {
         }
     }
 
+
     /// Collect all type variable names from a TypeExpr (lowercase identifiers)
     /// Used for implicitly quantified type variables in val declarations
     fn collect_type_vars(expr: &TypeExpr, vars: &mut Vec<String>) {
@@ -2699,26 +2786,15 @@ impl Inferencer {
                     // Has a row variable - look it up or create fresh
                     if let Some(idx) = var_names.iter().position(|n| n == rest) {
                         // Convert the type var to a row var
-                        if let Type::Var(var) = &fresh_vars[idx] {
-                            Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Unbound {
-                                id: match &*var.borrow() {
-                                    TypeVar::Unbound { id, .. } => *id,
-                                    TypeVar::Generic(id) => *id,
-                                    _ => self.next_var,
-                                },
-                                level: self.level,
-                            })))
+                        if let Type::Var(_) = &fresh_vars[idx] {
+                            // Create a fresh row var with same level
+                            Row::Var(self.row_uf.fresh(self.level))
                         } else {
                             Row::Empty
                         }
                     } else {
                         // Not in fresh_vars, create new row var
-                        let id = self.next_var;
-                        self.next_var += 1;
-                        Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Unbound {
-                            id,
-                            level: self.level,
-                        })))
+                        self.fresh_row_var()
                     }
                 } else {
                     Row::Empty
@@ -2761,15 +2837,10 @@ impl Inferencer {
                 let mut row = if let Some(ref rest) = eff_row.rest {
                     // Has a row variable - look it up
                     if let Some(&id) = param_map.get(rest) {
-                        Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Generic(id))))
+                        Row::Generic(id)
                     } else {
                         // Not in param_map, create fresh row var
-                        let id = self.next_var;
-                        self.next_var += 1;
-                        Row::Var(Rc::new(std::cell::RefCell::new(RowVar::Unbound {
-                            id,
-                            level: self.level,
-                        })))
+                        self.fresh_row_var()
                     }
                 } else {
                     Row::Empty
@@ -3060,8 +3131,8 @@ impl Inferencer {
                 .map(|c| {
                     let ty = param_map
                         .get(&c.type_var)
-                        .map(|&id| Type::new_generic(id))
-                        .unwrap_or_else(|| Type::new_var(0, 0)); // Fallback shouldn't happen
+                        .map(|&id| Type::Generic(id))
+                        .unwrap_or_else(|| Type::Generic(0)); // Fallback shouldn't happen
                     Pred::new(c.trait_name.clone(), ty)
                 })
                 .collect();
@@ -4004,10 +4075,8 @@ impl Inferencer {
                         for name_str in &type_var_names {
                             let fresh = self.fresh_var();
                             // Extract the ID from the fresh var
-                            if let Type::Var(var) = &fresh {
-                                if let TypeVar::Unbound { id, .. } = &*var.borrow() {
-                                    param_map.insert(name_str.clone(), *id);
-                                }
+                            if let Type::Var(id) = &fresh {
+                                param_map.insert(name_str.clone(), *id);
                             }
                             fresh_vars.push(fresh);
                         }
@@ -4322,7 +4391,7 @@ mod tests {
     #[test]
     fn test_application() {
         let ty = infer("(fun x -> x + 1) 42").unwrap();
-        assert!(matches!(ty.resolve(), Type::Int));
+        assert!(matches!(ty, Type::Int));
     }
 
     #[test]

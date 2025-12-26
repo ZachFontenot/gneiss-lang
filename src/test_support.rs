@@ -389,6 +389,7 @@ pub fn eval_expr(input: &str) -> Result<Value, EvalError> {
 }
 
 /// Run a program and return the final result (if any)
+/// This performs full type checking before execution.
 pub fn run_program(input: &str) -> Result<Option<Value>, EvalError> {
     let tokens = Lexer::new(input).tokenize().map_err(|e| {
         EvalError::RuntimeError(format!("Lexer error: {:?}", e))
@@ -397,6 +398,13 @@ pub fn run_program(input: &str) -> Result<Option<Value>, EvalError> {
     let program = parser.parse_program().map_err(|e| {
         EvalError::RuntimeError(format!("Parse error: {:?}", e))
     })?;
+
+    // Type check before running - this is critical for catching type errors!
+    let mut inferencer = Inferencer::new();
+    inferencer.infer_program(&program).map_err(|e| {
+        EvalError::RuntimeError(format!("Type error: {:?}", e))
+    })?;
+
     let mut interp = Interpreter::new();
     interp.run(&program)?;
     Ok(None) // TODO: capture main's return value
