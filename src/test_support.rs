@@ -405,7 +405,10 @@ pub fn run_program(input: &str) -> Result<Option<Value>, EvalError> {
         EvalError::RuntimeError(format!("Type error: {:?}", e))
     })?;
 
+    // Pass class environment and type context to interpreter for trait resolution
     let mut interp = Interpreter::new();
+    interp.set_class_env(inferencer.take_class_env());
+    interp.set_type_ctx(inferencer.take_type_ctx());
     interp.run(&program)?;
     Ok(None) // TODO: capture main's return value
 }
