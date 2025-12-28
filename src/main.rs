@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use gneiss::ast::{ImportSpec, Item};
+use gneiss::ast::{ImportSpec, Item, Program};
 use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
@@ -280,33 +280,40 @@ fn repl() {
     let mut type_env = TypeEnv::new();
     let mut inferencer = Inferencer::new();
 
-    // Load prelude (Option, Result, map, filter, etc.)
+    // Load prelude runtime values (Option, Result, map, filter, etc.)
+    // Note: infer_program internally loads the prelude for type checking,
+    // so we only need to run it in the interpreter here for runtime values.
     match parse_prelude() {
         Ok(prelude) => {
-            // Type check prelude and populate type_env
-            match inferencer.infer_program(&prelude) {
-                Ok(prelude_env) => {
-                    // Copy prelude types to our type_env
-                    for (name, scheme) in prelude_env.iter() {
-                        type_env.insert(name.clone(), scheme.clone());
-                    }
-                    // Run prelude to define values in interpreter
-                    if let Err(e) = interpreter.run(&prelude) {
-                        eprintln!("Warning: Failed to load prelude values: {}", e);
-                    }
-                }
-                Err(errors) => {
-                    eprintln!("Warning: Failed to type check prelude:");
-                    for e in errors {
-                        eprintln!("  {}", e);
-                    }
-                }
+            if let Err(e) = interpreter.run(&prelude) {
+                eprintln!("Warning: Failed to load prelude values: {}", e);
             }
         }
         Err(e) => {
             eprintln!("Warning: Failed to parse prelude: {}", e);
         }
     }
+
+    // Get initial type environment by running infer_program on an empty program
+    // This populates type_env with builtins and prelude types
+    let empty_program = Program { exports: None, items: vec![] };
+    match inferencer.infer_program(&empty_program) {
+        Ok(initial_env) => {
+            for (name, scheme) in initial_env.iter() {
+                type_env.insert(name.clone(), scheme.clone());
+            }
+        }
+        Err(errors) => {
+            eprintln!("Warning: Failed to initialize type environment:");
+            for e in errors {
+                eprintln!("  {}", e);
+            }
+        }
+    }
+
+    // Pass class env and type ctx to interpreter for trait method resolution
+    interpreter.set_class_env(inferencer.take_class_env());
+    interpreter.set_type_ctx(inferencer.take_type_ctx());
 
     loop {
         print!("gneiss> ");
@@ -391,8 +398,8 @@ fn repl() {
                     })
                     .collect();
 
-                // Type check and add to environment
-                match inferencer.infer_program(&program) {
+                // Type check and add to environment (no prelude - already loaded)
+                match inferencer.infer_program_no_prelude(&program) {
                     Ok(new_env) => {
                         // Print types for new declarations
                         for name in &decl_names {
@@ -447,8 +454,9 @@ fn repl() {
                 match inferencer.infer_expr(&type_env, &expr) {
                     Ok(ty) => {
                         // Evaluate using the interpreter's global environment
+                        // Use eval_expr_with_io to support IO effects like io_print
                         let env = interpreter.global_env().clone();
-                        match interpreter.eval_expr(&env, &expr) {
+                        match interpreter.eval_expr_with_io(&env, &expr) {
                             Ok(val) => {
                                 print_value(&val);
                                 println!(" : {}", ty);

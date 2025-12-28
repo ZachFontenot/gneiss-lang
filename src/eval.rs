@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::*;
+use crate::blocking_pool::{BlockingOpResult, execute_blocking_op_sync};
 use crate::prelude::parse_prelude;
 use crate::runtime::{ChannelId, Pid, ProcessContinuation, Runtime};
 use crate::types::{ClassEnv, Pred, Type, TypeContext};
@@ -1042,6 +1043,9 @@ impl Interpreter {
             env.define("tcp_connect".into(), Value::Builtin("tcp_connect".into()));
             env.define("tcp_listen".into(), Value::Builtin("tcp_listen".into()));
             env.define("tcp_accept".into(), Value::Builtin("tcp_accept".into()));
+            // Console I/O (effectful)
+            env.define("io_print".into(), Value::Builtin("io_print".into()));
+            env.define("io_read_line".into(), Value::Builtin("io_read_line".into()));
 
             // Dict builtins (String-keyed dictionary)
             env.define("Dict.new".into(), Value::Builtin("Dict.new".into()));
@@ -1397,6 +1401,84 @@ impl Interpreter {
             cont: Cont::new(),
         };
         self.run_to_completion(state)
+    }
+
+    /// Evaluate an expression with IO effect handling.
+    /// This is used by the REPL to allow IO operations (like print) without
+    /// requiring the full scheduler. IO operations are executed synchronously.
+    pub fn eval_expr_with_io(&mut self, env: &Env, expr: &Expr) -> Result<Value, EvalError> {
+        // Create initial state with RuntimeScope for effect handling
+        let mut cont = Cont::new();
+        cont.push(Frame::RuntimeScope {
+            handlers: RuntimeHandlerSet::async_handlers(),
+        });
+
+        let mut state = State::Eval {
+            expr: Rc::new(expr.clone()),
+            env: env.clone(),
+            cont,
+        };
+
+        loop {
+            match self.step(state) {
+                StepResult::Continue(next) => {
+                    state = next;
+                }
+                StepResult::Done(value) => {
+                    // Check if this is a RuntimeEffect that needs handling
+                    match value {
+                        Value::RuntimeEffect(RuntimeEffect::Io { op, cont: effect_cont }) => {
+                            // Execute IO synchronously
+                            let result = execute_blocking_op_sync(&op);
+                            let resume_value = Self::blocking_result_to_value(result);
+
+                            // Resume with the result
+                            let mut new_cont = effect_cont;
+                            new_cont.push(Frame::RuntimeScope {
+                                handlers: RuntimeHandlerSet::async_handlers(),
+                            });
+                            state = State::Apply {
+                                value: resume_value,
+                                cont: new_cont,
+                            };
+                        }
+                        Value::RuntimeEffect(RuntimeEffect::Done(inner)) => {
+                            // Unwrap the Done wrapper
+                            return Ok(*inner);
+                        }
+                        Value::RuntimeEffect(_) => {
+                            // Other effects (Fork, Join, etc.) are not supported in REPL
+                            return Err(EvalError::RuntimeError(
+                                "Fiber operations not supported in REPL expressions".into(),
+                            ));
+                        }
+                        _ => return Ok(value),
+                    }
+                }
+                StepResult::Error(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Convert a BlockingOpResult to a Value (used by REPL IO handling)
+    fn blocking_result_to_value(result: BlockingOpResult) -> Value {
+        match result {
+            BlockingOpResult::FileOpened(id) => Value::ok(Value::FileHandle(id)),
+            BlockingOpResult::TcpConnected(id) => Value::ok(Value::TcpSocket(id)),
+            BlockingOpResult::TcpListening(id) => Value::ok(Value::TcpListener(id)),
+            BlockingOpResult::TcpAccepted(id) => Value::ok(Value::TcpSocket(id)),
+            BlockingOpResult::Read(bytes) => Value::ok(Value::Bytes(bytes)),
+            BlockingOpResult::Written(n) => Value::ok(Value::Int(n as i64)),
+            BlockingOpResult::Closed => Value::ok(Value::Unit),
+            BlockingOpResult::Slept => Value::Unit,
+            BlockingOpResult::Printed => Value::Unit,
+            BlockingOpResult::Line(s) => Value::String(s),
+            BlockingOpResult::Error(e) => {
+                // Convert IO error to our IoError type
+                let io_err = Value::from_io_error(e);
+                Value::io_err(io_err)
+            }
+        }
     }
 
     /// Apply a function value to an argument (convenience wrapper)
@@ -3988,6 +4070,26 @@ impl Interpreter {
                     ))),
                 }
             }
+            // Console I/O builtins
+            "io_print" => {
+                match arg {
+                    Value::String(text) => {
+                        Ok(BuiltinResult::Effect(EffectStub::Io {
+                            op: IoOp::Print { text },
+                        }))
+                    }
+                    _ => Err(EvalError::TypeError(format!(
+                        "io_print: expected String, got {}",
+                        arg.type_name()
+                    ))),
+                }
+            }
+            "io_read_line" => {
+                // arg should be () - read a line from stdin
+                Ok(BuiltinResult::Effect(EffectStub::Io {
+                    op: IoOp::ReadLine,
+                }))
+            }
             _ => Err(EvalError::RuntimeError(format!(
                 "unknown effectful builtin: {}",
                 name
@@ -4004,6 +4106,8 @@ impl Interpreter {
                 | "Fiber.yield"
                 | "Channel.new"
                 | "sleep_ms"
+                | "io_print"
+                | "io_read_line"
                 | "file_open"
                 | "file_read"
                 | "file_write"
@@ -4582,10 +4686,20 @@ mod tests {
 
     /// Helper to run a program (with main) and check it completes without error
     fn run_program(input: &str) -> Result<(), EvalError> {
+        use crate::infer::Inferencer;
+
         let tokens = Lexer::new(input).tokenize().unwrap();
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
+
+        // Run type inference to set up class_env for trait method resolution
+        let mut inferencer = Inferencer::new();
+        let _ = inferencer.infer_program(&program); // Ignore type errors for this test helper
+
         let mut interp = Interpreter::new();
+        // Pass class_env and type_ctx for trait method resolution
+        interp.set_class_env(inferencer.take_class_env());
+        interp.set_type_ctx(inferencer.take_type_ctx());
         interp.run(&program)?;
         Ok(())
     }

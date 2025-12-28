@@ -451,6 +451,45 @@ fn execute_blocking_op(
     }
 }
 
+/// Execute a blocking I/O operation synchronously (for REPL use).
+/// This handles only console I/O operations (print, read_line, sleep).
+/// File and network operations require the full blocking pool.
+pub fn execute_blocking_op_sync(op: &IoOp) -> BlockingOpResult {
+    match op {
+        IoOp::Print { text } => {
+            println!("{}", text);
+            BlockingOpResult::Printed
+        }
+        IoOp::ReadLine => {
+            use std::io::{self, BufRead};
+            let mut line = String::new();
+            match io::stdin().lock().read_line(&mut line) {
+                Ok(_) => {
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                    }
+                    BlockingOpResult::Line(line)
+                }
+                Err(e) => BlockingOpResult::Error(e),
+            }
+        }
+        IoOp::Sleep { duration_ms } => {
+            std::thread::sleep(std::time::Duration::from_millis(*duration_ms));
+            BlockingOpResult::Slept
+        }
+        _ => {
+            // File and network operations not supported in sync mode
+            BlockingOpResult::Error(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "File/network I/O not supported in REPL - use a script with main()",
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

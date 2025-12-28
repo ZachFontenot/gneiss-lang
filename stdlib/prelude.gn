@@ -138,6 +138,17 @@ impl Show for (List a) where a : Show =
     let show xs = "[" ++ string_join ", " (map show xs) ++ "]"
 end
 
+-- ============================================================================
+-- Print function (uses Show trait and IO effect)
+-- ============================================================================
+-- print : a -> () { IO } where a : Show
+-- Converts any showable value to a string and prints it to stdout.
+let print x = io_print (show x)
+
+-- read_line : () -> String { IO }
+-- Reads a line from stdin (wrapper around io_read_line).
+let read_line () = io_read_line ()
+
 let rec drop_while p xs =
     match xs with
     | [] -> []

@@ -3190,22 +3190,76 @@ impl Inferencer {
     /// On success, returns the type environment.
     /// On failure, returns a non-empty vector of type errors.
     pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, Vec<TypeError>> {
+        self.infer_program_impl(program, true)
+    }
+
+    /// Infer types without loading prelude (for REPL after initial load)
+    pub fn infer_program_no_prelude(&mut self, program: &Program) -> Result<TypeEnv, Vec<TypeError>> {
+        self.infer_program_impl(program, false)
+    }
+
+    fn infer_program_impl(&mut self, program: &Program, load_prelude: bool) -> Result<TypeEnv, Vec<TypeError>> {
         // Clear any previous errors
         self.errors.clear();
         let mut env = TypeEnv::new();
 
         // Add built-in functions
-        // print : forall a t. a/t -> ()/t  (polymorphic in arg type and answer type)
+        // print : a -> () { IO } where a : Show
+        let io_effect = Effect {
+            name: "IO".to_string(),
+            params: vec![],
+        };
         let print_scheme = Scheme {
-            num_generics: 2,
-            predicates: vec![],
+            num_generics: 1,
+            predicates: vec![Pred {
+                trait_name: "Show".to_string(),
+                ty: Type::Generic(0),
+            }],
             ty: Type::Arrow {
-                arg: Rc::new(Type::new_generic(0)), // Generic arg type
+                arg: Rc::new(Type::Generic(0)),
                 ret: Rc::new(Type::Unit),
-                effects: Row::Empty, // Pure for now - TODO: should have IO effect
+                effects: Row::Extend {
+                    effect: io_effect,
+                    rest: Rc::new(Row::Empty),
+                },
             },
         };
         env.insert("print".into(), print_scheme);
+
+        // io_print : String -> () { IO }
+        // Low-level print that takes a string directly (used by print implementation)
+        let io_effect_for_io_print = Effect {
+            name: "IO".to_string(),
+            params: vec![],
+        };
+        env.insert(
+            "io_print".into(),
+            Scheme::mono(Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::Unit),
+                effects: Row::Extend {
+                    effect: io_effect_for_io_print,
+                    rest: Rc::new(Row::Empty),
+                },
+            }),
+        );
+
+        // io_read_line : () -> String { IO }
+        let io_effect_for_io_read = Effect {
+            name: "IO".to_string(),
+            params: vec![],
+        };
+        env.insert(
+            "io_read_line".into(),
+            Scheme::mono(Type::Arrow {
+                arg: Rc::new(Type::Unit),
+                ret: Rc::new(Type::String),
+                effects: Row::Extend {
+                    effect: io_effect_for_io_read,
+                    rest: Rc::new(Row::Empty),
+                },
+            }),
+        );
 
         // int_to_string : Int -> String
         env.insert(
@@ -3921,15 +3975,19 @@ impl Inferencer {
         };
         env.insert("get_args".into(), get_args_scheme);
 
-        // Parse and inject prelude (Option, Result, id, const, flip)
-        let prelude = parse_prelude().map_err(|e| vec![TypeError::Other(e)])?;
-
-        // Collect all items: prelude first, then user program
-        let all_items: Vec<&Item> = prelude
-            .items
-            .iter()
-            .chain(program.items.iter())
-            .collect();
+        // Collect all items: prelude first (if loading), then user program
+        let prelude_program;
+        let all_items: Vec<&Item> = if load_prelude {
+            // Parse and inject prelude (Option, Result, id, const, flip)
+            prelude_program = parse_prelude().map_err(|e| vec![TypeError::Other(e)])?;
+            prelude_program
+                .items
+                .iter()
+                .chain(program.items.iter())
+                .collect()
+        } else {
+            program.items.iter().collect()
+        };
 
         // First pass: register all type declarations (ADTs, records, and type aliases)
         for item in &all_items {
@@ -4026,11 +4084,12 @@ impl Inferencer {
                             body_result.ty
                         } else {
                             // Build function type
-                            // TODO: Track effects properly once effect inference is implemented
+                            // The innermost arrow carries the body's effects
+                            // Outer arrows are pure (returning a closure is pure)
                             let mut result = Type::Arrow {
                                 arg: Rc::new(param_types.pop().unwrap()),
                                 ret: Rc::new(body_result.ty),
-                                effects: Row::Empty, // Pure for now
+                                effects: body_result.effects.clone(),
                             };
                             // Wrap remaining params as pure arrows (returning a closure is pure)
                             for param_ty in param_types.into_iter().rev() {
@@ -4043,16 +4102,18 @@ impl Inferencer {
                             result
                         };
 
-                        self.level -= 1;
-
                         // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
                         // For now, predicates are collected but not checked
 
                         // Check against declared type signature if one exists (from `val` declaration)
+                        // IMPORTANT: Do this BEFORE decrementing level, so instantiated types
+                        // are at level > 0 and can be generalized properly
                         if let Some(declared_scheme) = env.get(name) {
                             let declared_ty = self.instantiate(declared_scheme);
                             self.unify_at(&func_ty, &declared_ty, &body.span)?;
                         }
+
+                        self.level -= 1;
 
                         Ok(self.generalize(&func_ty))
                     })();
