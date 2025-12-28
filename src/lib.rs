@@ -2,6 +2,8 @@
 
 pub mod ast;
 pub mod blocking_pool;
+pub mod codegen;
+pub mod elaborate;
 pub mod errors;
 pub mod eval;
 pub mod infer;
@@ -12,6 +14,7 @@ pub mod operators;
 pub mod parser;
 pub mod prelude;
 pub mod runtime;
+pub mod tast;
 pub mod test_support;
 pub mod types;
 
@@ -25,3 +28,6 @@ pub use infer::Inferencer;
 pub use lexer::Lexer;
 pub use parser::Parser;
 pub use types::{Type, TypeEnv};
+
+pub use elaborate::elaborate;
+pub use tast::TProgram;

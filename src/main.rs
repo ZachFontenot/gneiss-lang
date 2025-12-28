@@ -7,6 +7,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use gneiss::ast::{ImportSpec, Item, Program};
+use gneiss::codegen::{emit_c, lower_program, lower_tprogram};
+use gneiss::elaborate::elaborate;
 use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
@@ -19,9 +21,20 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
-        // Run a file, pass remaining args to the program
-        let program_args = args[2..].to_vec();
-        run_file(&args[1], program_args);
+        match args[1].as_str() {
+            "compile" | "c" => {
+                if args.len() < 3 {
+                    eprintln!("Usage: gneiss compile <file.gn> [--emit-c] [-o output]");
+                    std::process::exit(1);
+                }
+                compile_file(&args[2..]);
+            }
+            _ => {
+                // Run a file, pass remaining args to the program
+                let program_args = args[2..].to_vec();
+                run_file(&args[1], program_args);
+            }
+        }
     } else {
         // Start REPL
         repl();
@@ -157,6 +170,214 @@ fn run_file(path: &str, program_args: Vec<String>) {
             }
         }
     }
+}
+
+/// Compile a Gneiss source file to C (and optionally to native)
+fn compile_file(args: &[String]) {
+    let mut source_file = None;
+    let mut emit_c_only = false;
+    let mut output_file = None;
+
+    // Parse arguments
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--emit-c" => emit_c_only = true,
+            "-o" => {
+                i += 1;
+                if i < args.len() {
+                    output_file = Some(args[i].clone());
+                } else {
+                    eprintln!("Error: -o requires an argument");
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("Unknown option: {}", arg);
+                std::process::exit(1);
+            }
+            _ => {
+                if source_file.is_none() {
+                    source_file = Some(args[i].clone());
+                } else {
+                    eprintln!("Unexpected argument: {}", args[i]);
+                    std::process::exit(1);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let source_path = match source_file {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: no source file specified");
+            std::process::exit(1);
+        }
+    };
+
+    let colors = Colors::new(std::io::stderr().is_terminal());
+
+    // Read source
+    let source = match fs::read_to_string(&source_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", source_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let source_map = SourceMap::new(&source);
+
+    // Lex
+    let tokens = match Lexer::new(&source).tokenize() {
+        Ok(t) => t,
+        Err(e) => {
+            eprint!("{}", format_lex_error(&e, &source_map, Some(&source_path), &colors));
+            std::process::exit(1);
+        }
+    };
+
+    // Parse
+    let program = match Parser::new(tokens).parse_program() {
+        Ok(p) => p,
+        Err(e) => {
+            eprint!("{}", format_parse_error(&e, &source_map, Some(&source_path), &colors));
+            std::process::exit(1);
+        }
+    };
+
+    // Type check
+    let mut inferencer = Inferencer::new();
+    let type_env = match inferencer.infer_program(&program) {
+        Ok(env) => env,
+        Err(errors) => {
+            for e in &errors {
+                eprint!("{}", format_type_error(e, &source_map, Some(&source_path), &colors));
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Elaborate to TAST
+    let tprogram = match elaborate(&program, &inferencer, &type_env) {
+        Ok(t) => t,
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("Elaboration error: {}", e);
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Lower TAST to Core IR
+    let core_program = match lower_tprogram(&tprogram) {
+        Ok(p) => p,
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("Lowering error: {}", e);
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // Emit C
+    let c_code = emit_c(&core_program);
+
+    // Determine output filename
+    let base_name = Path::new(&source_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out");
+
+    if emit_c_only {
+        // Just output C code
+        let c_file = output_file.unwrap_or_else(|| format!("{}.c", base_name));
+        if let Err(e) = fs::write(&c_file, &c_code) {
+            eprintln!("Error writing {}: {}", c_file, e);
+            std::process::exit(1);
+        }
+        println!("Wrote {}", c_file);
+    } else {
+        // Compile to native
+        let c_file = format!("/tmp/{}.c", base_name);
+        let exe_file = output_file.unwrap_or_else(|| base_name.to_string());
+
+        // Write C file
+        if let Err(e) = fs::write(&c_file, &c_code) {
+            eprintln!("Error writing {}: {}", c_file, e);
+            std::process::exit(1);
+        }
+
+        // Find runtime directory
+        let runtime_dir = find_runtime_path().unwrap_or_else(|| {
+            eprintln!("Error: cannot find runtime directory");
+            eprintln!("Hint: make sure runtime/ exists in the project directory");
+            std::process::exit(1);
+        });
+
+        // Compile with cc
+        let status = std::process::Command::new("cc")
+            .args([
+                "-O2",
+                "-Wall",
+                "-o", &exe_file,
+                &c_file,
+                &runtime_dir.join("gn_runtime.c").display().to_string(),
+                &format!("-I{}", runtime_dir.display()),
+            ])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                println!("Compiled to {}", exe_file);
+            }
+            Ok(s) => {
+                eprintln!("C compiler failed with status: {}", s);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Failed to run C compiler: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Find the runtime library path
+fn find_runtime_path() -> Option<PathBuf> {
+    // Check GNEISS_RUNTIME env var first
+    if let Ok(path) = std::env::var("GNEISS_RUNTIME") {
+        let path = PathBuf::from(path);
+        if path.join("gn_runtime.c").exists() {
+            return Some(path);
+        }
+    }
+
+    // Check relative to executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // Try ../runtime (for development)
+            let dev_runtime = exe_dir.join("../runtime");
+            if dev_runtime.join("gn_runtime.c").exists() {
+                return Some(dev_runtime);
+            }
+
+            // Try ../../runtime (for target/debug builds)
+            let dev_runtime2 = exe_dir.join("../../runtime");
+            if dev_runtime2.join("gn_runtime.c").exists() {
+                return Some(dev_runtime2);
+            }
+        }
+    }
+
+    // Check current working directory
+    let cwd_runtime = PathBuf::from("runtime");
+    if cwd_runtime.join("gn_runtime.c").exists() {
+        return Some(cwd_runtime);
+    }
+
+    None
 }
 
 /// Find the stdlib path (MVP: just check relative to executable)

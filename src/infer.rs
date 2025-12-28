@@ -283,6 +283,8 @@ pub struct Inferencer {
     used_module_aliases: HashSet<String>,
     /// Accumulated type errors (for multi-error reporting)
     errors: Vec<TypeError>,
+    /// Expression types keyed by span (start, end) for elaboration
+    expr_types: HashMap<(usize, usize), Type>,
 }
 
 impl Inferencer {
@@ -301,6 +303,7 @@ impl Inferencer {
             used_imports: HashSet::new(),
             used_module_aliases: HashSet::new(),
             errors: Vec::new(),
+            expr_types: HashMap::new(),
         }
     }
 
@@ -1406,7 +1409,10 @@ impl Inferencer {
     pub fn infer_expr(&mut self, env: &TypeEnv, expr: &Expr) -> Result<Type, TypeError> {
         let result = self.infer_expr_full(env, expr)?;
         // Resolve the type to follow union-find bindings
-        Ok(result.ty.resolve(&self.type_uf))
+        let resolved_ty = result.ty.resolve(&self.type_uf);
+        // Record for elaboration pass
+        self.record_expr_type(&expr.span, resolved_ty.clone());
+        Ok(resolved_ty)
     }
 
     /// Infer a single expression with full effect tracking.
@@ -4470,6 +4476,36 @@ impl Inferencer {
     /// Get the type context (for passing to the interpreter)
     pub fn take_type_ctx(&mut self) -> TypeContext {
         std::mem::take(&mut self.type_ctx)
+    }
+
+    /// Resolve all type variables in a type to their bound values
+    pub fn resolve_type(&self, ty: &Type) -> Type {
+        ty.resolve(&self.type_uf)
+    }
+
+    /// Get a reference to the type context
+    pub fn type_ctx(&self) -> &TypeContext {
+        &self.type_ctx
+    }
+
+    /// Get a reference to the type union-find
+    pub fn type_uf(&self) -> &UnionFind {
+        &self.type_uf
+    }
+
+    /// Record an expression's type for later retrieval by elaboration
+    pub fn record_expr_type(&mut self, span: &crate::ast::Span, ty: Type) {
+        self.expr_types.insert((span.start, span.end), ty);
+    }
+
+    /// Get the type of an expression by its span
+    pub fn get_expr_type(&self, span: &crate::ast::Span) -> Option<Type> {
+        self.expr_types.get(&(span.start, span.end)).cloned()
+    }
+
+    /// Get access to the class environment for trait method lookup
+    pub fn class_env_ref(&self) -> &ClassEnv {
+        &self.class_env
     }
 }
 
