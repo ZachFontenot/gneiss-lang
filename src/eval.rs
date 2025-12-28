@@ -1874,6 +1874,13 @@ impl Interpreter {
                     })
                 }
             }
+
+            // Typed holes should not be evaluated - they're for type discovery only
+            ExprKind::Hole => {
+                StepResult::Error(EvalError::RuntimeError(
+                    "Typed hole '_' was evaluated. Holes are placeholders for type discovery and must be filled in before running.".to_string()
+                ))
+            }
         }
     }
 

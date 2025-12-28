@@ -315,6 +315,12 @@ fn format_type_error_for_test(
             Some(span),
             vec![],
         ),
+        TypeError::TypedHole { ty, span } => (
+            "TYPED HOLE",
+            format!("Found a typed hole `_` with inferred type: {}", ty),
+            Some(span),
+            vec![],
+        ),
         TypeError::Other(msg) => (
             "ERROR",
             msg.clone(),

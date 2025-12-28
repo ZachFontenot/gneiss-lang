@@ -1998,6 +1998,11 @@ impl Parser {
                     span,
                 ))
             }
+            Token::Underscore => {
+                // Typed hole: _ in expression position
+                self.advance();
+                Ok(Spanned::new(ExprKind::Hole, start))
+            }
             _ => Err(self.unexpected_token("expression")),
         }
     }

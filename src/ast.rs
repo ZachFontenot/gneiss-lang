@@ -331,6 +331,12 @@ pub enum ExprKind {
         /// Field updates: (field_name, new_value)
         updates: Vec<(Ident, Expr)>,
     },
+
+    // ========================================================================
+    // Typed Holes
+    // ========================================================================
+    /// Typed hole: _ (placeholder that reports its inferred type)
+    Hole,
 }
 
 #[derive(Debug, Clone)]

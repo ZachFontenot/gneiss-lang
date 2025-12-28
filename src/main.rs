@@ -767,6 +767,16 @@ fn format_type_error(
             Some(span),
             vec![],
         ),
+        TypeError::TypedHole { ty, span } => {
+            let msg = format!(
+                "Found a typed hole `_` with inferred type:\n\n  {}{}{}\n\n\
+                 Fill in the hole with an expression of this type.",
+                colors.cyan(),
+                ty.display_user_friendly(),
+                colors.reset()
+            );
+            ("TYPED HOLE", msg, Some(span), vec![])
+        }
         TypeError::Other(msg) => (
             "ERROR",
             msg.clone(),

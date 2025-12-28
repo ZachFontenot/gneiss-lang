@@ -227,6 +227,11 @@ pub enum TypeError {
     CannotInferRecordType {
         span: Span,
     },
+    #[error("typed hole found with inferred type: {ty}")]
+    TypedHole {
+        ty: Type,
+        span: Span,
+    },
     #[error("{0}")]
     Other(String),
 }
@@ -455,9 +460,21 @@ impl Inferencer {
         !self.errors.is_empty()
     }
 
-    /// Take the accumulated errors, leaving an empty vector
+    /// Take the accumulated errors, leaving an empty vector.
+    /// Resolves type variables in TypedHole errors to their final types.
     pub fn take_errors(&mut self) -> Vec<TypeError> {
-        std::mem::take(&mut self.errors)
+        let errors = std::mem::take(&mut self.errors);
+        // Resolve type variables in TypedHole errors
+        errors
+            .into_iter()
+            .map(|e| match e {
+                TypeError::TypedHole { ty, span } => TypeError::TypedHole {
+                    ty: ty.resolve(&self.type_uf),
+                    span,
+                },
+                other => other,
+            })
+            .collect()
     }
 
     /// Clear accumulated errors (for starting a new module)
@@ -2460,6 +2477,17 @@ impl Inferencer {
                         span: expr.span.clone(),
                     }),
                 }
+            }
+
+            // Typed hole: _ creates a fresh type variable and reports the inferred type
+            ExprKind::Hole => {
+                let hole_ty = self.fresh_var();
+                // Record the hole for reporting
+                self.errors.push(TypeError::TypedHole {
+                    ty: hole_ty.clone(),
+                    span: expr.span.clone(),
+                });
+                Ok(InferResult::pure(hole_ty))
             }
         }
     }
