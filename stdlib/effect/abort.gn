@@ -1,0 +1,63 @@
+-- Effect/Abort: Early exit with polymorphic return
+--
+-- The Abort effect provides a simple way to exit a computation early.
+-- Simpler than Exn when you don't need to carry an error value.
+-- The abort operation has a polymorphic return type.
+--
+-- Usage:
+--   import Effect/Abort
+--
+--   let find_first pred xs =
+--       match xs with
+--       | [] -> perform Abort.abort ()
+--       | x :: rest ->
+--           if pred x then x
+--           else find_first pred rest
+--       end
+--
+--   let main () =
+--       match Abort.run (fun () -> find_first (fun x -> x > 5) [1,2,3]) with
+--       | Some x -> print (int_to_string x)
+--       | None -> print "Not found"
+--       end
+
+-- Abort effect with polymorphic input and output
+effect Abort =
+    | abort : a -> b
+end
+
+-- Run computation, returning None if aborted
+let run comp =
+    handle comp () with
+    | return x -> Some x
+    | abort _ k -> None
+    end
+
+-- Run with default value on abort
+let runDefault default comp =
+    handle comp () with
+    | return x -> x
+    | abort _ k -> default
+    end
+
+-- Abort if condition is true
+let when cond =
+    if cond then perform Abort.abort () else ()
+
+-- Abort if condition is false
+let unless cond =
+    if cond then () else perform Abort.abort ()
+
+-- Abort if Option is None, otherwise unwrap
+let fromSome opt =
+    match opt with
+    | Some x -> x
+    | None -> perform Abort.abort ()
+    end
+
+-- Abort if list is empty
+let fromNonEmpty xs =
+    match xs with
+    | [] -> perform Abort.abort ()
+    | _ -> xs
+    end

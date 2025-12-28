@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{ImportSpec, Item, Program, Visibility};
+use crate::ast::{ImportSpec, Item, Program};
 use crate::lexer::LexError;
 use crate::parser::ParseError;
 
@@ -401,9 +401,39 @@ fn to_pascal_case(s: &str) -> String {
 }
 
 /// Extract imports and exports from a parsed program
+/// If no explicit export list, all declarations are public.
+/// If explicit export list, only those items are public.
 fn extract_module_info(program: &Program) -> (Vec<ImportSpec>, HashSet<String>) {
     let mut imports = Vec::new();
     let mut exports = HashSet::new();
+
+    // Check if there's an explicit export list
+    let has_explicit_exports = program.exports.is_some();
+
+    if let Some(ref export_decl) = program.exports {
+        // Use the explicit export list
+        use crate::ast::ExportItem;
+        for item in &export_decl.items {
+            match &item.node {
+                ExportItem::Value(name) => {
+                    exports.insert(name.clone());
+                }
+                ExportItem::TypeOnly(name) => {
+                    exports.insert(name.clone());
+                }
+                ExportItem::TypeAll(name) => {
+                    exports.insert(name.clone());
+                    // Note: constructors would need to be looked up from declarations
+                }
+                ExportItem::TypeSome(name, ctors) => {
+                    exports.insert(name.clone());
+                    for ctor in ctors {
+                        exports.insert(ctor.clone());
+                    }
+                }
+            }
+        }
+    }
 
     for item in &program.items {
         match item {
@@ -411,37 +441,50 @@ fn extract_module_info(program: &Program) -> (Vec<ImportSpec>, HashSet<String>) 
                 imports.push(spanned.node.clone());
             }
             Item::Decl(decl) => {
-                use crate::ast::Decl;
-                match decl {
-                    Decl::Let { visibility, name, .. } if *visibility == Visibility::Public => {
-                        exports.insert(name.clone());
-                    }
-                    Decl::LetRec { visibility, bindings, .. } if *visibility == Visibility::Public => {
-                        for binding in bindings {
-                            exports.insert(binding.name.node.clone());
+                // If no explicit export list, export all declarations
+                if !has_explicit_exports {
+                    use crate::ast::Decl;
+                    match decl {
+                        Decl::Let { name, .. } => {
+                            exports.insert(name.clone());
                         }
-                    }
-                    Decl::Type { visibility, name, constructors, .. } if *visibility == Visibility::Public => {
-                        exports.insert(name.clone());
-                        // Also export constructors
-                        for ctor in constructors {
-                            exports.insert(ctor.name.clone());
+                        Decl::LetRec { bindings, .. } => {
+                            for binding in bindings {
+                                exports.insert(binding.name.node.clone());
+                            }
                         }
-                    }
-                    Decl::TypeAlias { visibility, name, .. } if *visibility == Visibility::Public => {
-                        exports.insert(name.clone());
-                    }
-                    Decl::Trait { visibility, name, methods, .. } if *visibility == Visibility::Public => {
-                        exports.insert(name.clone());
-                        // Also export trait methods
-                        for method in methods {
-                            exports.insert(method.name.clone());
+                        Decl::Type { name, constructors, .. } => {
+                            exports.insert(name.clone());
+                            // Also export constructors
+                            for ctor in constructors {
+                                exports.insert(ctor.name.clone());
+                            }
                         }
+                        Decl::TypeAlias { name, .. } => {
+                            exports.insert(name.clone());
+                        }
+                        Decl::Record { name, .. } => {
+                            exports.insert(name.clone());
+                        }
+                        Decl::Trait { name, methods, .. } => {
+                            exports.insert(name.clone());
+                            // Also export trait methods
+                            for method in methods {
+                                exports.insert(method.name.clone());
+                            }
+                        }
+                        Decl::OperatorDef { op, .. } => {
+                            exports.insert(op.clone());
+                        }
+                        Decl::EffectDecl { name, operations, .. } => {
+                            exports.insert(name.clone());
+                            // Also export effect operations
+                            for op in operations {
+                                exports.insert(op.name.clone());
+                            }
+                        }
+                        Decl::Fixity { .. } | Decl::Val { .. } | Decl::Instance { .. } => {}
                     }
-                    Decl::OperatorDef { visibility, op, .. } if *visibility == Visibility::Public => {
-                        exports.insert(op.clone());
-                    }
-                    _ => {}
                 }
             }
             Item::Expr(_) => {}

@@ -1,0 +1,65 @@
+-- Effect/Writer: Accumulating output with efficient collection
+--
+-- The Writer effect allows computations to produce output that is
+-- collected during execution. Uses reverse-build pattern for O(n)
+-- performance instead of O(n^2) repeated appending.
+--
+-- Usage:
+--   import Effect/Writer
+--
+--   let log_computation () =
+--       perform Writer.tell "Starting...";
+--       let result = 42 in
+--       perform Writer.tell "Done!";
+--       result
+--
+--   let main () =
+--       match Writer.runList log_computation with
+--       | (result, logs) ->
+--           print ("Result: " ++ int_to_string result);
+--           map print logs
+--       end
+
+-- Writer effect with polymorphic output type
+effect Writer w =
+    | tell : w -> ()
+end
+
+-- Run and collect output as a list (reverse-build pattern, O(n))
+let runList comp =
+    let go = handle comp () with
+        | return x -> fun acc -> (x, reverse acc)
+        | tell w k -> fun acc -> k () (w :: acc)
+    end
+    in go []
+
+-- Run and concatenate string output
+let runString comp =
+    match runList comp with
+    | (result, chunks) -> (result, string_join "" chunks)
+    end
+
+-- Run and concatenate with custom separator
+let runJoin sep comp =
+    match runList comp with
+    | (result, chunks) -> (result, string_join sep chunks)
+    end
+
+-- Run with newline-separated output (for logging)
+let runLines comp =
+    match runList comp with
+    | (result, chunks) -> (result, string_join "\n" chunks)
+    end
+
+-- Write multiple items
+let tells ws =
+    match ws with
+    | [] -> ()
+    | w :: rest ->
+        perform Writer.tell w;
+        tells rest
+    end
+
+-- Write with a prefix (useful for logging)
+let tellWith prefix msg =
+    perform Writer.tell (prefix ++ msg)

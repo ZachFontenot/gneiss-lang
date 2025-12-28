@@ -815,7 +815,7 @@ impl Type {
                     };
                     c
                 });
-                format!("'{}", c)
+                c.to_string()
             }
             Type::Int => "Int".to_string(),
             Type::Float => "Float".to_string(),
@@ -926,7 +926,7 @@ impl fmt::Display for Type {
         // For resolved display, use resolve() with a UnionFind first.
         match self {
             Type::Var(id) => write!(f, "t{}", id),
-            Type::Generic(id) => write!(f, "'{}", (b'a' + (*id % 26) as u8) as char),
+            Type::Generic(id) => write!(f, "{}", (b'a' + (*id % 26) as u8) as char),
             Type::Int => write!(f, "Int"),
             Type::Float => write!(f, "Float"),
             Type::Bool => write!(f, "Bool"),
@@ -1507,6 +1507,7 @@ impl ClassEnv {
 
     /// Register an instance declaration
     /// Returns error if the trait doesn't exist or if there's an overlapping instance
+    #[allow(clippy::result_large_err)] // ClassError needs to carry Type info for good error messages
     pub fn add_instance(&mut self, info: InstanceInfo) -> Result<(), ClassError> {
         // Check that the trait exists
         if !self.traits.contains_key(&info.trait_name) {

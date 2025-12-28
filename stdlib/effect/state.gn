@@ -1,0 +1,55 @@
+-- Effect/State: Stateful computation with get/put operations
+--
+-- The State effect provides mutable state threading through computations.
+-- The handler uses the function-returning pattern to avoid infinite types.
+--
+-- Usage:
+--   import Effect/State
+--
+--   let counter () =
+--       let x = perform State.get () in
+--       perform State.put (x + 1);
+--       x
+--
+--   let main () =
+--       match State.run 0 counter with
+--       | (result, final) -> print (int_to_string result)
+--       end
+
+-- State effect with polymorphic state type
+effect State s =
+    | get : () -> s
+    | put : s -> ()
+end
+
+-- Run stateful computation with initial state
+-- Returns (result, final_state)
+let run init comp =
+    let go = handle comp () with
+        | return x -> fun s -> (x, s)
+        | get () k -> fun s -> k s s
+        | put new_s k -> fun _ -> k () new_s
+    end
+    in go init
+
+-- Run and return only the result (discard final state)
+let eval init comp =
+    match run init comp with
+    | (result, _) -> result
+    end
+
+-- Run and return only the final state (discard result)
+let exec init comp =
+    match run init comp with
+    | (_, final) -> final
+    end
+
+-- Modify state with a function
+let modify f =
+    let s = perform State.get () in
+    perform State.put (f s)
+
+-- Get a computed value from state
+let gets f =
+    let s = perform State.get () in
+    f s

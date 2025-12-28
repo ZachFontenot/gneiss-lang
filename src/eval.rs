@@ -919,6 +919,18 @@ impl Interpreter {
                 Value::Builtin("char_is_whitespace".into()),
             );
             env.define(
+                "char_is_digit".into(),
+                Value::Builtin("char_is_digit".into()),
+            );
+            env.define(
+                "char_is_alpha".into(),
+                Value::Builtin("char_is_alpha".into()),
+            );
+            env.define(
+                "char_is_alphanumeric".into(),
+                Value::Builtin("char_is_alphanumeric".into()),
+            );
+            env.define(
                 "string_index_of".into(),
                 Value::Builtin("string_index_of".into()),
             );
@@ -3671,6 +3683,18 @@ impl Interpreter {
                 Value::Char(c) => Ok(Value::Bool(c.is_whitespace())),
                 _ => Err(EvalError::TypeError("char_is_whitespace: expected char".into())),
             },
+            "char_is_digit" => match arg {
+                Value::Char(c) => Ok(Value::Bool(c.is_ascii_digit())),
+                _ => Err(EvalError::TypeError("char_is_digit: expected char".into())),
+            },
+            "char_is_alpha" => match arg {
+                Value::Char(c) => Ok(Value::Bool(c.is_alphabetic())),
+                _ => Err(EvalError::TypeError("char_is_alpha: expected char".into())),
+            },
+            "char_is_alphanumeric" => match arg {
+                Value::Char(c) => Ok(Value::Bool(c.is_alphanumeric())),
+                _ => Err(EvalError::TypeError("char_is_alphanumeric: expected char".into())),
+            },
             // Native string operations (single-arg)
             "string_to_lower" => match arg {
                 Value::String(s) => Ok(Value::String(s.to_lowercase())),
@@ -3984,6 +4008,7 @@ impl Interpreter {
         )
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn print_value(&self, val: &Value) {
         match val {
             Value::Int(n) => print!("{}", n),
@@ -4210,6 +4235,7 @@ impl Interpreter {
     }
 
     /// Try to bind a pattern, returning false if it doesn't match
+    #[allow(clippy::only_used_in_recursion)]
     fn try_bind_pattern(&self, env: &Env, pattern: &Pattern, val: &Value) -> bool {
         match (&pattern.node, val) {
             (PatternKind::Wildcard, _) => true,

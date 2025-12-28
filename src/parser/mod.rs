@@ -1651,6 +1651,7 @@ impl Parser {
         ))
     }
 
+    #[allow(clippy::while_let_loop)] // Complex loop structure with multiple break/continue points
     fn parse_expr_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
         let start = self.current_span();
         let mut left = self.parse_expr_unary()?;

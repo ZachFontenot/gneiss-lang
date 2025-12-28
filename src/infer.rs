@@ -562,6 +562,12 @@ impl Inferencer {
         let t1 = t1.resolve(&self.type_uf);
         let t2 = t2.resolve(&self.type_uf);
 
+        // Debug output when GNEISS_DEBUG_TYPES is set
+        if std::env::var("GNEISS_DEBUG_TYPES").is_ok() {
+            eprintln!("[unify] t1={:?}", t1);
+            eprintln!("[unify] t2={:?}", t2);
+        }
+
         match (&t1, &t2) {
             // Same primitive types
             (Type::Int, Type::Int) => Ok(()),
@@ -631,7 +637,7 @@ impl Inferencer {
             ) => {
                 self.unify_inner(a1, a2, span)?;
                 self.unify_inner(r1, r2, span)?;
-                self.unify_rows(&e1, &e2, span)?;
+                self.unify_rows(e1, e2, span)?;
                 Ok(())
             }
 
@@ -748,7 +754,7 @@ impl Inferencer {
                 } else {
                     // Different effects - need row rewriting
                     // Try to find e1 in r2's tail
-                    self.unify_rows_rewrite(&e1, rest1, &r2, span)
+                    self.unify_rows_rewrite(e1, rest1, &r2, span)
                 }
             }
 
@@ -1044,9 +1050,7 @@ impl Inferencer {
                 // Check if this is an unbound level-0 variable
                 if !inferencer.type_uf.is_bound(id) && inferencer.type_uf.get_level(id) == 0 {
                     // Level-0 var that's not already in subst - create fresh var for it
-                    if !subst.contains_key(&id) {
-                        subst.insert(id, inferencer.fresh_var());
-                    }
+                    subst.entry(id).or_insert_with(|| inferencer.fresh_var());
                 }
             }
             Type::Arrow { arg, ret, effects } => {
@@ -1122,7 +1126,7 @@ impl Inferencer {
             Type::Arrow { arg, ret, effects } => {
                 Self::type_mentions_generalized_vars_static(arg, generics, current_level, type_uf, row_uf)
                     || Self::type_mentions_generalized_vars_static(ret, generics, current_level, type_uf, row_uf)
-                    || Self::row_mentions_generalized_vars_static(&effects, generics, current_level, type_uf, row_uf)
+                    || Self::row_mentions_generalized_vars_static(effects, generics, current_level, type_uf, row_uf)
             }
             Type::Tuple(ts) => ts
                 .iter()
@@ -1210,7 +1214,7 @@ impl Inferencer {
                     type_uf,
                     row_uf,
                 )),
-                effects: Self::apply_generic_subst_to_row_static(&effects, generics, current_level, type_uf, row_uf),
+                effects: Self::apply_generic_subst_to_row_static(effects, generics, current_level, type_uf, row_uf),
             },
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
@@ -1302,7 +1306,7 @@ impl Inferencer {
             Type::Arrow { arg, ret, effects } => Type::Arrow {
                 arg: Rc::new(self.generalize_inner(arg, generics)),
                 ret: Rc::new(self.generalize_inner(ret, generics)),
-                effects: self.generalize_inner_row(&effects, generics),
+                effects: self.generalize_inner_row(effects, generics),
             },
             Type::Tuple(ts) => Type::Tuple(
                 ts.iter()
@@ -2195,14 +2199,25 @@ impl Inferencer {
                         let num_type_params = effect_info.map(|e| e.type_params.len()).unwrap_or(0);
 
                         // Create fresh vars for effect type params
-                        let mut effect_type_args: Vec<Type> = Vec::new();
+                        let mut type_args: Vec<Type> = Vec::new();
                         for _ in 0..num_type_params {
-                            effect_type_args.push(self.fresh_var());
+                            type_args.push(self.fresh_var());
+                        }
+
+                        // Also create fresh vars for operation-local generics
+                        // These have IDs starting at num_type_params (see extract_operation_signature)
+                        // We need to extend type_args to cover all Generic indices used in the operation
+                        let max_generic_id = op.generics.iter().copied().max();
+                        if let Some(max_id) = max_generic_id {
+                            // Extend type_args to cover up to max_id (inclusive)
+                            while type_args.len() <= max_id as usize {
+                                type_args.push(self.fresh_var());
+                            }
                         }
 
                         // Bind params with instantiated types
                         let instantiated_params: Vec<Type> = op.param_types.iter()
-                            .map(|t| substitute_generics(t, &effect_type_args))
+                            .map(|t| substitute_generics(t, &type_args))
                             .collect();
 
                         for (i, param) in handler.params.iter().enumerate() {
@@ -2215,7 +2230,7 @@ impl Inferencer {
                         // Continuation takes the operation's result type and returns the handle result
                         // For deep handlers, the continuation can re-perform the handled effects
                         // (they'll be caught by the handler again), so use the body's full effects
-                        let cont_arg = substitute_generics(&op.result_type, &effect_type_args);
+                        let cont_arg = substitute_generics(&op.result_type, &type_args);
                         let cont_type = Type::Arrow {
                             arg: Rc::new(cont_arg),
                             ret: Rc::new(result_ty.clone()),
@@ -2723,6 +2738,10 @@ impl Inferencer {
                         if name == "List" && arg_types.len() == 1 {
                             return Ok(Type::list(arg_types.into_iter().next().unwrap()));
                         }
+                        // Canonicalize "Fiber a" to Type::Fiber(a)
+                        if name == "Fiber" && arg_types.len() == 1 {
+                            return Ok(Type::Fiber(Rc::new(arg_types.into_iter().next().unwrap())));
+                        }
                         // Check if this is a type alias with parameters
                         if let Some(alias_info) = self.type_ctx.get_type_alias(name).cloned() {
                             if alias_info.params.len() == arg_types.len() {
@@ -2917,6 +2936,10 @@ impl Inferencer {
                         // Canonicalize "List a" to Type::list(a)
                         if name == "List" && arg_types.len() == 1 {
                             return Ok(Type::list(arg_types.into_iter().next().unwrap()));
+                        }
+                        // Canonicalize "Fiber a" to Type::Fiber(a)
+                        if name == "Fiber" && arg_types.len() == 1 {
+                            return Ok(Type::Fiber(Rc::new(arg_types.into_iter().next().unwrap())));
                         }
                         // Check if this is a type alias with parameters
                         if let Some(alias_info) = self.type_ctx.get_type_alias(name).cloned() {
@@ -4055,7 +4078,7 @@ impl Inferencer {
                 }
                 Item::Decl(Decl::EffectDecl { name, params, operations, .. }) => {
                     // Register the effect declaration in the effect environment
-                    let param_strs: Vec<String> = params.iter().cloned().collect();
+                    let param_strs: Vec<String> = params.to_vec();
                     if let Err(e) = self.register_effect(name, &param_strs, operations) {
                         self.record_error(e);
                     }

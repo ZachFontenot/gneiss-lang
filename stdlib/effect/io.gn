@@ -1,0 +1,66 @@
+-- Effect/IO: Pure I/O tracking
+--
+-- The IO effect makes I/O operations explicit in the type system.
+-- Provides both a real handler (performs actual I/O) and a pure
+-- handler (for testing without side effects).
+--
+-- Usage:
+--   import Effect/IO
+--
+--   let greet () =
+--       perform IO.print_line "What is your name?";
+--       let name = perform IO.read_line () in
+--       perform IO.print_line ("Hello, " ++ name ++ "!")
+--
+--   -- Real I/O
+--   let main () = IO.run greet
+--
+--   -- Pure testing
+--   let test () =
+--       match IO.runPure ["Alice"] greet with
+--       | ((), output) ->
+--           assert (nth 1 output == "Hello, Alice!")
+--       end
+
+-- IO effect for console I/O
+effect IO =
+    | print_line : String -> ()
+    | read_line : () -> String
+end
+
+-- Run with real I/O (uses built-in print)
+let run comp =
+    handle comp () with
+    | return x -> x
+    | print_line s k ->
+        print s;
+        k ()
+    | read_line () k ->
+        -- Note: readline not yet implemented, returns empty
+        k ""
+    end
+
+-- Run with simulated I/O for testing
+-- Takes list of input lines, returns (result, output_lines)
+let runPure inputs comp =
+    let go = handle comp () with
+        | return x -> fun (remaining, output) -> (x, reverse output)
+        | read_line () k -> fun (remaining, output) ->
+            match remaining with
+            | [] -> k "" ([], output)
+            | line :: rest -> k line (rest, output)
+            end
+        | print_line s k -> fun (remaining, output) ->
+            k () (remaining, s :: output)
+    end
+    in go (inputs, [])
+
+-- Convenience: run pure with no input
+let runPureNoInput comp =
+    runPure [] comp
+
+-- Convenience: collect just the output
+let collectOutput comp =
+    match runPure [] comp with
+    | (_, output) -> output
+    end

@@ -1,0 +1,66 @@
+-- Effect/Async: Cooperative concurrency via effects
+--
+-- The Async effect provides a high-level interface to fiber-based
+-- concurrency. Operations bridge to the built-in Fiber runtime.
+--
+-- Note: This effect's handler uses the runtime fiber system,
+-- so it must be run within a fiber context (e.g., with main function).
+--
+-- Usage:
+--   import Effect/Async
+--
+--   let parallel_work () =
+--       let f1 = perform Async.fork (fun () -> expensive_work 1) in
+--       let f2 = perform Async.fork (fun () -> expensive_work 2) in
+--       let r1 = perform Async.join f1 in
+--       let r2 = perform Async.join f2 in
+--       r1 + r2
+--
+--   let main () =
+--       Async.run parallel_work
+
+-- Fiber handles are properly typed as Fiber a (wrapping the fiber ID)
+
+-- Async effect for cooperative concurrency
+effect Async =
+    | yield : () -> ()
+    | fork : (() -> a) -> Fiber a
+    | join : Fiber a -> a
+end
+
+-- Run async computation (bridges to fiber runtime)
+let run comp =
+    handle comp () with
+    | return x -> x
+    | yield () k ->
+        Fiber.yield ();
+        k ()
+    | fork thunk k ->
+        let fid = Fiber.spawn thunk in
+        k fid
+    | join fid k ->
+        let result = Fiber.join fid in
+        k result
+    end
+
+-- Fork multiple computations and collect results
+let parallel comps =
+    let fibers = map (fun c -> perform Async.fork c) comps in
+    map (fun fid -> perform Async.join fid) fibers
+
+-- Fork two computations and combine results
+let both comp1 comp2 =
+    let f1 = perform Async.fork comp1 in
+    let f2 = perform Async.fork comp2 in
+    let r1 = perform Async.join f1 in
+    let r2 = perform Async.join f2 in
+    (r1, r2)
+
+-- Yield control to other fibers
+let cooperate () =
+    perform Async.yield ()
+
+-- Fork and forget (don't wait for result)
+let background comp =
+    let _ = perform Async.fork comp in
+    ()

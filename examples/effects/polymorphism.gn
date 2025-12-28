@@ -1,0 +1,83 @@
+-- Effect Polymorphism Example
+--
+-- This example demonstrates how Gneiss handles effect polymorphism,
+-- where functions can work with computations that have any effects.
+--
+-- Key concepts:
+-- 1. Effect-polymorphic functions forward the effects of their arguments
+-- 2. Higher-order functions naturally compose with effectful code
+-- 3. Effect annotations support polymorphism with { | e } syntax
+
+-- Define a simple effect for demonstration
+effect Ask =
+    | ask : () -> Int
+end
+
+-- ============================================================================
+-- Effect-Polymorphic Functions
+-- ============================================================================
+
+-- 'apply' is effect-polymorphic: it works with any function f
+-- regardless of what effects f might perform.
+-- The effects of f are forwarded through apply.
+let apply f x = f x
+
+-- 'twice' applies a function twice, forwarding any effects
+let twice f x = f (f x)
+
+-- 'compose' composes two functions, preserving their effects
+let compose f g x = f (g x)
+
+-- ============================================================================
+-- Using Effect Polymorphism
+-- ============================================================================
+
+-- An effectful function that uses the Ask effect
+let get_and_add x =
+    let y = perform Ask.ask () in
+    x + y
+
+-- An effectful action
+let ask_twice () =
+    let a = perform Ask.ask () in
+    let b = perform Ask.ask () in
+    a + b
+
+-- ============================================================================
+-- Composition Examples
+-- ============================================================================
+
+-- apply works with effectful functions
+let example1 () =
+    handle (apply get_and_add 10) with
+    | return x -> x
+    | ask () k -> k 5
+    end
+
+-- twice works with effectful functions
+let example2 () =
+    handle (twice get_and_add 0) with
+    | return x -> x
+    | ask () k -> k 10
+    end
+
+-- compose works with effectful functions
+let double x = x * 2
+let example3 () =
+    handle (compose double get_and_add 5) with
+    | return x -> x
+    | ask () k -> k 3
+    end
+
+-- ============================================================================
+-- Main
+-- ============================================================================
+
+let main () =
+    let r1 = example1 () in  -- Should be 15 (10 + 5)
+    let r2 = example2 () in  -- Should be 20 (0 + 10 + 10)
+    let r3 = example3 () in  -- Should be 16 ((5 + 3) * 2)
+    print (int_to_string r1);
+    print (int_to_string r2);
+    print (int_to_string r3);
+    r1 + r2 + r3  -- 15 + 20 + 16 = 51

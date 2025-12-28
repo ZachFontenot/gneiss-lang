@@ -597,3 +597,111 @@ let main () =
         assert!(result.is_ok(), "Exception handling should catch error: {:?}", result);
     }
 }
+
+// ============================================================================
+// Part 9: Effect Polymorphism Tests
+// ============================================================================
+
+mod effect_polymorphism {
+    use super::*;
+
+    #[test]
+    fn effect_polymorphic_function_forwards_effects() {
+        // A function that forwards effects of its argument
+        let program = r#"
+effect Ask =
+    | ask : () -> Int
+end
+
+-- apply is effect-polymorphic: it forwards whatever effects f has
+let apply f x = f x
+
+-- Use apply with an effectful function
+let ask_and_double () =
+    let x = perform Ask.ask () in
+    x * 2
+
+let main () =
+    handle (apply ask_and_double ()) with
+    | return x -> x
+    | ask () k -> k 21
+    end
+"#;
+        // Should return 42 (21 * 2)
+        let result = run_program(program);
+        assert!(result.is_ok(), "Effect polymorphism should work: {:?}", result);
+    }
+
+    #[test]
+    fn effect_polymorphic_higher_order_function() {
+        // Higher-order function that works with any effectful computation
+        let program = r#"
+effect State s =
+    | get : () -> s
+    | put : s -> ()
+end
+
+-- run_twice is effect-polymorphic
+let run_twice f =
+    f ();
+    f ()
+
+-- Use with stateful function
+let increment () =
+    let x = perform State.get () in
+    perform State.put (x + 1)
+
+let main () =
+    handle (
+        run_twice increment;
+        perform State.get ()
+    ) with
+    | return x -> x
+    | get () k -> k 0
+    | put _ k -> k ()
+    end
+"#;
+        let result = run_program(program);
+        assert!(result.is_ok(), "Effect polymorphic HOF should work: {:?}", result);
+    }
+
+    #[test]
+    fn effect_annotation_with_row_variable() {
+        // Test that effect row polymorphism annotations parse
+        let program = r#"
+-- Fully polymorphic effect row: { | e }
+val identity : a -> a { | e }
+let identity x = x
+
+let main () = identity 42
+"#;
+        let result = run_program(program);
+        assert!(result.is_ok(), "Row variable annotation should work: {:?}", result);
+    }
+
+    #[test]
+    fn composed_effect_polymorphic_functions() {
+        // Multiple effect-polymorphic functions composed
+        let program = r#"
+effect Ask =
+    | ask : () -> Int
+end
+
+let apply f x = f x
+let twice f x = f (f x)
+
+let add_ask x =
+    let y = perform Ask.ask () in
+    x + y
+
+let main () =
+    handle (twice (apply add_ask) 0) with
+    | return x -> x
+    | ask () k -> k 10
+    end
+"#;
+        // Should return 20 (0 + 10 + 10)
+        let result = run_program(program);
+        assert!(result.is_ok(), "Composed effect polymorphism should work: {:?}", result);
+    }
+}

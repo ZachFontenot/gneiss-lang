@@ -1,0 +1,38 @@
+-- Effect/Reader: Read-only environment access
+--
+-- The Reader effect provides access to a shared environment that
+-- cannot be modified (unlike State). Useful for configuration,
+-- dependency injection, and context passing.
+--
+-- Usage:
+--   import Effect/Reader
+--
+--   let greet () =
+--       let name = perform Reader.ask () in
+--       "Hello, " ++ name ++ "!"
+--
+--   let main () =
+--       let msg = Reader.run "World" greet in
+--       print msg
+
+-- Reader effect with polymorphic environment type
+effect Reader r =
+    | ask : () -> r
+end
+
+-- Run computation with provided environment
+let run env comp =
+    handle comp () with
+    | return x -> x
+    | ask () k -> k env
+    end
+
+-- Run computation with locally modified environment
+let local f comp =
+    let outer = perform Reader.ask () in
+    run (f outer) comp
+
+-- Get a computed value from the environment
+let asks f =
+    let env = perform Reader.ask () in
+    f env
