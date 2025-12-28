@@ -18,6 +18,34 @@ type IoError =
     | InvalidInput String
     | IoOther String
 
+-- ============================================================================
+-- Standard Effects (import from Effect/ modules)
+-- ============================================================================
+--
+-- Effects are now defined in separate modules with handlers:
+--
+--   import Effect/State    -- State s: get, put
+--   import Effect/Reader   -- Reader r: ask
+--   import Effect/Writer   -- Writer w: tell
+--   import Effect/Exn      -- Exn e: raise (polymorphic return)
+--   import Effect/Abort    -- Abort: abort (early exit)
+--   import Effect/NonDet   -- NonDet: choose, fail (backtracking)
+--   import Effect/IO       -- IO: print_line, read_line
+--   import Effect/Async    -- Async: fork, join, yield
+--
+-- Each module provides the effect definition and standard handlers.
+-- Example:
+--
+--   import Effect/State
+--
+--   let counter () =
+--       let x = perform State.get () in
+--       perform State.put (x + 1)
+--
+--   let result = State.run 0 counter
+--
+-- ============================================================================
+
 -- Identity combinator
 let id x = x
 

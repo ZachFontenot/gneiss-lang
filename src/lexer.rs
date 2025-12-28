@@ -33,8 +33,6 @@ pub enum Token {
     Type,
     Select,
     End,
-    Reset,
-    Shift,
 
     // Typeclass keywords
     Trait,
@@ -42,6 +40,12 @@ pub enum Token {
     For,
     Where,
     Val,
+
+    // Effect keywords
+    Effect,
+    Handle,
+    Perform,
+    Return,
 
     // Module keywords
     Export,
@@ -496,10 +500,13 @@ impl<'a> Lexer<'a> {
             "not" => Token::Not,
             "select" => Token::Select,
             "end" => Token::End,
-            "reset" => Token::Reset,
-            "shift" => Token::Shift,
             // Typeclass keywords
             "trait" => Token::Trait,
+            // Effect keywords
+            "effect" => Token::Effect,
+            "handle" => Token::Handle,
+            "perform" => Token::Perform,
+            "return" => Token::Return,
             "impl" => Token::Impl,
             "for" => Token::For,
             "where" => Token::Where,

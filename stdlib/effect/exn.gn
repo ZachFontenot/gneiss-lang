@@ -1,0 +1,65 @@
+-- Effect/Exn: Exception effect with polymorphic return
+--
+-- The Exn effect provides recoverable errors. The `raise` operation
+-- has a polymorphic return type, allowing it to be used in any context.
+-- The handler never resumes the continuation after a raise.
+--
+-- Usage:
+--   import Effect/Exn
+--
+--   let safe_div x y =
+--       if y == 0 then
+--           perform Exn.raise "division by zero"
+--       else
+--           x / y
+--
+--   let main () =
+--       match Exn.run (fun () -> safe_div 10 0) with
+--       | Ok result -> print (int_to_string result)
+--       | Err msg -> print ("Error: " ++ msg)
+--       end
+
+-- Exception effect with polymorphic error type
+-- Note: raise returns 'a' (polymorphic) so it can be used anywhere
+effect Exn e =
+    | raise : e -> a
+end
+
+-- Run computation, catching exceptions as Result
+let run comp =
+    handle comp () with
+    | return x -> Ok x
+    | raise e k -> Err e
+    end
+
+-- Run with exception handler function
+let catch handler comp =
+    handle comp () with
+    | return x -> x
+    | raise e k -> handler e
+    end
+
+-- Transform the error type
+let mapError f comp =
+    handle comp () with
+    | return x -> x
+    | raise e k -> perform Exn.raise (f e)
+    end
+
+-- Raise if Option is None
+let fromOption err opt =
+    match opt with
+    | Some x -> x
+    | None -> perform Exn.raise err
+    end
+
+-- Raise if Result is Err
+let fromResult res =
+    match res with
+    | Ok x -> x
+    | Err e -> perform Exn.raise e
+    end
+
+-- Re-raise with additional context
+let context ctx comp =
+    catch (fun e -> perform Exn.raise (ctx ++ ": " ++ e)) comp

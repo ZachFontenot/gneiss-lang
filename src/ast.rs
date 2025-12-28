@@ -282,17 +282,27 @@ pub enum ExprKind {
     },
 
     // ========================================================================
-    // Delimited continuations
+    // Algebraic Effects
     // ========================================================================
-    /// Delimited continuation boundary: reset expr
-    Reset(Rc<Expr>),
+    /// Perform an effect operation: perform State.get ()
+    Perform {
+        /// Effect name (e.g., "State")
+        effect: Ident,
+        /// Operation name (e.g., "get")
+        operation: Ident,
+        /// Arguments to the operation
+        args: Vec<Expr>,
+    },
 
-    /// Capture continuation: shift (fun k -> body)
-    Shift {
-        /// Parameter that binds the captured continuation
-        param: Pattern,
-        /// Body to execute with continuation bound
+    /// Handle effects in an expression
+    /// handle expr with | return x -> ... | op args k -> ... end
+    Handle {
+        /// Expression whose effects are being handled
         body: Rc<Expr>,
+        /// Return clause: what to do with the final value
+        return_clause: HandlerReturn,
+        /// Operation handlers
+        handlers: Vec<HandlerArm>,
     },
 
     // ========================================================================
@@ -335,6 +345,28 @@ pub struct SelectArm {
     pub channel: Expr,
     pub pattern: Pattern,
     pub body: Expr,
+}
+
+/// Return clause for an effect handler: | return x -> body
+#[derive(Debug, Clone)]
+pub struct HandlerReturn {
+    /// Pattern for the return value
+    pub pattern: Pattern,
+    /// Body to execute with the return value (boxed to break recursion)
+    pub body: Box<Expr>,
+}
+
+/// Handler arm for an effect operation: | op args k -> body
+#[derive(Debug, Clone)]
+pub struct HandlerArm {
+    /// Operation name (e.g., "get" for State.get)
+    pub operation: Ident,
+    /// Parameters for the operation (not including continuation)
+    pub params: Vec<Pattern>,
+    /// Continuation parameter name
+    pub continuation: Ident,
+    /// Handler body (boxed to break recursion)
+    pub body: Box<Expr>,
 }
 
 /// A single binding in a let rec group
@@ -506,10 +538,12 @@ pub enum TypeExprKind {
         args: Vec<TypeExpr>,
     },
 
-    // Function type: a -> b
+    // Function type: a -> b { effects }
     Arrow {
         from: Rc<TypeExpr>,
         to: Rc<TypeExpr>,
+        /// Optional effect row: { IO, State s | r }
+        effects: Option<EffectRowExpr>,
     },
 
     // Tuple type: (a, b, c)
@@ -520,6 +554,30 @@ pub enum TypeExprKind {
 
     // List type: [a]
     List(Rc<TypeExpr>),
+}
+
+// ============================================================================
+// Effect Rows (surface syntax for effect annotations)
+// ============================================================================
+
+/// An effect row expression: { IO, State s | r }
+#[derive(Debug, Clone)]
+pub struct EffectRowExpr {
+    /// Concrete effects in the row: IO, State s, etc.
+    pub effects: Vec<EffectExpr>,
+    /// Optional row variable for polymorphism: the 'r' in { IO | r }
+    pub rest: Option<Ident>,
+    pub span: Span,
+}
+
+/// A single effect: IO, State s, Reader Config, etc.
+#[derive(Debug, Clone)]
+pub struct EffectExpr {
+    /// Effect name (e.g., "IO", "State", "Reader")
+    pub name: Ident,
+    /// Effect type parameters (e.g., 's' in State s)
+    pub params: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 // ============================================================================
@@ -638,9 +696,19 @@ pub enum Decl {
     },
 
     // val xs : [Int]  -- standalone type signature
+    // val show_it : a -> String where a : Show  -- with trait constraints
     Val {
         name: Ident,
         type_sig: TypeExpr,
+        constraints: Vec<Constraint>,
+    },
+
+    // effect State s = | get : () -> s | put : s -> () end
+    EffectDecl {
+        visibility: Visibility,
+        name: Ident,
+        params: Vec<Ident>,
+        operations: Vec<EffectOperation>,
     },
 
     // Record type declaration: type Request = { method : String, path : String }
@@ -685,6 +753,13 @@ pub struct InstanceMethod {
 pub struct Constraint {
     pub type_var: Ident,
     pub trait_name: Ident,
+}
+
+/// An operation in an effect declaration: | get : () -> s
+#[derive(Debug, Clone)]
+pub struct EffectOperation {
+    pub name: Ident,
+    pub type_sig: TypeExpr,
 }
 
 // ============================================================================

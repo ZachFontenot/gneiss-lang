@@ -702,7 +702,7 @@ impl Runtime {
     }
 
     /// Dispatch an I/O operation to the appropriate handler
-    /// Called from eval.rs when handling FiberEffect::Io
+    /// Called from eval.rs when handling RuntimeEffect::Io
     pub fn dispatch_io(&mut self, pid: Pid, op: IoOp, cont: Option<Cont>) {
         match &op {
             IoOp::Sleep { duration_ms } => {

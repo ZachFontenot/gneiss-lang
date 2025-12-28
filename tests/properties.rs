@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gneiss::ast::*;
 use gneiss::infer::Inferencer;
-use gneiss::types::*;
+use gneiss::types::{Row, *};
 use gneiss::{Interpreter, Lexer, Parser, Value};
 
 // ============================================================================
@@ -42,13 +42,11 @@ fn arb_ground_type(depth: usize) -> BoxedStrategy<Type> {
             1 => arb_ground_type(depth - 1).prop_map(|t| Type::list(t)),
             1 => (arb_ground_type(depth - 1), arb_ground_type(depth - 1))
                 .prop_map(|(a, b)| {
-                    // Create a pure arrow type (same answer type for both)
-                    let ans = Type::new_var(9999, 0);
+                    // Create a pure arrow type with empty effects
                     Type::Arrow {
                         arg: Rc::new(a),
                         ret: Rc::new(b),
-                        ans_in: Rc::new(ans.clone()),
-                        ans_out: Rc::new(ans),
+                        effects: Row::Empty,
                     }
                 }),
             1 => prop::collection::vec(arb_ground_type(depth - 1), 2..=3)
@@ -81,13 +79,11 @@ fn arb_type_with_vars(depth: usize) -> BoxedStrategy<Type> {
             1 => arb_type_with_vars(depth - 1).prop_map(|t| Type::list(t)),
             1 => (arb_type_with_vars(depth - 1), arb_type_with_vars(depth - 1))
                 .prop_map(|(a, b)| {
-                    // Create a pure arrow type (same answer type for both)
-                    let ans = Type::new_var(9999, 0);
+                    // Create a pure arrow type with empty effects
                     Type::Arrow {
                         arg: Rc::new(a),
                         ret: Rc::new(b),
-                        ans_in: Rc::new(ans.clone()),
-                        ans_out: Rc::new(ans),
+                        effects: Row::Empty,
                     }
                 }),
         ]
@@ -389,10 +385,9 @@ proptest! {
     fn unify_produces_equal_types(t1 in arb_ground_type(2), t2 in arb_ground_type(2)) {
         let mut inf = Inferencer::new();
         if inf.unify_types(&t1, &t2).is_ok() {
-            let resolved1 = t1.resolve();
-            let resolved2 = t2.resolve();
-            // For ground types, they should be structurally equal after unification
-            prop_assert_eq!(format!("{}", resolved1), format!("{}", resolved2));
+            // For ground types (no type variables), they should be equal after unification
+            // Ground types don't have type variables, so no need to resolve
+            prop_assert_eq!(format!("{}", t1), format!("{}", t2));
         }
     }
 }
@@ -408,18 +403,16 @@ proptest! {
         let var = Type::new_var(var_id, 0);
 
         // The variable should occur in itself
-        prop_assert!(var.occurs(var_id),
+        prop_assert!(var.occurs_syntactic(var_id),
             "Type variable t{} should occur in itself", var_id);
 
         // The variable should occur in a function type containing it
-        let ans = Type::new_var(9999, 0);
         let arrow = Type::Arrow {
             arg: Rc::new(var.clone()),
             ret: Rc::new(Type::Int),
-            ans_in: Rc::new(ans.clone()),
-            ans_out: Rc::new(ans),
+            effects: Row::Empty,
         };
-        prop_assert!(arrow.occurs(var_id),
+        prop_assert!(arrow.occurs_syntactic(var_id),
             "Type variable t{} should occur in {} -> Int", var_id, var);
     }
 
@@ -427,7 +420,7 @@ proptest! {
     #[test]
     fn occurs_check_negative(var_id in 0u32..100, t in arb_ground_type(2)) {
         // Ground types have no type variables, so occurs should be false
-        prop_assert!(!t.occurs(var_id),
+        prop_assert!(!t.occurs_syntactic(var_id),
             "Type variable t{} should not occur in ground type {}", var_id, t);
     }
 }
@@ -701,7 +694,8 @@ fn eval_source(source: &str) -> Result<Value, String> {
 
 /// Check if a runtime value matches a static type
 fn value_matches_type(val: &Value, ty: &Type) -> bool {
-    match (val, ty.resolve()) {
+    // Types from inference should already be concrete (no unresolved vars)
+    match (val, ty) {
         (Value::Int(_), Type::Int) => true,
         (Value::Float(_), Type::Float) => true,
         (Value::Bool(_), Type::Bool) => true,
@@ -730,7 +724,7 @@ fn value_matches_type(val: &Value, ty: &Type) -> bool {
         ) => {
             // For now, just check constructor names match
             // Full check would require looking up constructor info
-            name == &ty_name || fields.is_empty() // Simple heuristic
+            name == ty_name || fields.is_empty() // Simple heuristic
         }
         (Value::Pid(_), Type::Pid) => true,
         (Value::Channel(_), Type::Channel(_)) => true,

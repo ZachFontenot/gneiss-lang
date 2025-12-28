@@ -1,0 +1,4 @@
+# Increase stack size for tests in debug mode
+# Debug builds have larger stack frames which can overflow with deep recursion
+[env]
+RUST_MIN_STACK = "8388608"  # 8MB

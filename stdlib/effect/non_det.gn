@@ -1,0 +1,30 @@
+-- Effect/NonDet: Non-deterministic choice with backtracking
+--
+-- Provides multi-resume handlers for exploring multiple branches
+-- of nondeterministic computations.
+
+-- Non-determinism effect
+-- choose picks from a list, fail abandons current branch
+effect NonDet =
+    | choose : [a] -> a
+    | fail : () -> a
+end
+
+-- Run computation, collecting all possible results
+let runAll comp =
+    handle comp () with
+    | return x -> [x]
+    | fail () k -> []
+    | choose xs k -> concat (map k xs)
+    end
+
+-- Run computation, returning first result or None
+let runFirst comp =
+    match runAll comp with
+    | [] -> None
+    | x :: _ -> Some x
+    end
+
+-- Guard: fail if condition is false
+let guard cond =
+    if cond then () else perform NonDet.fail ()

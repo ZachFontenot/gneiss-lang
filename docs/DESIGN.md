@@ -7,7 +7,8 @@ This document captures the design rationale, key decisions, and invariants for t
 Gneiss is a statically-typed functional programming language with:
 - **ML-family syntax** (inspired by OCaml)
 - **Hindley-Milner type inference** with let-polymorphism
-- **Fiber-based concurrency** built on delimited continuations
+- **Algebraic effects** with Koka-style handlers
+- **Fiber-based concurrency** using effect handlers
 - **Typeclasses** with dictionary passing
 
 The goal is a language where concurrent programs are safe by construction: no data races, no shared mutable state, typed channels that prevent mixed-type communication.
@@ -167,23 +168,38 @@ enum FiberEffect {
 - Fibers yield at channel operations, explicit yield, or join
 - Deadlock detected when all fibers blocked and ready queue empty
 
-### 6. Delimited Continuations: shift/reset
+### 6. Algebraic Effects and Handlers
 
-**Decision:** First-class delimited continuations as a user-facing feature.
+**Decision:** Koka-style algebraic effects for structured control flow.
 
 **Syntax:**
 ```gneiss
-let result = reset (
-  1 + shift (fun k -> k (k 10))
-)
--- result = 1 + (1 + 10) = 12
+-- Declare an effect with operations
+effect State s =
+    | get : () -> s
+    | put : s -> ()
+end
+
+-- Perform effect operations
+let increment () =
+    let x = perform State.get () in
+    perform State.put (x + 1)
+
+-- Handle effects with handlers
+let run_state init comp =
+    handle comp () with
+    | return x -> x
+    | get () k -> k init
+    | put s k -> k ()
+    end
 ```
 
 **Semantics:**
-- `reset e` evaluates `e` with a prompt (delimiter)
-- `shift (fun k -> body)` captures continuation up to nearest reset
-- Captured continuation `k` can be called zero, once, or multiple times
-- Fiber effects use the same underlying mechanism (FiberBoundary as implicit prompt)
+- `effect` declares a set of operations with typed signatures
+- `perform Effect.op args` invokes an operation
+- `handle expr with clauses end` provides handlers for effects
+- Handler clauses receive the continuation `k` which can be called zero, once, or multiple times
+- Delimited continuations are used internally but not exposed to users
 
 ### 7. Channels: Synchronous Rendezvous
 
@@ -244,10 +260,10 @@ src/
   lib.rs      -- Public exports
 
 tests/
-  fiber_effects.rs  -- Fiber and channel tests
-  continuations.rs  -- Delimited continuation tests
-  typeclasses.rs    -- Typeclass tests
-  properties.rs     -- Property-based soundness tests
+  fiber_effects.rs      -- Fiber and channel tests
+  algebraic_effects.rs  -- Effect system tests
+  typeclasses.rs        -- Typeclass tests
+  properties.rs         -- Property-based soundness tests
 
 examples/
   *.gn        -- Example programs
@@ -314,8 +330,8 @@ This goal identifies what language features are actually needed:
 - **Async I/O integration** - Hook scheduler into epoll/kqueue/io_uring
 
 Type system opportunities:
-- **Effect tracking** - Distinguish pure functions from I/O
 - **Resource types** - Ensure handles are closed (linear/affine types)
+- **Static effect checking** - Currently effects are checked at runtime; could be tracked statically
 
 See ROADMAP.md for detailed plans.
 

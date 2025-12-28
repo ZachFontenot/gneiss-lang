@@ -221,11 +221,10 @@ fn setup_imports(interpreter: &mut Interpreter, imports: &[ImportSpec], _resolve
     }
 }
 
-/// Convert import path to module name (e.g., "Collections/HashMap" -> "CollectionsHashMap")
+/// Convert import path to module name (e.g., "Effect/State" -> "State")
+/// Uses only the last component to match how modules are registered by file name.
 fn import_path_to_module_name(path: &str) -> String {
-    // For now, just replace / with nothing to get a flat module name
-    // The module resolver registers modules by their file-derived name
-    path.replace("/", "")
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 /// Register a module's exports so other modules can import them
@@ -530,7 +529,6 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::Continuation { .. } => print!("<continuation>"),
         gneiss::Value::Dict { trait_name, .. } => print!("<dict:{}>", trait_name),
         gneiss::Value::Fiber(id) => print!("<fiber:{}>", id),
-        gneiss::Value::FiberEffect(effect) => print!("<fiber-effect:{:?}>", effect),
         gneiss::Value::Record { type_name, fields } => {
             print!("{} {{ ", type_name);
             let mut first = true;
@@ -572,6 +570,7 @@ fn print_value(val: &gneiss::Value) {
         gneiss::Value::FileHandle(id) => print!("<file-handle:{}>", id),
         gneiss::Value::TcpSocket(id) => print!("<tcp-socket:{}>", id),
         gneiss::Value::TcpListener(id) => print!("<tcp-listener:{}>", id),
+        gneiss::Value::RuntimeEffect(effect) => print!("<runtime-effect:{:?}>", effect),
     }
 }
 
@@ -656,7 +655,7 @@ fn format_type_error(
                  The type `{}` refers to itself, which would create an infinitely nested type.\n\n\
                  This often happens when:\n\
                  - A function is applied to itself\n\
-                 - A recursive function uses `shift` (which requires answer-type polymorphism)",
+                 - A recursive definition creates a self-referential type",
                 ty_str
             );
             ("TYPE ERROR", msg, span.as_ref(), vec![])

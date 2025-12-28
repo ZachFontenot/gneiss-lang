@@ -1,0 +1,71 @@
+-- Config Reader: Reader Effect Pattern
+--
+-- This example demonstrates the Reader effect for passing
+-- configuration through a computation without explicit parameter threading.
+--
+-- The Reader effect provides:
+-- - ask: get the current environment/config
+--
+-- This is useful for dependency injection, configuration, etc.
+
+-- Config effect (specialized Reader)
+effect Config =
+    | get_config : () -> String
+    | get_debug : () -> Bool
+end
+
+-- Application functions that use config
+let format_message msg =
+    let prefix = perform Config.get_config () in
+    let is_debug = perform Config.get_debug () in
+    if is_debug then
+        "[DEBUG:" ++ prefix ++ "] " ++ msg
+    else
+        "[" ++ prefix ++ "] " ++ msg
+
+let log_info msg =
+    print (format_message msg)
+
+let process_data input =
+    log_info ("Processing: " ++ input);
+    let is_debug = perform Config.get_debug () in
+    if is_debug then
+        log_info "Debug: starting detailed processing..."
+    else ();
+    let result = string_to_upper input in
+    log_info ("Result: " ++ result);
+    result
+
+-- Run with production config (debug = false)
+let run_production body =
+    handle body () with
+    | return x -> x
+    | get_config () k -> k "PROD"
+    | get_debug () k -> k false
+    end
+
+-- Run with development config (debug = true)
+let run_development body =
+    handle body () with
+    | return x -> x
+    | get_config () k -> k "DEV"
+    | get_debug () k -> k true
+    end
+
+-- Main: demonstrate different config handlers
+let main () =
+    print "=== Config Reader Example ===";
+    print "";
+
+    print "--- Running in Production mode ---";
+    let prod_result = run_production (fun () -> process_data "hello world") in
+    print "";
+
+    print "--- Running in Development mode ---";
+    let dev_result = run_development (fun () -> process_data "hello world") in
+    print "";
+
+    print ("Production result: " ++ prod_result);
+    print ("Development result: " ++ dev_result);
+
+    0

@@ -187,7 +187,7 @@ impl Parser {
                 self.current_span(),
             )),
             Token::Let => self.parse_let_item(),
-            Token::Type | Token::Trait | Token::Impl | Token::Val => {
+            Token::Type | Token::Trait | Token::Impl | Token::Val | Token::Effect => {
                 let decl = self.parse_decl()?;
                 self.match_token(&Token::DoubleSemi);
                 Ok(Item::Decl(decl))
@@ -596,6 +596,7 @@ impl Parser {
             Token::Trait => self.parse_trait_decl(),
             Token::Impl => self.parse_instance_decl(),
             Token::Val => self.parse_val_decl(),
+            Token::Effect => self.parse_effect_decl(),
             _ => Err(self.unexpected_token("declaration")),
         }
     }
@@ -605,7 +606,15 @@ impl Parser {
         let name = self.parse_possibly_qualified_name()?;
         self.consume(Token::Colon)?;
         let type_sig = self.parse_type_expr()?;
-        Ok(Decl::Val { name, type_sig })
+
+        // Optional where clause for trait constraints
+        let constraints = if self.match_token(&Token::Where) {
+            self.parse_constraints()?
+        } else {
+            vec![]
+        };
+
+        Ok(Decl::Val { name, type_sig, constraints })
     }
 
     fn parse_let_decl(&mut self) -> ParseResult<Decl> {
@@ -896,6 +905,49 @@ impl Parser {
         Ok(traits)
     }
 
+    /// Parse an effect declaration:
+    /// ```gneiss
+    /// effect State s =
+    /// | get : () -> s
+    /// | put : s -> ()
+    /// end
+    /// ```
+    fn parse_effect_decl(&mut self) -> ParseResult<Decl> {
+        self.consume(Token::Effect)?;
+
+        let name = self.parse_upper_ident()?;
+
+        // Parse zero or more type parameters (lowercase identifiers)
+        let mut params = Vec::new();
+        while let Token::Ident(param_name) = self.peek().clone() {
+            self.advance();
+            params.push(param_name);
+        }
+
+        self.consume(Token::Eq)?;
+
+        // Parse operations: | name : type_sig
+        let mut operations = Vec::new();
+        while self.match_token(&Token::Pipe) {
+            let op_name = self.parse_ident()?;
+            self.consume(Token::Colon)?;
+            let type_sig = self.parse_type_expr()?;
+            operations.push(EffectOperation {
+                name: op_name,
+                type_sig,
+            });
+        }
+
+        self.consume(Token::End)?;
+
+        Ok(Decl::EffectDecl {
+            visibility: Visibility::Private,
+            name,
+            params,
+            operations,
+        })
+    }
+
     fn parse_instance_decl(&mut self) -> ParseResult<Decl> {
         self.consume(Token::Impl)?;
 
@@ -973,21 +1025,130 @@ impl Parser {
 
     fn parse_type_arrow(&mut self) -> ParseResult<TypeExpr> {
         let start = self.current_span();
-        let mut ty = self.parse_type_app()?;
+        let ty = self.parse_type_app()?;
 
         if self.match_token(&Token::Arrow) {
-            let to = self.parse_type_arrow()?;
-            let span = start.merge(&to.span);
-            ty = Spanned::new(
+            // Parse the rest of the arrow chain (right-associative)
+            let to_type = self.parse_type_arrow()?;
+
+            // Check for optional effect row: { IO, State s | r }
+            let effects = if self.peek() == &Token::LBrace {
+                Some(self.parse_effect_row()?)
+            } else {
+                None
+            };
+
+            let span = if let Some(ref eff) = effects {
+                start.merge(&eff.span)
+            } else {
+                start.merge(&to_type.span)
+            };
+
+            return Ok(Spanned::new(
                 TypeExprKind::Arrow {
                     from: Rc::new(ty),
-                    to: Rc::new(to),
+                    to: Rc::new(to_type),
+                    effects,
                 },
                 span,
-            );
+            ));
         }
 
         Ok(ty)
+    }
+
+    fn parse_effect_row(&mut self) -> ParseResult<EffectRowExpr> {
+        let start = self.current_span();
+        self.consume(Token::LBrace)?;
+
+        let mut effects = Vec::new();
+        let mut rest = None;
+
+        // Handle empty effect row: {}
+        if self.match_token(&Token::RBrace) {
+            let span = start.merge(&self.current_span());
+            return Ok(EffectRowExpr {
+                effects,
+                rest,
+                span,
+            });
+        }
+
+        loop {
+            // Check for row variable: | r }
+            if self.match_token(&Token::Pipe) {
+                match self.peek().clone() {
+                    Token::Ident(name) => {
+                        self.advance();
+                        rest = Some(name);
+                    }
+                    _ => {
+                        return Err(self.cursor.unexpected("row variable after '|'"));
+                    }
+                }
+                break;
+            }
+
+            // Parse an effect
+            effects.push(self.parse_effect()?);
+
+            // Check for comma (more effects), pipe (row variable), or end
+            if self.match_token(&Token::Comma) {
+                continue;
+            } else if self.match_token(&Token::Pipe) {
+                // Row variable after effects: { IO, State s | r }
+                match self.peek().clone() {
+                    Token::Ident(name) => {
+                        self.advance();
+                        rest = Some(name);
+                    }
+                    _ => {
+                        return Err(self.cursor.unexpected("row variable after '|'"));
+                    }
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+
+        self.consume(Token::RBrace)?;
+        let span = start.merge(&self.current_span());
+
+        Ok(EffectRowExpr {
+            effects,
+            rest,
+            span,
+        })
+    }
+
+    fn parse_effect(&mut self) -> ParseResult<EffectExpr> {
+        let start = self.current_span();
+
+        // Effect name must be an UpperIdent (like IO, State, Reader)
+        let name = match self.peek().clone() {
+            Token::UpperIdent(n) => {
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(self.cursor.unexpected("effect name (capitalized identifier)"));
+            }
+        };
+
+        // Parse optional type parameters (e.g., 's' in State s)
+        let mut params = Vec::new();
+        while self.is_type_atom_start() && self.peek() != &Token::Comma && self.peek() != &Token::Pipe && self.peek() != &Token::RBrace {
+            params.push(self.parse_type_atom()?);
+        }
+
+        let span = if params.is_empty() {
+            start
+        } else {
+            start.merge(&params.last().unwrap().span)
+        };
+
+        Ok(EffectExpr { name, params, span })
     }
 
     fn parse_type_app(&mut self) -> ParseResult<TypeExpr> {
@@ -1374,6 +1535,123 @@ impl Parser {
         ))
     }
 
+    /// Parse a perform expression: perform Effect.operation args
+    fn parse_perform_expr(&mut self, start: Span) -> ParseResult<Expr> {
+        self.consume(Token::Perform)?;
+
+        // Parse Effect.operation (qualified name)
+        let effect = self.parse_upper_ident()?;
+        self.consume(Token::Dot)?;
+        let operation = self.parse_ident()?;
+
+        // Parse arguments (collect atoms until we hit something that's not an expression)
+        let mut args = Vec::new();
+        while self.is_atom_start() {
+            args.push(self.parse_expr_atom()?);
+        }
+
+        let end_span = if args.is_empty() {
+            self.current_span()
+        } else {
+            args.last().unwrap().span.clone()
+        };
+
+        Ok(Spanned::new(
+            ExprKind::Perform {
+                effect,
+                operation,
+                args,
+            },
+            start.merge(&end_span),
+        ))
+    }
+
+    /// Parse a handle expression:
+    /// handle expr with | return x -> ... | op args k -> ... end
+    fn parse_handle_expr(&mut self, start: Span) -> ParseResult<Expr> {
+        self.consume(Token::Handle)?;
+
+        // Parse the body expression
+        let body = self.parse_expr_binary(0)?;
+
+        self.consume(Token::With)?;
+
+        // Optional leading pipe
+        self.match_token(&Token::Pipe);
+
+        // First arm must be `return`
+        self.consume(Token::Return)?;
+        let return_pattern = self.parse_simple_pattern()?;
+        self.consume(Token::Arrow)?;
+        let return_body = self.parse_expr_in(ExprContext::Full)?;
+
+        let return_clause = HandlerReturn {
+            pattern: return_pattern,
+            body: Box::new(return_body),
+        };
+
+        // Parse operation handlers
+        let mut handlers = Vec::new();
+        while self.match_token(&Token::Pipe) {
+            // Parse operation name
+            let operation = self.parse_ident()?;
+
+            // Parse parameters (patterns before the continuation)
+            let mut params = Vec::new();
+            while self.is_pattern_start()
+                && !self.check(&Token::Arrow)
+                && !self.check(&Token::Pipe)
+            {
+                // Check if this is the continuation param (last one before ->)
+                let pat = self.parse_simple_pattern()?;
+                params.push(pat);
+            }
+
+            // Last parameter is the continuation
+            let continuation = if let Some(last) = params.pop() {
+                match last.node {
+                    PatternKind::Var(name) => name,
+                    _ => {
+                        return Err(ParseError::unexpected(
+                            "continuation parameter must be a simple identifier",
+                            self.peek().clone(),
+                            last.span,
+                        ));
+                    }
+                }
+            } else {
+                return Err(ParseError::unexpected(
+                    "handler needs continuation parameter",
+                    self.peek().clone(),
+                    self.current_span(),
+                ));
+            };
+
+            self.consume(Token::Arrow)?;
+            let handler_body = self.parse_expr_in(ExprContext::Full)?;
+
+            handlers.push(HandlerArm {
+                operation,
+                params,
+                continuation,
+                body: Box::new(handler_body),
+            });
+        }
+
+        let end_span = self.current_span();
+        self.consume(Token::End)?;
+
+        Ok(Spanned::new(
+            ExprKind::Handle {
+                body: Rc::new(body),
+                return_clause,
+                handlers,
+            },
+            start.merge(&end_span),
+        ))
+    }
+
+    #[allow(clippy::while_let_loop)] // Complex loop structure with multiple break/continue points
     fn parse_expr_binary(&mut self, min_prec: u8) -> ParseResult<Expr> {
         let start = self.current_span();
         let mut left = self.parse_expr_unary()?;
@@ -1655,30 +1933,8 @@ impl Parser {
                     ))
                 }
             }
-            Token::Reset => {
-                self.advance();
-                let body = self.parse_expr_atom()?;
-                let span = start.merge(&body.span);
-                Ok(Spanned::new(ExprKind::Reset(Rc::new(body)), span))
-            }
-            Token::Shift => {
-                self.advance();
-                let func = self.parse_expr_atom()?;
-
-                match &func.node {
-                    ExprKind::Lambda { params, body } if params.len() == 1 => {
-                        let span = start.merge(&func.span);
-                        Ok(Spanned::new(
-                            ExprKind::Shift {
-                                param: params[0].clone(),
-                                body: body.clone(),
-                            },
-                            span,
-                        ))
-                    }
-                    _ => Err(self.unexpected_token("function (fun k -> ...)")),
-                }
-            }
+            Token::Perform => self.parse_perform_expr(start),
+            Token::Handle => self.parse_handle_expr(start),
             Token::LParen => {
                 self.advance();
                 if self.match_token(&Token::RParen) {
