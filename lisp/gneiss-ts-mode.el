@@ -55,9 +55,9 @@
     (modify-syntax-entry ?{ "(}" table)
     (modify-syntax-entry ?} "){" table)
 
-    ;; Strings
+    ;; Strings (double quotes only - char literals handled by tree-sitter)
     (modify-syntax-entry ?\" "\"" table)
-    (modify-syntax-entry ?\' "\"" table)
+    (modify-syntax-entry ?\' "." table)
     (modify-syntax-entry ?\\ "\\" table)
 
     ;; Operators
@@ -87,7 +87,7 @@
     "type" "trait" "impl" "for" "where" "val"
     "import" "export" "as"
     "spawn" "select"
-    "reset" "shift"
+    "effect" "handle" "perform" "return"
     "infixl" "infixr" "infix")
   "Gneiss keywords for font-lock.")
 
@@ -106,7 +106,7 @@
       "type" "trait" "impl" "for" "where" "val"
       "import" "export" "as"
       "spawn" "select"
-      "reset" "shift"
+      "effect" "handle" "perform" "return"
       "infixl" "infixr" "infix"
       "not"]
      @font-lock-keyword-face)
@@ -137,7 +137,10 @@
    '((binding name: (identifier) @font-lock-function-name-face)
      (impl_method name: (identifier) @font-lock-function-name-face)
      (val_signature name: (identifier) @font-lock-function-name-face)
-     (application function: (identifier) @font-lock-function-call-face))
+     (application function: (identifier) @font-lock-function-call-face)
+     (effect_operation name: (identifier) @font-lock-function-name-face)
+     (handler_arm operation: (identifier) @font-lock-function-name-face)
+     (handler_arm continuation: (identifier) @font-lock-variable-name-face))
 
    :language 'gneiss
    :feature 'variable
@@ -189,6 +192,9 @@
      ((parent-is "type_declaration") parent-bol ,gneiss-ts-mode-indent-offset)
      ((parent-is "trait_declaration") parent-bol ,gneiss-ts-mode-indent-offset)
      ((parent-is "impl_declaration") parent-bol ,gneiss-ts-mode-indent-offset)
+     ((parent-is "effect_declaration") parent-bol ,gneiss-ts-mode-indent-offset)
+     ((parent-is "handle_expression") parent-bol ,gneiss-ts-mode-indent-offset)
+     ((node-is "handler_arm") parent-bol 0)
 
      ;; Records and lists
      ((parent-is "record_type") parent-bol ,gneiss-ts-mode-indent-offset)
@@ -250,7 +256,8 @@ Please install the grammar from lisp/tree-sitter-gneiss/"))
               (regexp-opt '("let_declaration"
                            "type_declaration"
                            "trait_declaration"
-                           "impl_declaration")))
+                           "impl_declaration"
+                           "effect_declaration")))
   (setq-local treesit-defun-name-function #'gneiss-ts-mode--defun-name)
 
   ;; Imenu
@@ -258,7 +265,8 @@ Please install the grammar from lisp/tree-sitter-gneiss/"))
               '(("Function" "\\`let_declaration\\'" nil nil)
                 ("Type" "\\`type_declaration\\'" nil nil)
                 ("Trait" "\\`trait_declaration\\'" nil nil)
-                ("Impl" "\\`impl_declaration\\'" nil nil)))
+                ("Impl" "\\`impl_declaration\\'" nil nil)
+                ("Effect" "\\`effect_declaration\\'" nil nil)))
 
   ;; Electric
   (setq-local electric-indent-chars
