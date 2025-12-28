@@ -59,6 +59,10 @@ pub enum BlockingOpResult {
     TcpAccepted(u64),
     /// Sleep completed
     Slept,
+    /// Print completed
+    Printed,
+    /// Line read from stdin
+    Line(String),
     /// Operation failed with an error
     Error(std::io::Error),
 }
@@ -420,6 +424,29 @@ fn execute_blocking_op(
         IoOp::Sleep { duration_ms } => {
             std::thread::sleep(std::time::Duration::from_millis(*duration_ms));
             BlockingOpResult::Slept
+        }
+
+        IoOp::Print { text } => {
+            println!("{}", text);
+            BlockingOpResult::Printed
+        }
+
+        IoOp::ReadLine => {
+            use std::io::{self, BufRead};
+            let mut line = String::new();
+            match io::stdin().lock().read_line(&mut line) {
+                Ok(_) => {
+                    // Remove trailing newline
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                    }
+                    BlockingOpResult::Line(line)
+                }
+                Err(e) => BlockingOpResult::Error(e),
+            }
         }
     }
 }

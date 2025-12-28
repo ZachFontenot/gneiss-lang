@@ -4,6 +4,8 @@
 //! - Multiple constraints on functions
 //! - Complex constraint propagation
 //! - Instance resolution with multiple candidates
+//!
+//! Note: Uses Display instead of Show since Show is now in prelude.
 
 use gneiss::eval::Value;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser};
@@ -41,27 +43,27 @@ fn run_ok(source: &str) {
 fn function_with_two_constraints() {
     // Function requires both Show and Eq constraints
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 trait Eq a =
     val eq : a -> a -> Bool
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
 impl Eq for Int =
     let eq a b = a == b
 end
 
-let show_if_equal x y =
-    if eq x y then show x else "different"
+let display_if_equal x y =
+    if eq x y then display x else "different"
 
 let main () =
-    show_if_equal 42 42
+    display_if_equal 42 42
 "#;
     run_ok(program);
 }
@@ -70,8 +72,8 @@ let main () =
 fn constrained_instance_with_two_constraints() {
     // Instance requires two constraints on type parameter
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 trait Eq a =
@@ -80,23 +82,23 @@ end
 
 type Pair a = | MkPair a a
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
 impl Eq for Int =
     let eq a b = a == b
 end
 
-impl Show for (Pair a) where a : Show, a : Eq =
-    let show p = match p with
+impl Display for (Pair a) where a : Display, a : Eq =
+    let display p = match p with
         | MkPair x y -> if eq x y then "equal pair" else "different pair"
         end
 end
 
 let main () =
-    print (show (MkPair 1 1));
-    print (show (MkPair 1 2));
+    print (display (MkPair 1 1));
+    print (display (MkPair 1 2));
     0
 "#;
     run_ok(program);
@@ -110,34 +112,34 @@ let main () =
 fn nested_constrained_types() {
     // Show for List (Option a) where a : Show
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 type List a = | Nil | Cons a (List a)
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
-        | Some x -> "Some(" ++ show x ++ ")"
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
+        | Some x -> "Some(" ++ display x ++ ")"
         | None -> "None"
         end
 end
 
-impl Show for (List a) where a : Show =
-    let show xs = match xs with
+impl Display for (List a) where a : Display =
+    let display xs = match xs with
         | Nil -> "[]"
-        | Cons h t -> show h ++ " :: " ++ show t
+        | Cons h t -> display h ++ " :: " ++ display t
         end
 end
 
 let main () =
     let list = Cons (Some 1) (Cons None (Cons (Some 2) Nil)) in
-    print (show list);
+    print (display list);
     0
 "#;
     run_ok(program);
@@ -147,33 +149,33 @@ let main () =
 fn three_type_parameter_instance() {
     // Instance with three type parameters, all constrained
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Triple a b c = | MkTriple a b c
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for Bool =
-    let show b = if b then "true" else "false"
+impl Display for Bool =
+    let display b = if b then "true" else "false"
 end
 
-impl Show for String =
-    let show s = "\"" ++ s ++ "\""
+impl Display for String =
+    let display s = "\"" ++ s ++ "\""
 end
 
-impl Show for (Triple a b c) where a : Show, b : Show, c : Show =
-    let show t = match t with
-        | MkTriple x y z -> "(" ++ show x ++ ", " ++ show y ++ ", " ++ show z ++ ")"
+impl Display for (Triple a b c) where a : Display, b : Display, c : Display =
+    let display t = match t with
+        | MkTriple x y z -> "(" ++ display x ++ ", " ++ display y ++ ", " ++ display z ++ ")"
         end
 end
 
 let main () =
     let t = MkTriple 42 true "hello" in
-    print (show t);
+    print (display t);
     0
 "#;
     run_ok(program);
@@ -187,15 +189,15 @@ let main () =
 fn dictionary_passed_through_multiple_calls() {
     // Dictionary must be threaded through nested function calls
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-let helper1 x = show x
+let helper1 x = display x
 let helper2 x = helper1 x
 let helper3 x = helper2 x
 
@@ -210,18 +212,18 @@ let main () =
 fn dictionary_in_higher_order_function() {
     // Pass constrained function as argument
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-let apply_show f x = f x
+let apply_display f x = f x
 
 let main () =
-    print (apply_show show 42);
+    print (apply_display display 42);
     0
 "#;
     run_ok(program);
@@ -237,30 +239,30 @@ fn same_trait_different_types() {
     // Note: Each show call must be in a separate let binding to avoid
     // type variable monomorphization across the sequence
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for Bool =
-    let show b = if b then "true" else "false"
+impl Display for Bool =
+    let display b = if b then "true" else "false"
 end
 
-impl Show for String =
-    let show s = s
+impl Display for String =
+    let display s = s
 end
 
-let show_int x = show x
-let show_bool x = show x
-let show_str x = show x
+let display_int x = display x
+let display_bool x = display x
+let display_str x = display x
 
 let main () =
-    print (show_int 42);
-    print (show_bool true);
-    print (show_str "hello");
+    print (display_int 42);
+    print (display_bool true);
+    print (display_str "hello");
     0
 "#;
     run_ok(program);
@@ -273,16 +275,16 @@ let main () =
 #[test]
 fn trait_method_in_let_binding() {
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
 let main () =
-    let result = show 42 in
+    let result = display 42 in
     print result;
     0
 "#;
@@ -311,20 +313,20 @@ let main () =
 #[test]
 fn trait_method_in_match_arm() {
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
 let main () =
     let opt = Some 42 in
     let result = match opt with
-        | Some x -> show x
+        | Some x -> display x
         | None -> "none"
         end
     in
@@ -344,26 +346,26 @@ fn specific_instance_over_generic() {
     // the specific one should be chosen for the right type
     // Note: Separate functions needed to avoid type monomorphization
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type List a = | Nil | Cons a (List a)
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (List a) where a : Show =
-    let show xs = "list"
+impl Display for (List a) where a : Display =
+    let display xs = "list"
 end
 
-let show_int x = show x
-let show_list x = show x
+let display_int x = display x
+let display_list x = display x
 
 let main () =
-    print (show_int 42);
-    print (show_list (Cons 1 Nil));
+    print (display_int 42);
+    print (display_list (Cons 1 Nil));
     0
 "#;
     run_ok(program);
@@ -377,28 +379,28 @@ let main () =
 fn recursive_show_with_list() {
     // Show List calls show on elements recursively
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type List a = | Nil | Cons a (List a)
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (List a) where a : Show =
-    let show xs = match xs with
+impl Display for (List a) where a : Display =
+    let display xs = match xs with
         | Nil -> "[]"
-        | Cons h Nil -> "[" ++ show h ++ "]"
-        | Cons h t -> "[" ++ show h ++ ", ...]"
+        | Cons h Nil -> "[" ++ display h ++ "]"
+        | Cons h t -> "[" ++ display h ++ ", ...]"
         end
 end
 
 let main () =
-    print (show Nil);
-    print (show (Cons 1 Nil));
-    print (show (Cons 1 (Cons 2 Nil)));
+    print (display Nil);
+    print (display (Cons 1 Nil));
+    print (display (Cons 1 (Cons 2 Nil)));
     0
 "#;
     run_ok(program);
@@ -412,15 +414,15 @@ let main () =
 fn inferred_constraint_from_usage() {
     // Type of `f` should be inferred as `a -> String where a : Show`
     let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-let f x = show x
+let f x = display x
 
 let main () =
     print (f 42);

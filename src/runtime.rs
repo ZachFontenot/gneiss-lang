@@ -625,6 +625,12 @@ impl Runtime {
             BlockingOpResult::Slept => {
                 Value::Unit
             }
+            BlockingOpResult::Printed => {
+                Value::Unit
+            }
+            BlockingOpResult::Line(s) => {
+                Value::String(s)
+            }
             BlockingOpResult::Error(e) => {
                 Value::from_io_result::<(), _>(Err(e), |_| Value::Unit)
             }

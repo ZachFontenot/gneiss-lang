@@ -19,6 +19,53 @@ type IoError =
     | IoOther String
 
 -- ============================================================================
+-- Show Trait
+-- ============================================================================
+-- Convert values to their string representation
+
+trait Show a =
+    val show : a -> String
+end
+
+impl Show for Int =
+    let show n = int_to_string n
+end
+
+impl Show for String =
+    let show s = s
+end
+
+impl Show for Bool =
+    let show b = if b then "true" else "false"
+end
+
+impl Show for Char =
+    let show c = char_to_string c
+end
+
+impl Show for () =
+    let show _ = "()"
+end
+
+impl Show for (Option a) where a : Show =
+    let show opt =
+        match opt with
+        | Some x -> "Some(" ++ show x ++ ")"
+        | None -> "None"
+        end
+end
+
+impl Show for (Result e a) where e : Show, a : Show =
+    let show res =
+        match res with
+        | Ok x -> "Ok(" ++ show x ++ ")"
+        | Err e -> "Err(" ++ show e ++ ")"
+        end
+end
+
+-- Note: Show for List is defined after map is available
+
+-- ============================================================================
 -- Standard Effects (import from Effect/ modules)
 -- ============================================================================
 --
@@ -85,6 +132,11 @@ let rec length xs = match xs with | [] -> 0 | _ :: rest -> 1 + length rest end
 let rec reverse xs = foldl (fun acc x -> x :: acc) [] xs
 let head xs = match xs with | [] -> None | x :: _ -> Some x end
 let tail xs = match xs with | [] -> None | _ :: rest -> Some rest end
+
+-- Show for List (defined here since it needs map)
+impl Show for (List a) where a : Show =
+    let show xs = "[" ++ string_join ", " (map show xs) ++ "]"
+end
 
 let rec drop_while p xs =
     match xs with

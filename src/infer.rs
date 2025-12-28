@@ -4538,42 +4538,52 @@ end
 
     #[test]
     fn test_instance_registration() {
+        // Note: Use Display instead of Show since Show is now in prelude
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 "#;
         let (result, inferencer) = typecheck_program_with_inferencer(source);
         assert!(result.is_ok());
-        assert_eq!(inferencer.class_env.instances.len(), 1);
+        // Prelude adds Show instances, so we check Display was added
+        let display_instances: Vec<_> = inferencer
+            .class_env
+            .instances
+            .iter()
+            .filter(|i| i.trait_name == "Display")
+            .collect();
+        assert_eq!(display_instances.len(), 1);
     }
 
     #[test]
     fn test_method_call_adds_predicate() {
-        // When we call 'show x', it should add a Show predicate for x's type
+        // When we call 'display x', it should add a Display predicate for x's type
+        // Note: Use Display instead of Show since Show is now in prelude
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
-let f x = show x
+let f x = display x
 "#;
         let (result, inferencer) = typecheck_program_with_inferencer(source);
         assert!(result.is_ok());
         // The inferencer collects predicates during inference
         // Note: predicates are cleared per binding, so we can't directly check them here
         // This test mainly verifies the code path works
-        assert!(inferencer.class_env.get_trait("Show").is_some());
+        assert!(inferencer.class_env.get_trait("Display").is_some());
     }
 
     #[test]
     fn test_trait_unknown_error() {
         // Instance for unknown trait should fail
+        // Note: Use UnknownTrait instead of Show since Show is now in prelude
         let source = r#"
-impl Show for Int =
-    let show n = int_to_string n
+impl UnknownTrait for Int =
+    let method n = int_to_string n
 end
 "#;
         let (result, _) = typecheck_program_with_inferencer(source);
@@ -4581,7 +4591,7 @@ end
         if let Err(errors) = result {
             assert!(!errors.is_empty());
             if let TypeError::UnknownTrait { name, .. } = &errors[0] {
-                assert_eq!(name, "Show");
+                assert_eq!(name, "UnknownTrait");
             } else {
                 panic!("Expected UnknownTrait error, got {:?}", errors[0]);
             }
@@ -4591,15 +4601,16 @@ end
     #[test]
     fn test_overlapping_instance_error() {
         // Two instances for the same type should fail
+        // Note: Use Display instead of Show since Show is now in prelude
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
-impl Show for Int =
-    let show n = "int"
+impl Display for Int =
+    let display n = "int"
 end
 "#;
         let (result, _) = typecheck_program_with_inferencer(source);
@@ -4612,32 +4623,38 @@ end
 
     #[test]
     fn test_constrained_instance_registration() {
+        // Note: Use Display instead of Show since Show is now in prelude
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
-type List a = | Nil | Cons a (List a)
-impl Show for (List a) where a : Show =
-    let show xs = "list"
+type MyList a = | Nil | Cons a (MyList a)
+impl Display for (MyList a) where a : Display =
+    let display xs = "list"
 end
 "#;
         let (result, inferencer) = typecheck_program_with_inferencer(source);
         assert!(result.is_ok());
-        // Should have 2 instances: Show Int and Show (List a)
-        assert_eq!(inferencer.class_env.instances.len(), 2);
-
-        // Check that the List instance has constraints
-        let list_instance = inferencer
+        // Filter for Display instances (prelude adds Show instances)
+        let display_instances: Vec<_> = inferencer
             .class_env
             .instances
+            .iter()
+            .filter(|i| i.trait_name == "Display")
+            .collect();
+        // Should have 2 Display instances: Display Int and Display (MyList a)
+        assert_eq!(display_instances.len(), 2);
+
+        // Check that the MyList instance has constraints
+        let list_instance = display_instances
             .iter()
             .find(|i| !i.constraints.is_empty())
             .expect("Should have constrained instance");
         assert_eq!(list_instance.constraints.len(), 1);
-        assert_eq!(list_instance.constraints[0].trait_name, "Show");
+        assert_eq!(list_instance.constraints[0].trait_name, "Display");
     }
 
     // ========================================================================

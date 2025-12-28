@@ -421,6 +421,12 @@ pub enum IoOp {
     Sleep {
         duration_ms: u64,
     },
+
+    // === Console I/O operations ===
+    /// Print a string to stdout
+    Print { text: String },
+    /// Read a line from stdin
+    ReadLine,
 }
 
 /// The continuation stack
@@ -5102,13 +5108,14 @@ let main () =
     #[test]
     fn test_trait_instance_parsing_and_eval() {
         // Test that trait and instance declarations don't crash evaluation
+        // Note: Use Display instead of Show since Show is now in prelude
         let program = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
 let main () = ()
@@ -5118,18 +5125,19 @@ let main () = ()
 
     #[test]
     fn test_show_int_end_to_end() {
-        // Full end-to-end test: define Show trait, Show Int instance, call show 42
+        // Full end-to-end test: define Display trait, Display Int instance, call display 42
+        // Note: Use Display instead of Show since Show is now in prelude
         let tokens = Lexer::new(
             r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-let result = show 42
+let result = display 42
 "#,
         )
         .tokenize()
@@ -5149,19 +5157,19 @@ let result = show 42
 
         let mut methods = HashMap::new();
         methods.insert(
-            "show".to_string(),
+            "display".to_string(),
             InferType::arrow(InferType::new_generic(0), InferType::String),
         );
         interp.class_env.add_trait(TraitInfo {
-            name: "Show".to_string(),
+            name: "Display".to_string(),
             type_param: "a".to_string(),
             supertraits: vec![],
             methods,
         });
 
-        // Add Show Int instance - use int_to_string n as the body
-        let show_impl = InstanceMethod {
-            name: "show".to_string(),
+        // Add Display Int instance - use int_to_string n as the body
+        let display_impl = InstanceMethod {
+            name: "display".to_string(),
             params: vec![Pattern {
                 node: PatternKind::Var("n".into()),
                 span: Span::default(),
@@ -5183,14 +5191,14 @@ let result = show 42
         interp
             .class_env
             .add_instance(InstanceInfo {
-                trait_name: "Show".to_string(),
+                trait_name: "Display".to_string(),
                 head: InferType::Int,
                 constraints: vec![],
-                method_impls: vec![show_impl],
+                method_impls: vec![display_impl],
             })
             .unwrap();
 
-        // Evaluate "show 42" directly
+        // Evaluate "display 42" directly
         let env = EnvInner::new();
         {
             env.borrow_mut().define(
@@ -5199,11 +5207,11 @@ let result = show 42
             );
         }
 
-        // Create the expression: show 42
-        let show_42 = Spanned {
+        // Create the expression: display 42
+        let display_42 = Spanned {
             node: ExprKind::App {
                 func: Rc::new(Spanned {
-                    node: ExprKind::Var("show".into()),
+                    node: ExprKind::Var("display".into()),
                     span: Span::default(),
                 }),
                 arg: Rc::new(Spanned {
@@ -5214,7 +5222,7 @@ let result = show 42
             span: Span::default(),
         };
 
-        let result = interp.eval_expr(&env, &show_42).unwrap();
+        let result = interp.eval_expr(&env, &display_42).unwrap();
         assert!(matches!(result, Value::String(s) if s == "42"));
     }
 

@@ -3,6 +3,8 @@
 //! These tests verify that typeclass dictionary dispatch works correctly,
 //! especially for constructor types where the constructor name (e.g., "Some")
 //! must be mapped to the type name (e.g., "Option") at runtime.
+//!
+//! Note: Uses Display instead of Show since Show is now in prelude.
 
 use gneiss::eval::Value;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser};
@@ -52,15 +54,15 @@ proptest! {
     #[test]
     fn show_int_any_value(n in small_int()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-show {}
+display {}
 "#, format_int(n));
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -75,24 +77,24 @@ show {}
     #[test]
     fn show_option_some_int(n in small_int()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
 end
 
-show (Some {})
+display (Some {})
 "#, format_int(n));
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -106,18 +108,18 @@ show (Some {})
     #[test]
     fn show_option_none(_dummy in any::<u8>()) {
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
@@ -137,24 +139,24 @@ show None
     #[test]
     fn show_nested_option(n in small_int()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
 end
 
-show (Some (Some {}))
+display (Some (Some {}))
 "#, format_int(n));
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -169,24 +171,24 @@ show (Some (Some {}))
     #[test]
     fn show_list_int(a in small_int(), b in small_int(), c in small_int()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type List a = | Nil | Cons a (List a)
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (List a) where a : Show =
-    let show xs = match xs with
+impl Display for (List a) where a : Display =
+    let display xs = match xs with
         | Nil -> "[]"
         | Cons h t -> "list"
         end
 end
 
-show (Cons {} (Cons {} (Cons {} Nil)))
+display (Cons {} (Cons {} (Cons {} Nil)))
 "#, format_int(a), format_int(b), format_int(c));
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -208,24 +210,24 @@ show (Cons {} (Cons {} (Cons {} Nil)))
         let expected = if use_left { "Left" } else { "Right" };
 
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Either a b = | Left a | Right b
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Either a b) where a : Show, b : Show =
-    let show e = match e with
+impl Display for (Either a b) where a : Display, b : Display =
+    let display e = match e with
         | Left x -> "Left"
         | Right y -> "Right"
         end
 end
 
-show ({})
+display ({})
 "#, value);
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -239,16 +241,16 @@ show ({})
     #[test]
     fn multiple_traits_int(n in small_int()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 trait Double a =
     val double : a -> a
 end
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
 impl Double for Int =
@@ -277,21 +279,21 @@ let x = {} in double x
         prop_assume!(type_name != ctor_name);
 
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type {} a = | {} a
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for ({} a) where a : Show =
-    let show x = "custom"
+impl Display for ({} a) where a : Display =
+    let display x = "custom"
 end
 
-show ({} {})
+display ({} {})
 "#, type_name, ctor_name, type_name, ctor_name, format_int(n));
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -306,24 +308,24 @@ show ({} {})
     fn show_in_match_arm(n in small_int(), use_some in any::<bool>()) {
         let expected = if use_some { n.to_string() } else { "None".to_string() };
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
-        | Some x -> show x
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
+        | Some x -> display x
         | None -> "None"
         end
 end
 
-let input = {} in show input
+let input = {} in display input
 "#, if use_some { format!("Some {}", format_int(n)) } else { "None".to_string() });
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -337,24 +339,24 @@ let input = {} in show input
     #[test]
     fn show_through_function(n in small_int()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
 end
 
-let display x = show x in display (Some {})
+let render x = display x in render (Some {})
 "#, format_int(n));
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -373,24 +375,24 @@ let display x = show x in display (Some {})
         }
 
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
 end
 
-show ({})
+display ({})
 "#, value);
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -405,24 +407,24 @@ show ({})
     #[test]
     fn show_option_bool(b in any::<bool>()) {
         let source = format!(r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Bool =
-    let show b = if b then "true" else "false"
+impl Display for Bool =
+    let display b = if b then "true" else "false"
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
 end
 
-show (Some {})
+display (Some {})
 "#, b);
 
         let result = run_program(&source).map_err(|e| TestCaseError::fail(e))?;
@@ -445,21 +447,21 @@ mod regression {
     fn test_constructor_name_vs_type_name() {
         // This is the core bug - Some vs Option
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = "option"
+impl Display for (Option a) where a : Display =
+    let display opt = "option"
 end
 
-show (Some 42)
+display (Some 42)
 "#;
         let result = run_program(source).expect("Constructor name vs type name bug");
         assert!(
@@ -474,24 +476,24 @@ show (Some 42)
         // Both Some and None should map to Option
         // Test with None (last expression)
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "some"
         | None -> "none"
         end
 end
 
-show None
+display None
 "#;
         let result = run_program(source).expect("Multiple constructors same type");
         assert!(
@@ -505,24 +507,24 @@ show None
     fn test_recursive_show_call() {
         // show x inside the Show Option instance should dispatch to Show Int
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
-        | Some x -> "Some(" ++ show x ++ ")"
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
+        | Some x -> "Some(" ++ display x ++ ")"
         | None -> "None"
         end
 end
 
-show (Some 42)
+display (Some 42)
 "#;
         let result = run_program(source).expect("Recursive show call");
         assert!(
@@ -537,33 +539,33 @@ show (Some 42)
         // Result type with Ok, Err, and a third constructor
         // Test with Pending (last expression)
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Result a b c = | Ok a | Err b | Pending c
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for String =
-    let show s = s
+impl Display for String =
+    let display s = s
 end
 
-impl Show for Bool =
-    let show b = if b then "true" else "false"
+impl Display for Bool =
+    let display b = if b then "true" else "false"
 end
 
-impl Show for (Result a b c) where a : Show, b : Show, c : Show =
-    let show r = match r with
+impl Display for (Result a b c) where a : Display, b : Display, c : Display =
+    let display r = match r with
         | Ok x -> "Ok"
         | Err e -> "Err"
         | Pending p -> "Pending"
         end
 end
 
-show (Pending true)
+display (Pending true)
 "#;
         let result = run_program(source).expect("Three constructors same type");
         assert!(
@@ -577,24 +579,24 @@ show (Pending true)
     fn test_nullary_constructor() {
         // None is a nullary constructor (no arguments)
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "some"
         | None -> "none"
         end
 end
 
-show None
+display None
 "#;
         let result = run_program(source).expect("Nullary constructor");
         assert!(
@@ -608,29 +610,29 @@ show None
     fn test_nested_different_types() {
         // Option (List Int) - nested different parameterized types
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 type List a = | Nil | Cons a (List a)
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (List a) where a : Show =
-    let show xs = "list"
+impl Display for (List a) where a : Display =
+    let display xs = "list"
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
         | Some x -> "Some"
         | None -> "None"
         end
 end
 
-show (Some (Cons 1 (Cons 2 Nil)))
+display (Some (Cons 1 (Cons 2 Nil)))
 "#;
         let result = run_program(source).expect("Nested different parameterized types");
         assert!(
@@ -644,24 +646,24 @@ show (Some (Cons 1 (Cons 2 Nil)))
     fn test_constraint_chain() {
         // Show (Option (Option Int)) requires Show (Option Int) requires Show Int
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Option a = | Some a | None
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for (Option a) where a : Show =
-    let show opt = match opt with
-        | Some x -> "Some(" ++ show x ++ ")"
+impl Display for (Option a) where a : Display =
+    let display opt = match opt with
+        | Some x -> "Some(" ++ display x ++ ")"
         | None -> "None"
         end
 end
 
-show (Some (Some (Some 42)))
+display (Some (Some (Some 42)))
 "#;
         let result = run_program(source).expect("Constraint chain");
         assert!(
@@ -675,27 +677,27 @@ show (Some (Some (Some 42)))
     fn test_multiple_type_params() {
         // Pair a b with two type parameters
         let source = r#"
-trait Show a =
-    val show : a -> String
+trait Display a =
+    val display : a -> String
 end
 
 type Pair a b = | MkPair a b
 
-impl Show for Int =
-    let show n = int_to_string n
+impl Display for Int =
+    let display n = int_to_string n
 end
 
-impl Show for Bool =
-    let show b = if b then "true" else "false"
+impl Display for Bool =
+    let display b = if b then "true" else "false"
 end
 
-impl Show for (Pair a b) where a : Show, b : Show =
-    let show p = match p with
+impl Display for (Pair a b) where a : Display, b : Display =
+    let display p = match p with
         | MkPair x y -> "pair"
         end
 end
 
-show (MkPair 42 true)
+display (MkPair 42 true)
 "#;
         let result = run_program(source).expect("Multiple type params");
         assert!(
