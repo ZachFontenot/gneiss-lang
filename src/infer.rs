@@ -1536,6 +1536,10 @@ impl Inferencer {
                 let fun_result = self.infer_expr_full(env, func)?;
                 let arg_result = self.infer_expr_full(env, arg)?;
 
+                // Record arg type for elaboration (trait method calls need this)
+                let arg_ty_resolved = arg_result.ty.resolve(&self.type_uf);
+                self.record_expr_type(&arg.span, arg_ty_resolved);
+
                 // Fresh variables for function type components
                 let param_ty = self.fresh_var(); // σ
                 let ret_ty = self.fresh_var(); // τ

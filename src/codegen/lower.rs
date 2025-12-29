@@ -1993,13 +1993,14 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
         }
 
         TExprKind::MethodCall {
-            trait_name: _,
+            trait_name,
             method,
             instance_ty,
             args,
         } => {
             // Generate monomorphized function name
-            let mangled_name = format!("{}_{}", method, mangle_type(instance_ty));
+            // Format: Trait_Type_method (e.g., Show_Int_show)
+            let mangled_name = format!("{}_{}_{}", trait_name, mangle_type(instance_ty), method);
 
             // Look up the mangled function
             if let Some(func_var) = ctx.lookup(&mangled_name) {

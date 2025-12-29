@@ -518,3 +518,40 @@ let main _ =
 "#;
     assert_output(source, "99");
 }
+
+#[test]
+fn phase5_show_int() {
+    // Show trait for Int
+    let source = r#"
+let main _ =
+    let s = show 42 in
+    let _ = io_print s in
+    0
+"#;
+    // Output is "42" from io_print + "0" from return value
+    assert_output(source, "420");
+}
+
+#[test]
+fn phase5_show_string() {
+    // Show trait for String
+    let source = r#"
+let main _ =
+    let s = show "hello" in
+    let _ = io_print s in
+    0
+"#;
+    assert_output(source, "hello0");
+}
+
+#[test]
+fn phase5_show_bool() {
+    // Show trait for Bool
+    let source = r#"
+let main _ =
+    let s = show true in
+    let _ = io_print s in
+    0
+"#;
+    assert_output(source, "true0");
+}
