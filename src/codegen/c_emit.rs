@@ -52,6 +52,8 @@ pub struct CEmitter {
     top_level_funcs: HashMap<VarId, String>,
     /// Map of function arities (for CAF detection - 0-arg functions need to be called)
     func_arities: HashMap<VarId, usize>,
+    /// Map of function name to arity (for closure wrapping when VarId lookup fails)
+    func_name_arities: HashMap<String, usize>,
     /// Map of function captures (for closure conversion)
     /// VarId -> (C var names for captures to pass at call sites)
     func_captures: HashMap<VarId, Vec<String>>,
@@ -75,6 +77,7 @@ impl CEmitter {
             var_names: HashMap::new(),
             top_level_funcs: HashMap::new(),
             func_arities: HashMap::new(),
+            func_name_arities: HashMap::new(),
             func_captures: HashMap::new(),
             name_counter: 0,
             forward_decls: String::new(),
@@ -264,8 +267,9 @@ impl CEmitter {
         // (we need all registered for name lookup, but only emit reachable ones)
         for fun in &program.functions {
             let c_name = format!("fn_{}", mangle_name(&fun.name));
-            self.top_level_funcs.insert(fun.var_id, c_name);
+            self.top_level_funcs.insert(fun.var_id, c_name.clone());
             self.func_arities.insert(fun.var_id, fun.params.len());
+            self.func_name_arities.insert(c_name, fun.params.len());
         }
 
         // Register builtin function mappings from the program
@@ -317,18 +321,17 @@ impl CEmitter {
 
     /// Emit forward declaration for a function
     fn emit_forward_decl(&mut self, fun: &FunDef) {
-        let params: Vec<String> = fun
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("gn_value arg{}", i))
+        // All functions have env as first parameter for uniform closure calling convention
+        let params: Vec<String> = std::iter::once("gn_value* env".to_string())
+            .chain(
+                fun.params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("gn_value arg{}", i)),
+            )
             .collect();
 
-        let params_str = if params.is_empty() {
-            "void".to_string()
-        } else {
-            params.join(", ")
-        };
+        let params_str = params.join(", ");
 
         writeln!(
             self.forward_decls,
@@ -353,18 +356,17 @@ impl CEmitter {
             self.var_names.insert(*param, name.clone());
         }
 
-        let params: Vec<String> = fun
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("gn_value arg{}", i))
+        // All functions have env as first parameter for uniform closure calling convention
+        let params: Vec<String> = std::iter::once("gn_value* env".to_string())
+            .chain(
+                fun.params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("gn_value arg{}", i)),
+            )
             .collect();
 
-        let params_str = if params.is_empty() {
-            "void".to_string()
-        } else {
-            params.join(", ")
-        };
+        let params_str = params.join(", ");
 
         writeln!(
             self.function_defs,
@@ -429,7 +431,7 @@ impl CEmitter {
             self.output
                 .push_str("int main(int argc, char** argv) {\n");
             self.output.push_str("    gn_init(argc, argv);\n");
-            self.output.push_str("    gn_value result = fn_main(GN_UNIT);\n");
+            self.output.push_str("    gn_value result = fn_main(NULL, GN_UNIT);\n");
             self.output.push_str("    gn_print(result);\n");
             self.output.push_str("    gn_println();\n");
             self.output.push_str("    gn_shutdown();\n");
@@ -451,13 +453,30 @@ impl CEmitter {
     fn emit_expr(&mut self, expr: &CoreExpr) -> String {
         match expr {
             CoreExpr::Var(var) => {
-                // Check if this is a 0-arity function (CAF) that needs to be called
-                if let Some(&arity) = self.func_arities.get(var) {
+                let name = self.get_var_name(*var);
+
+                // Check if this is a function being used as a value
+                // First try by VarId, then by name
+                let arity = self
+                    .func_arities
+                    .get(var)
+                    .copied()
+                    .or_else(|| self.func_name_arities.get(&name).copied());
+
+                if let Some(arity) = arity {
                     if arity == 0 {
-                        return format!("{}()", self.get_var_name(*var));
+                        // It's a CAF - call it
+                        return format!("{}()", name);
+                    } else {
+                        // Function used as a value - wrap in closure
+                        return match arity {
+                            1 => format!("gn_make_closure1((void*){})", name),
+                            2 => format!("gn_make_closure2((void*){})", name),
+                            _ => format!("gn_make_closure((void*){}, {}, 0, NULL)", name, arity),
+                        };
                     }
                 }
-                self.get_var_name(*var)
+                name
             }
 
             CoreExpr::Lit(lit) => self.emit_literal(lit),
@@ -511,19 +530,28 @@ impl CEmitter {
                 let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
 
                 // Check if this is a known function call (top-level fn_ or gn_ builtin)
-                if func_name.starts_with("fn_") || func_name.starts_with("gn_") {
-                    // Check the function's arity - may need partial application
+                if func_name.starts_with("fn_") {
+                    // User-defined function - pass NULL for env
                     let arity = self.func_arities.get(func).copied().unwrap_or(args.len());
 
                     if args_str.len() <= arity {
                         // Simple case: all args fit in the function's arity
-                        format!("{}({})", func_name, args_str.join(", "))
+                        let all_args = std::iter::once("NULL".to_string())
+                            .chain(args_str.into_iter())
+                            .collect::<Vec<_>>();
+                        format!("{}({})", func_name, all_args.join(", "))
                     } else {
                         // Curried call: call function with arity args, then gn_apply rest
                         let (direct_args, extra_args) = args_str.split_at(arity);
-                        let call = format!("{}({})", func_name, direct_args.join(", "));
+                        let all_direct = std::iter::once("NULL".to_string())
+                            .chain(direct_args.iter().cloned())
+                            .collect::<Vec<_>>();
+                        let call = format!("{}({})", func_name, all_direct.join(", "));
                         self.emit_chained_apply(&call, extra_args)
                     }
+                } else if func_name.starts_with("gn_") {
+                    // Builtin function - no env parameter
+                    format!("{}({})", func_name, args_str.join(", "))
                 } else {
                     // Closure call - chain gn_apply for each argument
                     self.emit_chained_apply(&func_name, &args_str)
@@ -535,17 +563,26 @@ impl CEmitter {
                 let func_name = self.get_var_name(*func);
                 let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
                 // Check if this is a known function call
-                if func_name.starts_with("fn_") || func_name.starts_with("gn_") {
-                    // Check the function's arity - may need partial application
+                if func_name.starts_with("fn_") {
+                    // User-defined function - pass NULL for env
                     let arity = self.func_arities.get(func).copied().unwrap_or(args.len());
 
                     if args_str.len() <= arity {
-                        format!("{}({})", func_name, args_str.join(", "))
+                        let all_args = std::iter::once("NULL".to_string())
+                            .chain(args_str.into_iter())
+                            .collect::<Vec<_>>();
+                        format!("{}({})", func_name, all_args.join(", "))
                     } else {
                         let (direct_args, extra_args) = args_str.split_at(arity);
-                        let call = format!("{}({})", func_name, direct_args.join(", "));
+                        let all_direct = std::iter::once("NULL".to_string())
+                            .chain(direct_args.iter().cloned())
+                            .collect::<Vec<_>>();
+                        let call = format!("{}({})", func_name, all_direct.join(", "));
                         self.emit_chained_apply(&call, extra_args)
                     }
+                } else if func_name.starts_with("gn_") {
+                    // Builtin function - no env parameter
+                    format!("{}({})", func_name, args_str.join(", "))
                 } else {
                     self.emit_chained_apply(&func_name, &args_str)
                 }
@@ -1119,14 +1156,31 @@ impl CEmitter {
     fn emit_atom(&mut self, atom: &Atom) -> String {
         match atom {
             Atom::Var(var) => {
-                // Check if this is a 0-arity function (CAF) that needs to be called
-                if let Some(&arity) = self.func_arities.get(var) {
+                let name = self.get_var_name(*var);
+
+                // Check if this is a function being used as a value
+                // First try by VarId, then by name
+                let arity = self
+                    .func_arities
+                    .get(var)
+                    .copied()
+                    .or_else(|| self.func_name_arities.get(&name).copied());
+
+                if let Some(arity) = arity {
                     if arity == 0 {
                         // It's a CAF - call it
-                        return format!("{}()", self.get_var_name(*var));
+                        return format!("{}()", name);
+                    } else {
+                        // Function used as a value - wrap in closure
+                        // Named functions have no captures, env is NULL
+                        return match arity {
+                            1 => format!("gn_make_closure1((void*){})", name),
+                            2 => format!("gn_make_closure2((void*){})", name),
+                            _ => format!("gn_make_closure((void*){}, {}, 0, NULL)", name, arity),
+                        };
                     }
                 }
-                self.get_var_name(*var)
+                name
             }
             Atom::Lit(lit) => self.emit_literal(lit),
             Atom::Alloc {

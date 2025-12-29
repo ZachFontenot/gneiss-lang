@@ -295,3 +295,33 @@ let main _ = foldl (fun acc x -> acc + x) 0 [1, 2, 3]
 "#;
     assert_output(source, "6");
 }
+
+// ============================================================================
+// Phase 5 Tests: More complex programs
+// ============================================================================
+
+#[test]
+fn phase5_compose() {
+    // Function composition
+    let source = r#"
+let compose f g x = f (g x)
+let double x = x + x
+let add1 x = x + 1
+let main _ = compose double add1 5
+"#;
+    assert_output(source, "12");
+}
+
+#[test]
+fn phase5_list_sum() {
+    // Recursive list sum
+    let source = r#"
+let rec list_sum xs =
+    match xs with
+    | [] -> 0
+    | x :: rest -> x + list_sum rest
+    end
+let main _ = list_sum [1, 2, 3, 4, 5]
+"#;
+    assert_output(source, "15");
+}
