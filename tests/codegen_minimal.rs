@@ -1,0 +1,297 @@
+//! Minimal C Code Generation Tests
+//!
+//! Phase 0: Establish baseline - what currently works in the C backend.
+//!
+//! These tests compile Gneiss programs to C, then compile and run the C.
+//! Each test documents whether it passes or fails to establish our baseline.
+
+use std::fs;
+use std::process::Command;
+
+use gneiss::ast::Program;
+use gneiss::codegen::{emit_c, lower_tprogram};
+use gneiss::elaborate::elaborate;
+use gneiss::infer::Inferencer;
+use gneiss::lexer::Lexer;
+use gneiss::parser::Parser;
+use gneiss::prelude::parse_prelude;
+
+/// Compile a Gneiss program to C, compile the C, run it, and return stdout
+fn compile_and_run(source: &str) -> Result<String, String> {
+    // Parse
+    let tokens = Lexer::new(source)
+        .tokenize()
+        .map_err(|e| format!("Lex error: {:?}", e))?;
+    let user_program = Parser::new(tokens)
+        .parse_program()
+        .map_err(|e| format!("Parse error: {:?}", e))?;
+
+    // Combine with prelude
+    let prelude = parse_prelude().map_err(|e| format!("Prelude error: {}", e))?;
+    let mut combined_items = prelude.items;
+    combined_items.extend(user_program.items);
+    let program = Program {
+        exports: user_program.exports,
+        items: combined_items,
+    };
+
+    // Type check
+    let mut inferencer = Inferencer::new();
+    let type_env = inferencer
+        .infer_program(&program)
+        .map_err(|e| format!("Type error: {:?}", e))?;
+
+    // Elaborate
+    let tprogram =
+        elaborate(&program, &inferencer, &type_env).map_err(|e| format!("Elaborate: {:?}", e))?;
+
+    // Lower to Core IR
+    let core_program =
+        lower_tprogram(&tprogram).map_err(|e| format!("Lower error: {:?}", e))?;
+
+    // Emit C
+    let c_code = emit_c(&core_program);
+
+    // Use unique temp files per test (thread ID + timestamp)
+    let unique_id = format!("{:?}_{}", std::thread::current().id(), std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    let c_path = format!("/tmp/gneiss_test_{}.c", unique_id);
+    let exe_path = format!("/tmp/gneiss_test_{}", unique_id);
+    fs::write(&c_path, &c_code).map_err(|e| format!("Write error: {}", e))?;
+
+    // Find runtime directory
+    let runtime_dir = std::env::var("GNEISS_RUNTIME")
+        .unwrap_or_else(|_| "runtime".to_string());
+
+    // Compile C
+    let compile_result = Command::new("cc")
+        .args([
+            "-o",
+            &exe_path,
+            &c_path,
+            &format!("{}/gn_runtime.c", runtime_dir),
+            &format!("-I{}", runtime_dir),
+            "-lm",
+        ])
+        .output()
+        .map_err(|e| format!("CC failed to start: {}", e))?;
+
+    if !compile_result.status.success() {
+        let stderr = String::from_utf8_lossy(&compile_result.stderr);
+        return Err(format!("C compilation failed:\n{}", stderr));
+    }
+
+    // Run executable
+    let run_result = Command::new(&exe_path)
+        .output()
+        .map_err(|e| format!("Run failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&run_result.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&run_result.stderr).to_string();
+
+    if !run_result.status.success() {
+        return Err(format!(
+            "Execution failed (exit {})\nstdout: {}\nstderr: {}",
+            run_result.status, stdout, stderr
+        ));
+    }
+
+    Ok(stdout)
+}
+
+/// Compile and run, expecting a specific output
+fn assert_output(source: &str, expected: &str) {
+    match compile_and_run(source) {
+        Ok(output) => {
+            let output = output.trim();
+            assert_eq!(
+                output, expected,
+                "Output mismatch.\nExpected: {}\nGot: {}",
+                expected, output
+            );
+        }
+        Err(e) => panic!("Compilation/execution failed: {}", e),
+    }
+}
+
+/// Compile and run, expecting it to fail (documents known failures)
+fn expect_failure(source: &str, description: &str) {
+    match compile_and_run(source) {
+        Ok(output) => {
+            panic!(
+                "Expected failure but got success!\nDescription: {}\nOutput: {}",
+                description, output
+            );
+        }
+        Err(_) => {
+            // Expected - this is a known failure
+            eprintln!("[KNOWN FAILURE] {}", description);
+        }
+    }
+}
+
+// ============================================================================
+// Phase 0 Tests: Minimal Baseline
+// ============================================================================
+
+#[test]
+fn baseline_literal_int() {
+    // Simplest possible program: return an integer literal
+    let source = r#"
+let main _ = 42
+"#;
+    assert_output(source, "42");
+}
+
+#[test]
+fn baseline_arithmetic_add() {
+    // Simple arithmetic: 1 + 2
+    let source = r#"
+let main _ = 1 + 2
+"#;
+    assert_output(source, "3");
+}
+
+#[test]
+fn baseline_arithmetic_complex() {
+    // More complex arithmetic
+    let source = r#"
+let main _ = (10 + 5) * 2 - 3
+"#;
+    assert_output(source, "27");
+}
+
+#[test]
+fn baseline_if_true() {
+    // Conditional: if true branch
+    let source = r#"
+let main _ = if true then 1 else 2
+"#;
+    assert_output(source, "1");
+}
+
+#[test]
+fn baseline_if_false() {
+    // Conditional: if false branch
+    let source = r#"
+let main _ = if false then 1 else 2
+"#;
+    assert_output(source, "2");
+}
+
+#[test]
+fn baseline_let_binding() {
+    // Simple let binding
+    let source = r#"
+let main _ =
+    let x = 10 in
+    let y = 20 in
+    x + y
+"#;
+    assert_output(source, "30");
+}
+
+#[test]
+fn baseline_function_call() {
+    // Named function call
+    let source = r#"
+let double x = x * 2
+let main _ = double 21
+"#;
+    assert_output(source, "42");
+}
+
+#[test]
+fn baseline_recursive_factorial() {
+    // Recursive function
+    let source = r#"
+let rec factorial n =
+    if n <= 1 then 1
+    else n * factorial (n - 1)
+
+let main _ = factorial 5
+"#;
+    assert_output(source, "120");
+}
+
+// ============================================================================
+// Known Failure Tests (document what doesn't work yet)
+// ============================================================================
+
+#[test]
+fn baseline_lambda_simple() {
+    // Simple lambda without captures
+    let source = r#"
+let main _ = (fun x -> x + 1) 5
+"#;
+    assert_output(source, "6");
+}
+
+#[test]
+fn baseline_lambda_identity() {
+    // Identity lambda
+    let source = r#"
+let main _ = (fun x -> x) 42
+"#;
+    assert_output(source, "42");
+}
+
+#[test]
+fn baseline_lambda_let_bound() {
+    // Lambda bound to a variable
+    let source = r#"
+let main _ =
+    let f = fun x -> x + 1 in
+    f 5
+"#;
+    assert_output(source, "6");
+}
+
+#[test]
+fn baseline_lambda_capture() {
+    // Lambda with captured variable
+    let source = r#"
+let main _ =
+    let y = 10 in
+    let f = fun x -> x + y in
+    f 5
+"#;
+    assert_output(source, "15");
+}
+
+#[test]
+fn baseline_curried_function() {
+    // Curried function (returns a closure)
+    let source = r#"
+let add x = fun y -> x + y
+let main _ = add 3 4
+"#;
+    assert_output(source, "7");
+}
+
+#[test]
+fn baseline_map() {
+    // Higher-order function
+    let source = r#"
+let main _ = length (map (fun x -> x + 1) [1, 2, 3])
+"#;
+    assert_output(source, "3");
+}
+
+#[test]
+fn baseline_filter() {
+    // Higher-order filter function
+    let source = r#"
+let main _ = length (filter (fun x -> x > 2) [1, 2, 3, 4])
+"#;
+    assert_output(source, "2");
+}
+
+#[test]
+fn baseline_foldl() {
+    // Higher-order fold function
+    let source = r#"
+let main _ = foldl (fun acc x -> acc + x) 0 [1, 2, 3]
+"#;
+    assert_output(source, "6");
+}
