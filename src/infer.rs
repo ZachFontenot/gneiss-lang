@@ -5,7 +5,6 @@
 
 use crate::ast::*;
 use crate::errors::find_similar;
-use crate::prelude::parse_prelude;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -3223,16 +3222,10 @@ impl Inferencer {
     /// Returns all accumulated type errors rather than stopping on the first one.
     /// On success, returns the type environment.
     /// On failure, returns a non-empty vector of type errors.
+    ///
+    /// NOTE: This function does NOT load the prelude. Callers must combine
+    /// prelude + user program before calling this function.
     pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, Vec<TypeError>> {
-        self.infer_program_impl(program, true)
-    }
-
-    /// Infer types without loading prelude (for REPL after initial load)
-    pub fn infer_program_no_prelude(&mut self, program: &Program) -> Result<TypeEnv, Vec<TypeError>> {
-        self.infer_program_impl(program, false)
-    }
-
-    fn infer_program_impl(&mut self, program: &Program, load_prelude: bool) -> Result<TypeEnv, Vec<TypeError>> {
         // Clear any previous errors
         self.errors.clear();
         let mut env = TypeEnv::new();
@@ -4009,22 +4002,11 @@ impl Inferencer {
         };
         env.insert("get_args".into(), get_args_scheme);
 
-        // Collect all items: prelude first (if loading), then user program
-        let prelude_program;
-        let all_items: Vec<&Item> = if load_prelude {
-            // Parse and inject prelude (Option, Result, id, const, flip)
-            prelude_program = parse_prelude().map_err(|e| vec![TypeError::Other(e)])?;
-            prelude_program
-                .items
-                .iter()
-                .chain(program.items.iter())
-                .collect()
-        } else {
-            program.items.iter().collect()
-        };
+        // Process all items from the program
+        // (Caller is responsible for combining prelude + user program before calling)
 
         // First pass: register all type declarations (ADTs, records, and type aliases)
-        for item in &all_items {
+        for item in &program.items {
             if let Item::Decl(decl) = item {
                 self.register_type_decl(decl);
                 self.register_record_decl(decl);
@@ -4033,7 +4015,7 @@ impl Inferencer {
         }
 
         // Second pass: register all trait declarations
-        for item in &all_items {
+        for item in &program.items {
             if let Item::Decl(decl @ Decl::Trait { .. }) = item {
                 if let Err(e) = self.register_trait_decl(decl) {
                     self.record_error(e);
@@ -4042,7 +4024,7 @@ impl Inferencer {
         }
 
         // Third pass: register all instance declarations
-        for item in &all_items {
+        for item in &program.items {
             if let Item::Decl(decl @ Decl::Instance { .. }) = item {
                 if let Err(e) = self.register_instance_decl(decl) {
                     self.record_error(e);
@@ -4051,7 +4033,7 @@ impl Inferencer {
         }
 
         // Fourth pass: infer types for let declarations and top-level expressions
-        for item in &all_items {
+        for item in &program.items {
             match item {
                 Item::Decl(Decl::Let {
                     name, params, body, ..

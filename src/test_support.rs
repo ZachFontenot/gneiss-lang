@@ -20,6 +20,7 @@ use crate::eval::{EnvInner, EvalError, RuntimeEffect, Interpreter, Value};
 use crate::infer::Inferencer;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::prelude::parse_prelude;
 use crate::types::{InferResult, Type, TypeEnv};
 
 // ============================================================================
@@ -70,7 +71,20 @@ pub fn typecheck_expr_full(input: &str) -> Result<(Expr, InferResult), String> {
 
 /// Parse and type-check a program, returning AST and type environment
 pub fn typecheck_program(input: &str) -> Result<(Program, TypeEnv), String> {
-    let program = parse_program(input)?;
+    // Parse prelude
+    let prelude = parse_prelude().map_err(|e| format!("Prelude parse error: {:?}", e))?;
+
+    // Parse user program
+    let user_program = parse_program(input)?;
+
+    // Combine prelude + user program
+    let mut combined_items = prelude.items;
+    combined_items.extend(user_program.items);
+    let program = Program {
+        exports: user_program.exports,
+        items: combined_items,
+    };
+
     let mut inferencer = Inferencer::new();
     let env = inferencer
         .infer_program(&program)
@@ -391,13 +405,27 @@ pub fn eval_expr(input: &str) -> Result<Value, EvalError> {
 /// Run a program and return the final result (if any)
 /// This performs full type checking before execution.
 pub fn run_program(input: &str) -> Result<Option<Value>, EvalError> {
+    // Parse prelude
+    let prelude = parse_prelude().map_err(|e| {
+        EvalError::RuntimeError(format!("Prelude parse error: {:?}", e))
+    })?;
+
+    // Parse user program
     let tokens = Lexer::new(input).tokenize().map_err(|e| {
         EvalError::RuntimeError(format!("Lexer error: {:?}", e))
     })?;
     let mut parser = Parser::new(tokens);
-    let program = parser.parse_program().map_err(|e| {
+    let user_program = parser.parse_program().map_err(|e| {
         EvalError::RuntimeError(format!("Parse error: {:?}", e))
     })?;
+
+    // Combine prelude + user program
+    let mut combined_items = prelude.items;
+    combined_items.extend(user_program.items);
+    let program = Program {
+        exports: user_program.exports,
+        items: combined_items,
+    };
 
     // Type check before running - this is critical for catching type errors!
     let mut inferencer = Inferencer::new();

@@ -584,7 +584,7 @@ impl CoreExpr {
                 let mut s = format!("case {} of\n", scrutinee);
                 for alt in alts {
                     let binders: Vec<_> = alt.binders.iter().map(|b| format!("{}", b)).collect();
-                    let tag_name = alt.tag_name.as_ref().map(|n| n.as_str()).unwrap_or("?");
+                    let tag_name = alt.tag_name.as_deref().unwrap_or("?");
                     s.push_str(&format!(
                         "{}  | {}#{} [{}] ->\n{}    {}\n",
                         pad, tag_name, alt.tag, binders.join(", "),

@@ -347,13 +347,150 @@ let main _ = length (map (fun x -> x + 1) (filter (fun x -> x > 1) [1, 2, 3, 4])
 }
 
 #[test]
-#[ignore] // ++ is currently only implemented for strings, not lists
+#[ignore] // ++ is currently only implemented for strings, not lists - use concat function instead
 fn phase5_list_concat() {
-    // List concatenation
+    // List concatenation - should use concat or a named function
     let source = r#"
 let main _ = length ([1, 2] ++ [3, 4, 5])
 "#;
     assert_output(source, "5");
+}
+
+#[test]
+fn phase5_custom_adt() {
+    // Custom ADT: expression evaluator
+    let source = r#"
+type Expr
+  = Num Int
+  | Add Expr Expr
+  | Mul Expr Expr
+
+let rec eval expr =
+  match expr with
+  | Num i -> i
+  | Add l r -> eval l + eval r
+  | Mul l r -> eval l * eval r
+  end
+
+let main _ =
+  let expr = Add (Mul (Num 2) (Num 3)) (Num 4) in
+  eval expr
+"#;
+    assert_output(source, "10");
+}
+
+#[test]
+fn phase5_tree_sum() {
+    // Binary tree sum
+    let source = r#"
+type Tree = Leaf Int | Node Tree Tree
+
+let rec tree_sum t =
+  match t with
+  | Leaf n -> n
+  | Node l r -> tree_sum l + tree_sum r
+  end
+
+let main _ =
+  let t = Node (Node (Leaf 1) (Leaf 2)) (Leaf 3) in
+  tree_sum t
+"#;
+    assert_output(source, "6");
+}
+
+#[test]
+fn phase5_either_type() {
+    // Either type handling
+    let source = r#"
+type Either a b = Left a | Right b
+
+let get_or_default e d =
+  match e with
+  | Left _ -> d
+  | Right x -> x
+  end
+
+let main _ =
+  let e1 = Right 42 in
+  let e2 = Left "error" in
+  get_or_default e1 0 + get_or_default e2 100
+"#;
+    assert_output(source, "142");
+}
+
+#[test]
+fn phase5_mutual_recursion() {
+    // Mutual recursion (even/odd check)
+    let source = r#"
+let rec is_even n =
+  if n == 0 then true
+  else is_odd (n - 1)
+and is_odd n =
+  if n == 0 then false
+  else is_even (n - 1)
+
+let main _ =
+  if is_even 10 then 1 else 0
+"#;
+    assert_output(source, "1");
+}
+
+#[test]
+fn phase5_reverse_list() {
+    // List reversal
+    let source = r#"
+let rec reverse_acc acc xs =
+  match xs with
+  | [] -> acc
+  | x :: rest -> reverse_acc (x :: acc) rest
+  end
+
+let reverse xs = reverse_acc [] xs
+
+let main _ =
+  match reverse [1, 2, 3] with
+  | x :: _ -> x
+  | [] -> 0
+  end
+"#;
+    assert_output(source, "3");
+}
+
+#[test]
+fn phase5_take_n() {
+    // Take first n elements
+    let source = r#"
+let rec take n xs =
+  if n <= 0 then []
+  else match xs with
+    | [] -> []
+    | x :: rest -> x :: take (n - 1) rest
+    end
+
+let main _ = length (take 2 [1, 2, 3, 4, 5])
+"#;
+    assert_output(source, "2");
+}
+
+#[test]
+fn phase5_zip_with() {
+    // Zip two lists with a function
+    let source = r#"
+let rec zip_with f xs ys =
+  match xs with
+  | [] -> []
+  | x :: rest_x ->
+    match ys with
+    | [] -> []
+    | y :: rest_y -> f x y :: zip_with f rest_x rest_y
+    end
+  end
+
+let main _ =
+  let sums = zip_with (fun a b -> a + b) [1, 2, 3] [10, 20, 30] in
+  foldl (fun acc x -> acc + x) 0 sums
+"#;
+    assert_output(source, "66");
 }
 
 #[test]

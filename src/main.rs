@@ -7,7 +7,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use gneiss::ast::{ImportSpec, Item, Program};
-use gneiss::codegen::{emit_c, lower_program, lower_tprogram};
+use gneiss::codegen::{emit_c, lower_tprogram};
 use gneiss::elaborate::elaborate;
 use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
@@ -75,6 +75,30 @@ fn run_file(path: &str, program_args: Vec<String>) {
     let mut inferencer = Inferencer::new();
     let mut interpreter = Interpreter::new();
     interpreter.set_program_args(program_args);
+
+    // Load and type-check prelude first
+    let prelude = match parse_prelude() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to parse prelude: {}", e);
+            return;
+        }
+    };
+
+    // Type-check prelude to register its types/traits/instances
+    if let Err(errors) = inferencer.infer_program(&prelude) {
+        eprintln!("Type error in prelude:");
+        for e in &errors {
+            eprintln!("  {}", e);
+        }
+        return;
+    }
+
+    // Run prelude in interpreter to get runtime values
+    if let Err(e) = interpreter.run(&prelude) {
+        eprintln!("Failed to load prelude values: {}", e);
+        return;
+    }
 
     // Type-check each module in dependency order (dependencies first)
     let mut module_type_envs: Vec<(String, TypeEnv)> = Vec::new();
@@ -177,12 +201,14 @@ fn compile_file(args: &[String]) {
     let mut source_file = None;
     let mut emit_c_only = false;
     let mut output_file = None;
+    let mut no_prelude = false;
 
     // Parse arguments
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--emit-c" => emit_c_only = true,
+            "--no-prelude" => no_prelude = true,
             "-o" => {
                 i += 1;
                 if i < args.len() {
@@ -238,8 +264,8 @@ fn compile_file(args: &[String]) {
         }
     };
 
-    // Parse
-    let program = match Parser::new(tokens).parse_program() {
+    // Parse user program
+    let user_program = match Parser::new(tokens).parse_program() {
         Ok(p) => p,
         Err(e) => {
             eprint!("{}", format_parse_error(&e, &source_map, Some(&source_path), &colors));
@@ -247,7 +273,28 @@ fn compile_file(args: &[String]) {
         }
     };
 
-    // Type check
+    // Optionally include prelude
+    let program = if no_prelude {
+        user_program
+    } else {
+        let prelude = match parse_prelude() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to parse prelude: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        // Combine prelude + user program items
+        let mut combined_items = prelude.items;
+        combined_items.extend(user_program.items);
+        Program {
+            exports: user_program.exports,
+            items: combined_items,
+        }
+    };
+
+    // Type check combined program (prelude is already included)
     let mut inferencer = Inferencer::new();
     let type_env = match inferencer.infer_program(&program) {
         Ok(env) => env,
@@ -259,7 +306,7 @@ fn compile_file(args: &[String]) {
         }
     };
 
-    // Elaborate to TAST
+    // Elaborate combined program to TAST
     let tprogram = match elaborate(&program, &inferencer, &type_env) {
         Ok(t) => t,
         Err(errors) => {
@@ -501,34 +548,31 @@ fn repl() {
     let mut type_env = TypeEnv::new();
     let mut inferencer = Inferencer::new();
 
-    // Load prelude runtime values (Option, Result, map, filter, etc.)
-    // Note: infer_program internally loads the prelude for type checking,
-    // so we only need to run it in the interpreter here for runtime values.
+    // Load and type-check prelude
     match parse_prelude() {
         Ok(prelude) => {
+            // Type-check prelude to register types/traits/instances and get initial type env
+            match inferencer.infer_program(&prelude) {
+                Ok(initial_env) => {
+                    for (name, scheme) in initial_env.iter() {
+                        type_env.insert(name.clone(), scheme.clone());
+                    }
+                }
+                Err(errors) => {
+                    eprintln!("Warning: Failed to type-check prelude:");
+                    for e in errors {
+                        eprintln!("  {}", e);
+                    }
+                }
+            }
+
+            // Run prelude in interpreter to get runtime values
             if let Err(e) = interpreter.run(&prelude) {
                 eprintln!("Warning: Failed to load prelude values: {}", e);
             }
         }
         Err(e) => {
             eprintln!("Warning: Failed to parse prelude: {}", e);
-        }
-    }
-
-    // Get initial type environment by running infer_program on an empty program
-    // This populates type_env with builtins and prelude types
-    let empty_program = Program { exports: None, items: vec![] };
-    match inferencer.infer_program(&empty_program) {
-        Ok(initial_env) => {
-            for (name, scheme) in initial_env.iter() {
-                type_env.insert(name.clone(), scheme.clone());
-            }
-        }
-        Err(errors) => {
-            eprintln!("Warning: Failed to initialize type environment:");
-            for e in errors {
-                eprintln!("  {}", e);
-            }
         }
     }
 
@@ -619,8 +663,8 @@ fn repl() {
                     })
                     .collect();
 
-                // Type check and add to environment (no prelude - already loaded)
-                match inferencer.infer_program_no_prelude(&program) {
+                // Type check and add to environment (prelude already loaded at REPL start)
+                match inferencer.infer_program(&program) {
                     Ok(new_env) => {
                         // Print types for new declarations
                         for name in &decl_names {

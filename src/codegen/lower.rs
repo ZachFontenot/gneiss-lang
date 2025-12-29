@@ -309,11 +309,45 @@ pub fn lower_program(program: &Program) -> Result<CoreProgram, Vec<String>> {
 /// Register built-in functions
 fn register_builtins(ctx: &mut LowerCtx) {
     let builtin_names = [
+        // Core I/O
         "print",
+        "io_print",
+        "io_read_line",
+        // String operations
         "int_to_string",
         "string_length",
         "string_concat",
+        "string_join",
+        "string_split",
+        "string_index_of",
+        "string_substring",
+        "string_to_lower",
+        "string_to_upper",
+        "string_trim",
+        "string_trim_start",
+        "string_trim_end",
+        "string_reverse",
+        "string_is_empty",
+        "string_char_at",
+        "string_repeat",
+        "string_to_chars",
+        "chars_to_string",
+        // Char operations
         "char_to_string",
+        "char_to_int",
+        "char_to_lower",
+        "char_to_upper",
+        "char_is_whitespace",
+        "char_is_digit",
+        "char_is_alpha",
+        "char_is_alphanumeric",
+        // Bytes operations
+        "bytes_to_string",
+        "string_to_bytes",
+        "bytes_length",
+        "bytes_slice",
+        "bytes_concat",
+        // System
         "get_args",
     ];
 
@@ -783,7 +817,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr, in_tail: bool) -> CoreExpr {
             }
         }
 
-        ExprKind::FieldAccess { record, field } => {
+        ExprKind::FieldAccess { record, field: _ } => {
             let record_var = lower_to_var(ctx, record);
             // Field access becomes a primitive tuple/record get
             // For now, we don't know the field index, so we'll use a placeholder
@@ -898,7 +932,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr, in_tail: bool) -> CoreExpr {
             }
         }
 
-        ExprKind::RecordUpdate { base, updates } => {
+        ExprKind::RecordUpdate { base, updates: _ } => {
             // Record update: { base with field = value, ... }
             // This needs to copy the record and update fields
             let base_var = lower_to_var(ctx, base);
@@ -921,9 +955,8 @@ fn lower_to_var(ctx: &mut LowerCtx, expr: &Expr) -> VarId {
         }
         ExprKind::Lit(_lit) => {
             // Literals can be inlined, but for ANF we still bind them
-            let var = ctx.fresh();
             // Note: in actual codegen, we'd track this binding
-            var
+            ctx.fresh()
         }
         _ => {
             // Complex expression - need to bind to a variable
@@ -1314,17 +1347,27 @@ pub fn lower_tprogram(program: &TProgram) -> Result<CoreProgram, Vec<String>> {
     // Register built-in functions in environment
     register_builtins(&mut ctx);
 
-    // Second pass: lower trait instance methods
+    // Second pass: forward-declare all binding names
+    // This allows functions to reference each other and allows instance methods
+    // to reference prelude functions like `map`
+    let mut binding_vars: Vec<(String, VarId)> = Vec::new();
+    for binding in &program.bindings {
+        let var = ctx.fresh_named(&binding.name);
+        ctx.bind(&binding.name, var);
+        binding_vars.push((binding.name.clone(), var));
+    }
+
+    // Third pass: lower trait instance methods
+    // Now they can reference all prelude functions
     for instance in &program.instance_decls {
         lower_instance(&mut ctx, instance);
     }
 
-    // Third pass: lower bindings
+    // Fourth pass: lower binding bodies
     let mut main_expr: Option<CoreExpr> = None;
 
-    for binding in &program.bindings {
-        let var = ctx.fresh_named(&binding.name);
-        ctx.bind(&binding.name, var);
+    for (binding, (_name, var)) in program.bindings.iter().zip(binding_vars.iter()) {
+        let var = *var;
 
         if binding.params.is_empty() {
             // Simple value binding
@@ -1533,16 +1576,23 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
                     }
                 }
                 _ => {
-                    // Complex pattern - use case expression
+                    // Complex pattern - use case expression with nested pattern support
                     let scrutinee_var = ctx.fresh();
-                    let (binders, hints, tag, _record_name) =
-                        lower_tpattern_case(ctx, pattern);
+                    let (binders, hints, tag, tag_name, nested_patterns) =
+                        lower_tpattern_case_with_nested(ctx, pattern);
 
+                    // Build case wrappers first - this binds all pattern variables
+                    let case_wrappers = build_nested_case_wrappers(ctx, &nested_patterns);
+
+                    // Now lower the body - all pattern variables are bound
                     let body_lowered = if let Some(body) = body {
                         lower_texpr(ctx, body, in_tail)
                     } else {
                         CoreExpr::Lit(CoreLit::Unit)
                     };
+
+                    // Apply case wrappers to the body
+                    let wrapped_body = apply_case_wrappers(case_wrappers, body_lowered);
 
                     CoreExpr::LetExpr {
                         name: scrutinee_var,
@@ -1552,10 +1602,10 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
                             scrutinee: scrutinee_var,
                             alts: vec![Alt {
                                 tag,
-                                tag_name: None,
+                                tag_name,
                                 binders,
                                 binder_hints: hints,
-                                body: body_lowered,
+                                body: wrapped_body,
                             }],
                             default: Some(Box::new(CoreExpr::Error(
                                 "pattern match failed".to_string(),
@@ -2119,6 +2169,7 @@ fn collect_tapp_args<'a>(func: &'a TExpr, arg: &'a TExpr) -> (&'a TExpr, Vec<&'a
 }
 
 /// Bind a typed pattern and return the variable
+/// This recursively binds all variables in complex patterns
 fn lower_tpattern_bind(ctx: &mut LowerCtx, pattern: &TPattern) -> (VarId, Option<String>) {
     match &pattern.node {
         TPatternKind::Var(name) => {
@@ -2130,101 +2181,50 @@ fn lower_tpattern_bind(ctx: &mut LowerCtx, pattern: &TPattern) -> (VarId, Option
             let var = ctx.fresh();
             (var, None)
         }
-        _ => {
-            // For complex patterns, we need to introduce a variable and match later
+        TPatternKind::Cons { head, tail } => {
+            // Recursively bind variables in head and tail
+            let _ = lower_tpattern_bind(ctx, head);
+            let _ = lower_tpattern_bind(ctx, tail);
             let var = ctx.fresh();
             (var, None)
         }
-    }
-}
-
-/// Lower a typed pattern for a case expression
-fn lower_tpattern_case(
-    ctx: &mut LowerCtx,
-    pattern: &TPattern,
-) -> (Vec<VarId>, Vec<Option<String>>, Tag, Option<String>) {
-    match &pattern.node {
-        TPatternKind::Wildcard => (vec![], vec![], 0, None),
-
-        TPatternKind::Var(name) => {
-            let var = ctx.fresh_named(name);
-            ctx.bind(name, var);
-            (vec![var], vec![Some(name.clone())], 0, None)
-        }
-
-        TPatternKind::Lit(_) => {
-            // Literals need special handling
-            (vec![], vec![], 0, None)
-        }
-
         TPatternKind::Tuple(elems) => {
-            let mut binders = Vec::new();
-            let mut hints = Vec::new();
+            // Recursively bind variables in all tuple elements
             for elem in elems {
-                let (var, hint) = lower_tpattern_bind(ctx, elem);
-                binders.push(var);
-                hints.push(hint);
+                let _ = lower_tpattern_bind(ctx, elem);
             }
-            (binders, hints, 0, Some(format!("Tuple{}", elems.len())))
+            let var = ctx.fresh();
+            (var, None)
         }
-
         TPatternKind::List(elems) => {
-            let mut binders = Vec::new();
-            let mut hints = Vec::new();
+            // Recursively bind variables in all list elements
             for elem in elems {
-                let (var, hint) = lower_tpattern_bind(ctx, elem);
-                binders.push(var);
-                hints.push(hint);
+                let _ = lower_tpattern_bind(ctx, elem);
             }
-            let (tag, tag_name) = if elems.is_empty() {
-                (ctx.tag_table.get_or_create("List", "Nil"), Some("Nil".to_string()))
-            } else {
-                (ctx.tag_table.get_or_create("List", "Cons"), Some("Cons".to_string()))
-            };
-            (binders, hints, tag, tag_name)
+            let var = ctx.fresh();
+            (var, None)
         }
-
-        TPatternKind::Cons { head, tail } => {
-            let (head_var, head_hint) = lower_tpattern_bind(ctx, head);
-            let (tail_var, tail_hint) = lower_tpattern_bind(ctx, tail);
-            let tag = ctx.tag_table.get_or_create("List", "Cons");
-            (
-                vec![head_var, tail_var],
-                vec![head_hint, tail_hint],
-                tag,
-                Some("Cons".to_string()),
-            )
-        }
-
-        TPatternKind::Constructor { name, args } => {
-            let mut binders = Vec::new();
-            let mut hints = Vec::new();
+        TPatternKind::Constructor { args, .. } => {
+            // Recursively bind variables in constructor arguments
             for arg in args {
-                let (var, hint) = lower_tpattern_bind(ctx, arg);
-                binders.push(var);
-                hints.push(hint);
+                let _ = lower_tpattern_bind(ctx, arg);
             }
-            let tag = ctx.get_tag("ADT", name);
-            (binders, hints, tag, Some(name.clone()))
+            let var = ctx.fresh();
+            (var, None)
         }
-
-        TPatternKind::Record { name, fields } => {
-            let mut binders = Vec::new();
-            let mut hints = Vec::new();
-            for (field_name, pat) in fields {
+        TPatternKind::Record { fields, .. } => {
+            // Recursively bind variables in record fields
+            for (_field_name, pat) in fields {
                 if let Some(inner_pat) = pat {
-                    let (var, hint) = lower_tpattern_bind(ctx, inner_pat);
-                    binders.push(var);
-                    hints.push(hint);
-                } else {
-                    let var = ctx.fresh_named(field_name);
-                    ctx.bind(field_name, var);
-                    binders.push(var);
-                    hints.push(Some(field_name.clone()));
+                    let _ = lower_tpattern_bind(ctx, inner_pat);
                 }
             }
-            let tag = ctx.get_tag("Record", name);
-            (binders, hints, tag, Some(name.clone()))
+            let var = ctx.fresh();
+            (var, None)
+        }
+        TPatternKind::Lit(_) => {
+            let var = ctx.fresh();
+            (var, None)
         }
     }
 }
@@ -2234,8 +2234,19 @@ fn lower_tmatch_arms(ctx: &mut LowerCtx, arms: &[TMatchArm], in_tail: bool) -> V
     arms.iter()
         .map(|arm| {
             ctx.push_scope();
-            let (binders, hints, tag, tag_name) = lower_tpattern_case(ctx, &arm.pattern);
+            let (binders, hints, tag, tag_name, nested_patterns) =
+                lower_tpattern_case_with_nested(ctx, &arm.pattern);
+
+            // Build the nested case structure first - this binds all pattern variables
+            // Returns a function that will wrap the body in nested cases
+            let case_wrappers = build_nested_case_wrappers(ctx, &nested_patterns);
+
+            // Now lower the body - all pattern variables are bound
             let body = lower_texpr(ctx, &arm.body, in_tail);
+
+            // Apply the case wrappers to the body (innermost first)
+            let wrapped_body = apply_case_wrappers(case_wrappers, body);
+
             ctx.pop_scope();
 
             Alt {
@@ -2243,10 +2254,377 @@ fn lower_tmatch_arms(ctx: &mut LowerCtx, arms: &[TMatchArm], in_tail: bool) -> V
                 tag_name,
                 binders,
                 binder_hints: hints,
-                body,
+                body: wrapped_body,
             }
         })
         .collect()
+}
+
+/// A case wrapper that will wrap a body expression in a case expression
+struct CaseWrapper {
+    scrutinee: VarId,
+    tag: Tag,
+    tag_name: Option<String>,
+    binders: Vec<VarId>,
+}
+
+/// Build case wrappers for nested patterns and bind all pattern variables
+fn build_nested_case_wrappers(
+    ctx: &mut LowerCtx,
+    nested_patterns: &[(VarId, TPattern)],
+) -> Vec<CaseWrapper> {
+    let mut wrappers = Vec::new();
+
+    for (scrutinee, pattern) in nested_patterns {
+        build_case_wrapper_for_pattern(ctx, *scrutinee, pattern, &mut wrappers);
+    }
+
+    wrappers
+}
+
+/// Build case wrappers for a single pattern, recursively handling nested patterns
+fn build_case_wrapper_for_pattern(
+    ctx: &mut LowerCtx,
+    scrutinee: VarId,
+    pattern: &TPattern,
+    wrappers: &mut Vec<CaseWrapper>,
+) {
+    match &pattern.node {
+        TPatternKind::Var(name) => {
+            // Just bind the variable to the scrutinee (no case wrapper needed)
+            ctx.bind(name, scrutinee);
+        }
+
+        TPatternKind::Wildcard => {
+            // Nothing to bind or wrap
+        }
+
+        TPatternKind::Lit(_) => {
+            // TODO: Handle literal patterns with equality check
+        }
+
+        TPatternKind::Cons { head, tail } => {
+            let head_var = ctx.fresh();
+            let tail_var = ctx.fresh();
+            let tag = ctx.tag_table.get_or_create("List", "Cons");
+
+            wrappers.push(CaseWrapper {
+                scrutinee,
+                tag,
+                tag_name: Some("Cons".to_string()),
+                binders: vec![head_var, tail_var],
+            });
+
+            // Recursively handle sub-patterns
+            match &head.node {
+                TPatternKind::Var(name) => ctx.bind(name, head_var),
+                TPatternKind::Wildcard => {}
+                _ => build_case_wrapper_for_pattern(ctx, head_var, head, wrappers),
+            }
+
+            match &tail.node {
+                TPatternKind::Var(name) => ctx.bind(name, tail_var),
+                TPatternKind::Wildcard => {}
+                _ => build_case_wrapper_for_pattern(ctx, tail_var, tail, wrappers),
+            }
+        }
+
+        TPatternKind::Tuple(elems) => {
+            let mut binder_vars = Vec::new();
+            for _ in elems {
+                binder_vars.push(ctx.fresh());
+            }
+
+            wrappers.push(CaseWrapper {
+                scrutinee,
+                tag: 0,
+                tag_name: Some(format!("Tuple{}", elems.len())),
+                binders: binder_vars.clone(),
+            });
+
+            for (var, elem) in binder_vars.into_iter().zip(elems.iter()) {
+                match &elem.node {
+                    TPatternKind::Var(name) => ctx.bind(name, var),
+                    TPatternKind::Wildcard => {}
+                    _ => build_case_wrapper_for_pattern(ctx, var, elem, wrappers),
+                }
+            }
+        }
+
+        TPatternKind::List(elems) if elems.is_empty() => {
+            let tag = ctx.tag_table.get_or_create("List", "Nil");
+            wrappers.push(CaseWrapper {
+                scrutinee,
+                tag,
+                tag_name: Some("Nil".to_string()),
+                binders: vec![],
+            });
+        }
+
+        TPatternKind::List(elems) => {
+            // Non-empty list pattern - compile as nested Cons
+            // [a, b, c] becomes Cons(a, Cons(b, Cons(c, Nil)))
+            let mut current_scrutinee = scrutinee;
+            let cons_tag = ctx.tag_table.get_or_create("List", "Cons");
+
+            for (i, elem) in elems.iter().enumerate() {
+                let head_var = ctx.fresh();
+                let tail_var = ctx.fresh();
+
+                wrappers.push(CaseWrapper {
+                    scrutinee: current_scrutinee,
+                    tag: cons_tag,
+                    tag_name: Some("Cons".to_string()),
+                    binders: vec![head_var, tail_var],
+                });
+
+                // Bind or recurse for head
+                match &elem.node {
+                    TPatternKind::Var(name) => ctx.bind(name, head_var),
+                    TPatternKind::Wildcard => {}
+                    _ => build_case_wrapper_for_pattern(ctx, head_var, elem, wrappers),
+                }
+
+                // Continue with tail for remaining elements
+                if i < elems.len() - 1 {
+                    current_scrutinee = tail_var;
+                } else {
+                    // Last element - tail should be Nil
+                    let nil_tag = ctx.tag_table.get_or_create("List", "Nil");
+                    wrappers.push(CaseWrapper {
+                        scrutinee: tail_var,
+                        tag: nil_tag,
+                        tag_name: Some("Nil".to_string()),
+                        binders: vec![],
+                    });
+                }
+            }
+        }
+
+        TPatternKind::Constructor { name, args } => {
+            let tag = ctx.get_tag("ADT", name);
+            let mut binder_vars = Vec::new();
+            for _ in args {
+                binder_vars.push(ctx.fresh());
+            }
+
+            wrappers.push(CaseWrapper {
+                scrutinee,
+                tag,
+                tag_name: Some(name.clone()),
+                binders: binder_vars.clone(),
+            });
+
+            for (var, arg) in binder_vars.into_iter().zip(args.iter()) {
+                match &arg.node {
+                    TPatternKind::Var(n) => ctx.bind(n, var),
+                    TPatternKind::Wildcard => {}
+                    _ => build_case_wrapper_for_pattern(ctx, var, arg, wrappers),
+                }
+            }
+        }
+
+        TPatternKind::Record { name, fields } => {
+            let tag = ctx.get_tag("Record", name);
+            let mut binder_vars = Vec::new();
+            for _ in fields {
+                binder_vars.push(ctx.fresh());
+            }
+
+            wrappers.push(CaseWrapper {
+                scrutinee,
+                tag,
+                tag_name: Some(name.clone()),
+                binders: binder_vars.clone(),
+            });
+
+            for (var, (field_name, pat)) in binder_vars.into_iter().zip(fields.iter()) {
+                if let Some(inner_pat) = pat {
+                    match &inner_pat.node {
+                        TPatternKind::Var(n) => ctx.bind(n, var),
+                        TPatternKind::Wildcard => {}
+                        _ => build_case_wrapper_for_pattern(ctx, var, inner_pat, wrappers),
+                    }
+                } else {
+                    ctx.bind(field_name, var);
+                }
+            }
+        }
+    }
+}
+
+/// Apply case wrappers to a body expression, building nested case expressions
+fn apply_case_wrappers(wrappers: Vec<CaseWrapper>, body: CoreExpr) -> CoreExpr {
+    // Apply wrappers in reverse order (innermost first)
+    let mut result = body;
+    for wrapper in wrappers.into_iter().rev() {
+        result = CoreExpr::Case {
+            scrutinee: wrapper.scrutinee,
+            alts: vec![Alt {
+                tag: wrapper.tag,
+                tag_name: wrapper.tag_name,
+                binders: wrapper.binders,
+                binder_hints: vec![],
+                body: result,
+            }],
+            default: Some(Box::new(CoreExpr::Error("pattern match failed".to_string()))),
+        };
+    }
+    result
+}
+
+/// Check if a pattern is trivial (just binds a variable or is wildcard)
+fn is_trivial_pattern(pattern: &TPattern) -> bool {
+    matches!(
+        &pattern.node,
+        TPatternKind::Var(_) | TPatternKind::Wildcard
+    )
+}
+
+/// Lower a pattern for case expression, returning nested patterns that need further matching
+fn lower_tpattern_case_with_nested(
+    ctx: &mut LowerCtx,
+    pattern: &TPattern,
+) -> (Vec<VarId>, Vec<Option<String>>, Tag, Option<String>, Vec<(VarId, TPattern)>) {
+    match &pattern.node {
+        TPatternKind::Wildcard => (vec![], vec![], 0, None, vec![]),
+
+        TPatternKind::Var(name) => {
+            let var = ctx.fresh_named(name);
+            ctx.bind(name, var);
+            (vec![var], vec![Some(name.clone())], 0, None, vec![])
+        }
+
+        TPatternKind::Lit(_) => {
+            // Literals need special handling
+            (vec![], vec![], 0, None, vec![])
+        }
+
+        TPatternKind::Tuple(elems) => {
+            let mut binders = Vec::new();
+            let mut hints = Vec::new();
+            let mut nested = Vec::new();
+
+            for elem in elems {
+                let var = ctx.fresh();
+                binders.push(var);
+                hints.push(None);
+
+                if !is_trivial_pattern(elem) {
+                    // This element needs further pattern matching
+                    nested.push((var, elem.clone()));
+                } else {
+                    // Trivial pattern - just bind the variable
+                    if let TPatternKind::Var(name) = &elem.node {
+                        ctx.bind(name, var);
+                    }
+                }
+            }
+            (binders, hints, 0, Some(format!("Tuple{}", elems.len())), nested)
+        }
+
+        TPatternKind::List(elems) => {
+            let mut binders = Vec::new();
+            let mut hints = Vec::new();
+            let mut nested = Vec::new();
+
+            for elem in elems {
+                let var = ctx.fresh();
+                binders.push(var);
+                hints.push(None);
+
+                if !is_trivial_pattern(elem) {
+                    nested.push((var, elem.clone()));
+                } else if let TPatternKind::Var(name) = &elem.node {
+                    ctx.bind(name, var);
+                }
+            }
+
+            let (tag, tag_name) = if elems.is_empty() {
+                (ctx.tag_table.get_or_create("List", "Nil"), Some("Nil".to_string()))
+            } else {
+                (ctx.tag_table.get_or_create("List", "Cons"), Some("Cons".to_string()))
+            };
+            (binders, hints, tag, tag_name, nested)
+        }
+
+        TPatternKind::Cons { head, tail } => {
+            let head_var = ctx.fresh();
+            let tail_var = ctx.fresh();
+            let tag = ctx.tag_table.get_or_create("List", "Cons");
+
+            let mut nested = Vec::new();
+
+            // Handle head
+            if !is_trivial_pattern(head) {
+                nested.push((head_var, (**head).clone()));
+            } else if let TPatternKind::Var(name) = &head.node {
+                ctx.bind(name, head_var);
+            }
+
+            // Handle tail
+            if !is_trivial_pattern(tail) {
+                nested.push((tail_var, (**tail).clone()));
+            } else if let TPatternKind::Var(name) = &tail.node {
+                ctx.bind(name, tail_var);
+            }
+
+            (
+                vec![head_var, tail_var],
+                vec![None, None],
+                tag,
+                Some("Cons".to_string()),
+                nested,
+            )
+        }
+
+        TPatternKind::Constructor { name, args } => {
+            let mut binders = Vec::new();
+            let mut hints = Vec::new();
+            let mut nested = Vec::new();
+
+            for arg in args {
+                let var = ctx.fresh();
+                binders.push(var);
+                hints.push(None);
+
+                if !is_trivial_pattern(arg) {
+                    nested.push((var, arg.clone()));
+                } else if let TPatternKind::Var(n) = &arg.node {
+                    ctx.bind(n, var);
+                }
+            }
+
+            let tag = ctx.get_tag("ADT", name);
+            (binders, hints, tag, Some(name.clone()), nested)
+        }
+
+        TPatternKind::Record { name, fields } => {
+            let mut binders = Vec::new();
+            let mut hints = Vec::new();
+            let mut nested = Vec::new();
+
+            for (field_name, pat) in fields {
+                let var = ctx.fresh();
+                binders.push(var);
+                hints.push(Some(field_name.clone()));
+
+                if let Some(inner_pat) = pat {
+                    if !is_trivial_pattern(inner_pat) {
+                        nested.push((var, inner_pat.clone()));
+                    } else if let TPatternKind::Var(n) = &inner_pat.node {
+                        ctx.bind(n, var);
+                    }
+                } else {
+                    // No pattern means bind the field name
+                    ctx.bind(field_name, var);
+                }
+            }
+
+            let tag = ctx.get_tag("Record", name);
+            (binders, hints, tag, Some(name.clone()), nested)
+        }
+    }
 }
 
 /// Convert typed binary operator to primitive operation

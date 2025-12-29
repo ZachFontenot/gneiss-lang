@@ -7,14 +7,28 @@
 //!
 //! Note: Uses Display instead of Show since Show is now in prelude.
 
+use gneiss::ast::Program;
 use gneiss::eval::Value;
+use gneiss::prelude::parse_prelude;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser};
 
 /// Run a complete program with typeclass support
 fn run_program(source: &str) -> Result<Value, String> {
+    // Parse prelude
+    let prelude = parse_prelude().map_err(|e| e.to_string())?;
+
+    // Parse user program
     let tokens = Lexer::new(source).tokenize().map_err(|e| e.to_string())?;
     let mut parser = Parser::new(tokens);
-    let program = parser.parse_program().map_err(|e| e.to_string())?;
+    let user_program = parser.parse_program().map_err(|e| e.to_string())?;
+
+    // Combine prelude + user program
+    let mut combined_items = prelude.items;
+    combined_items.extend(user_program.items);
+    let program = Program {
+        exports: user_program.exports,
+        items: combined_items,
+    };
 
     let mut inferencer = Inferencer::new();
     let _env = inferencer

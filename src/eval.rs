@@ -4693,11 +4693,25 @@ mod tests {
 
     /// Helper to run a program (with main) and check it completes without error
     fn run_program(input: &str) -> Result<(), EvalError> {
+        use crate::ast::Program;
         use crate::infer::Inferencer;
+        use crate::prelude::parse_prelude;
 
+        // Parse prelude
+        let prelude = parse_prelude().expect("prelude should parse");
+
+        // Parse user program
         let tokens = Lexer::new(input).tokenize().unwrap();
         let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
+        let user_program = parser.parse_program().unwrap();
+
+        // Combine prelude + user program
+        let mut combined_items = prelude.items;
+        combined_items.extend(user_program.items);
+        let program = Program {
+            exports: user_program.exports,
+            items: combined_items,
+        };
 
         // Run type inference to set up class_env for trait method resolution
         let mut inferencer = Inferencer::new();
