@@ -325,3 +325,59 @@ let main _ = list_sum [1, 2, 3, 4, 5]
 "#;
     assert_output(source, "15");
 }
+
+#[test]
+fn phase5_pipe_operator() {
+    // Pipe operator with function composition
+    let source = r#"
+let double x = x * 2
+let add1 x = x + 1
+let main _ = 5 |> add1 |> double
+"#;
+    assert_output(source, "12");
+}
+
+#[test]
+fn phase5_nested_hof() {
+    // Nested higher-order functions
+    let source = r#"
+let main _ = length (map (fun x -> x + 1) (filter (fun x -> x > 1) [1, 2, 3, 4]))
+"#;
+    assert_output(source, "3");
+}
+
+#[test]
+#[ignore] // ++ is currently only implemented for strings, not lists
+fn phase5_list_concat() {
+    // List concatenation
+    let source = r#"
+let main _ = length ([1, 2] ++ [3, 4, 5])
+"#;
+    assert_output(source, "5");
+}
+
+#[test]
+fn phase5_option_some() {
+    // Option Some case
+    let source = r#"
+let main _ =
+    match Some 42 with
+    | Some x -> x
+    | None -> 0
+    end
+"#;
+    assert_output(source, "42");
+}
+
+#[test]
+fn phase5_option_none() {
+    // Option None case
+    let source = r#"
+let main _ =
+    match None with
+    | Some x -> x
+    | None -> 99
+    end
+"#;
+    assert_output(source, "99");
+}

@@ -27,7 +27,8 @@ use crate::types::{Type, TypeEnv};
 pub struct ElaborateCtx<'a> {
     /// The type inferencer with resolved types
     infer: &'a Inferencer,
-    /// Type environment for looking up variable types
+    /// Type environment for looking up variable types (reserved for future use)
+    #[allow(dead_code)]
     type_env: &'a TypeEnv,
     /// Known trait instances for monomorphization
     /// Maps (trait_name, concrete_type_string) -> mangled_name
@@ -124,6 +125,7 @@ impl<'a> ElaborateCtx<'a> {
     }
 
     /// Convert a TypeExpr to a Type (simplified conversion)
+    #[allow(clippy::only_used_in_recursion)]
     fn type_expr_to_type(&self, te: &TypeExpr) -> Type {
         match &te.node {
             TypeExprKind::Named(name) => {
@@ -454,8 +456,42 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
                 }
             }
 
+            // Check if func is a constructor - if so, merge arg into constructor args
+            if let ExprKind::Constructor { name, args } = &func.node {
+                let targ = elaborate_expr(ctx, arg)?;
+                let mut targs: Vec<_> = args
+                    .iter()
+                    .map(|e| elaborate_expr(ctx, e))
+                    .collect::<Result<_, _>>()?;
+                targs.push(targ);
+                return Ok(TExpr::new(
+                    TExprKind::Constructor {
+                        name: name.clone(),
+                        args: targs,
+                    },
+                    ty,
+                    span,
+                ));
+            }
+
+            // Check if func is an App of a constructor - recursively flatten
             let tfunc = elaborate_expr(ctx, func)?;
             let targ = elaborate_expr(ctx, arg)?;
+
+            // If tfunc is a Constructor, merge targ into its args
+            if let TExprKind::Constructor { name, args } = &tfunc.node {
+                let mut new_args = args.clone();
+                new_args.push(targ);
+                return Ok(TExpr::new(
+                    TExprKind::Constructor {
+                        name: name.clone(),
+                        args: new_args,
+                    },
+                    ty,
+                    span,
+                ));
+            }
+
             TExprKind::App {
                 func: Rc::new(tfunc),
                 arg: Rc::new(targ),
@@ -678,7 +714,7 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
                 args: vec![tchan],
             }
         }
-        ExprKind::Select { arms } => {
+        ExprKind::Select { arms: _ } => {
             // Represent select as an error for now
             TExprKind::Error("select expressions not yet supported in codegen".to_string())
         }
@@ -720,6 +756,7 @@ fn elaborate_match_arm(ctx: &ElaborateCtx, arm: &MatchArm) -> Result<TMatchArm, 
     })
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn elaborate_pattern(ctx: &ElaborateCtx, pattern: &Pattern) -> TPattern {
     let span = pattern.span.clone();
     // Try to get pattern type from context if available
@@ -880,17 +917,36 @@ fn elaborate_unaryop(op: UnaryOp, operand_ty: &Type) -> TUnaryOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Program;
+    use crate::prelude::parse_prelude;
     use crate::{Lexer, Parser};
 
     fn parse_and_elaborate(source: &str) -> TProgram {
+        // Parse prelude
+        let prelude = parse_prelude().expect("prelude should parse");
+
+        // Parse user program
         let tokens = Lexer::new(source).tokenize().unwrap();
         let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
+        let user_program = parser.parse_program().unwrap();
+
+        // Combine prelude + user program
+        let mut combined_items = prelude.items;
+        combined_items.extend(user_program.items);
+        let program = Program {
+            exports: user_program.exports,
+            items: combined_items,
+        };
 
         let mut inferencer = Inferencer::new();
         let type_env = inferencer.infer_program(&program).unwrap();
 
         elaborate(&program, &inferencer, &type_env).unwrap()
+    }
+
+    /// Helper to find a binding by name in the TProgram
+    fn find_binding<'a>(tprog: &'a TProgram, name: &str) -> Option<&'a TBinding> {
+        tprog.bindings.iter().find(|b| b.name == name)
     }
 
     #[test]
@@ -913,19 +969,17 @@ mod tests {
     fn test_elaborate_simple_let() {
         let tprog = parse_and_elaborate("let x = 42");
 
-        assert_eq!(tprog.bindings.len(), 1);
-        assert_eq!(tprog.bindings[0].name, "x");
-        assert!(matches!(tprog.bindings[0].ty, Type::Int));
+        let binding = find_binding(&tprog, "x").expect("binding 'x' should exist");
+        assert!(matches!(binding.ty, Type::Int));
     }
 
     #[test]
     fn test_elaborate_function() {
         let tprog = parse_and_elaborate("let add x y = x + y");
 
-        assert_eq!(tprog.bindings.len(), 1);
-        assert_eq!(tprog.bindings[0].name, "add");
+        let binding = find_binding(&tprog, "add").expect("binding 'add' should exist");
         // Function type: a -> a -> a (or Int -> Int -> Int after resolution)
-        match &tprog.bindings[0].ty {
+        match &binding.ty {
             Type::Arrow { ret, .. } => {
                 // First arrow should have another arrow as return
                 match ret.as_ref() {
@@ -935,7 +989,7 @@ mod tests {
                     _ => panic!("Expected nested function type, got {:?}", ret),
                 }
             }
-            _ => panic!("Expected function type, got {:?}", tprog.bindings[0].ty),
+            _ => panic!("Expected function type, got {:?}", binding.ty),
         }
     }
 
@@ -946,11 +1000,11 @@ mod tests {
         "#;
         let tprog = parse_and_elaborate(source);
 
-        assert_eq!(tprog.bindings.len(), 1);
-        assert!(matches!(tprog.bindings[0].ty, Type::String));
+        let binding = find_binding(&tprog, "result").expect("binding 'result' should exist");
+        assert!(matches!(binding.ty, Type::String));
 
         // Check that the body is a MethodCall
-        match &tprog.bindings[0].body.node {
+        match &binding.body.node {
             TExprKind::MethodCall {
                 trait_name,
                 method,
@@ -962,22 +1016,25 @@ mod tests {
             }
             _ => panic!(
                 "Expected MethodCall, got {:?}",
-                tprog.bindings[0].body.node
+                binding.body.node
             ),
         }
     }
 
     #[test]
     fn test_elaborate_type_decl() {
+        // Note: prelude already includes Option, so we use a different type name
         let source = r#"
-            type Option a = | Some a | None
-            let x = Some 1
+            type MyOption a = | MySome a | MyNone
+            let x = MySome 1
         "#;
         let tprog = parse_and_elaborate(source);
 
-        assert_eq!(tprog.type_decls.len(), 1);
-        assert_eq!(tprog.type_decls[0].name, "Option");
-        assert_eq!(tprog.type_decls[0].constructors.len(), 2);
+        // Find our custom type (not prelude's Option)
+        let type_decl = tprog.type_decls.iter().find(|t| t.name == "MyOption");
+        assert!(type_decl.is_some(), "MyOption type should exist");
+        let type_decl = type_decl.unwrap();
+        assert_eq!(type_decl.constructors.len(), 2);
     }
 
     #[test]
@@ -992,11 +1049,10 @@ mod tests {
         "#;
         let tprog = parse_and_elaborate(source);
 
-        assert_eq!(tprog.bindings.len(), 1);
-        assert_eq!(tprog.bindings[0].name, "classify");
+        let binding = find_binding(&tprog, "classify").expect("binding 'classify' should exist");
 
         // Unwrap lambda to get to the match
-        let mut body = &tprog.bindings[0].body;
+        let mut body = &binding.body;
         while let TExprKind::Lambda { body: inner, .. } = &body.node {
             body = inner;
         }
