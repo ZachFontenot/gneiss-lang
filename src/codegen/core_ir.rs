@@ -408,6 +408,8 @@ pub struct CoreProgram {
     pub types: Vec<TypeDef>,
     /// Top-level function definitions
     pub functions: Vec<FunDef>,
+    /// Builtin function mappings (VarId -> builtin name)
+    pub builtins: Vec<(VarId, String)>,
     /// Main expression
     pub main: Option<CoreExpr>,
 }

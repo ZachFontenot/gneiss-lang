@@ -21,7 +21,8 @@ use crate::codegen::core_ir::{
     RecBinding, Tag, TagTable, TypeDef, VarGen, VarId, VariantDef,
 };
 use crate::tast::{
-    TBinOp, TExpr, TExprKind, TMatchArm, TPattern, TPatternKind, TProgram, TUnaryOp,
+    TBinOp, TExpr, TExprKind, TInstanceDecl, TMatchArm, TMethodImpl, TPattern, TPatternKind,
+    TProgram, TUnaryOp,
 };
 use crate::types::Type;
 
@@ -41,6 +42,8 @@ pub struct LowerCtx {
     type_defs: Vec<TypeDef>,
     /// Function definitions collected during lowering
     fun_defs: Vec<FunDef>,
+    /// Builtin function mappings (VarId -> name)
+    builtins: Vec<(VarId, String)>,
     /// Errors encountered during lowering
     errors: Vec<String>,
     /// Stack of scopes for proper variable shadowing
@@ -58,6 +61,7 @@ impl LowerCtx {
             tag_table,
             type_defs: Vec::new(),
             fun_defs: Vec::new(),
+            builtins: Vec::new(),
             errors: Vec::new(),
             scope_stack: Vec::new(),
         }
@@ -297,13 +301,14 @@ pub fn lower_program(program: &Program) -> Result<CoreProgram, Vec<String>> {
     Ok(CoreProgram {
         types: ctx.type_defs,
         functions: ctx.fun_defs,
+        builtins: ctx.builtins,
         main: main_expr,
     })
 }
 
 /// Register built-in functions
 fn register_builtins(ctx: &mut LowerCtx) {
-    let builtins = [
+    let builtin_names = [
         "print",
         "int_to_string",
         "string_length",
@@ -312,9 +317,10 @@ fn register_builtins(ctx: &mut LowerCtx) {
         "get_args",
     ];
 
-    for name in builtins {
+    for name in builtin_names {
         let var = ctx.fresh_named(name);
         ctx.bind(name, var);
+        ctx.builtins.push((var, name.to_string()));
     }
 }
 
@@ -1308,7 +1314,12 @@ pub fn lower_tprogram(program: &TProgram) -> Result<CoreProgram, Vec<String>> {
     // Register built-in functions in environment
     register_builtins(&mut ctx);
 
-    // Second pass: lower bindings
+    // Second pass: lower trait instance methods
+    for instance in &program.instance_decls {
+        lower_instance(&mut ctx, instance);
+    }
+
+    // Third pass: lower bindings
     let mut main_expr: Option<CoreExpr> = None;
 
     for binding in &program.bindings {
@@ -1380,6 +1391,7 @@ pub fn lower_tprogram(program: &TProgram) -> Result<CoreProgram, Vec<String>> {
     Ok(CoreProgram {
         types: ctx.type_defs,
         functions: ctx.fun_defs,
+        builtins: ctx.builtins,
         main: main_expr,
     })
 }
@@ -2271,7 +2283,57 @@ fn tbinop_to_prim(op: &TBinOp) -> Option<PrimOp> {
     }
 }
 
+/// Lower a trait instance to function definitions
+fn lower_instance(ctx: &mut LowerCtx, instance: &TInstanceDecl) {
+    for method in &instance.methods {
+        lower_method(ctx, method, &instance.instance_ty);
+    }
+}
+
+/// Lower a trait method implementation to a function definition
+fn lower_method(ctx: &mut LowerCtx, method: &TMethodImpl, _instance_ty: &Type) {
+    // Create a fresh variable for this method
+    let var = ctx.fresh_named(&method.mangled_name);
+    ctx.bind(&method.mangled_name, var);
+
+    // Also bind the short name for lookups
+    ctx.bind(&method.name, var);
+
+    ctx.push_scope();
+
+    // Lower parameters
+    let mut param_vars = Vec::new();
+    let mut param_hints = Vec::new();
+    let mut param_types = Vec::new();
+
+    for param in &method.params {
+        let (pvar, hint) = lower_tpattern_bind(ctx, param);
+        param_vars.push(pvar);
+        param_hints.push(hint.unwrap_or_else(|| "_".to_string()));
+        param_types.push(type_to_core_type(&param.ty));
+    }
+
+    // Lower body
+    let body_lowered = lower_texpr(ctx, &method.body, true);
+    ctx.pop_scope();
+
+    // Get return type from the method body
+    let return_type = type_to_core_type(&method.body.ty);
+
+    ctx.fun_defs.push(FunDef {
+        name: method.mangled_name.clone(),
+        var_id: var,
+        params: param_vars,
+        param_hints,
+        param_types,
+        return_type,
+        body: body_lowered,
+        is_tail_recursive: false,
+    });
+}
+
 /// Mangle a type into a string for function naming
+/// Must match elaborate.rs mangle_type for consistency
 fn mangle_type(ty: &Type) -> String {
     match ty {
         Type::Int => "Int".to_string(),
@@ -2280,6 +2342,7 @@ fn mangle_type(ty: &Type) -> String {
         Type::Char => "Char".to_string(),
         Type::String => "String".to_string(),
         Type::Unit => "Unit".to_string(),
+        Type::Bytes => "Bytes".to_string(),
         Type::Tuple(elems) => {
             let parts: Vec<String> = elems.iter().map(mangle_type).collect();
             format!("Tuple_{}", parts.join("_"))
@@ -2292,10 +2355,17 @@ fn mangle_type(ty: &Type) -> String {
                 format!("{}_{}", name, parts.join("_"))
             }
         }
-        Type::Arrow { arg, ret, .. } => {
-            format!("Fn_{}_{}", mangle_type(arg), mangle_type(ret))
-        }
-        _ => "Unknown".to_string(),
+        Type::Arrow { .. } => "Fn".to_string(),
+        Type::Var(id) => format!("Var{}", id),
+        Type::Generic(id) => format!("Gen{}", id),
+        Type::Channel(_) => "Channel".to_string(),
+        Type::Dict(_) => "Dict".to_string(),
+        Type::Set => "Set".to_string(),
+        Type::Pid => "Pid".to_string(),
+        Type::Fiber(_) => "Fiber".to_string(),
+        Type::FileHandle => "FileHandle".to_string(),
+        Type::TcpSocket => "TcpSocket".to_string(),
+        Type::TcpListener => "TcpListener".to_string(),
     }
 }
 
