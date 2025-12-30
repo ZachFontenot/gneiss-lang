@@ -48,6 +48,10 @@ pub struct LowerCtx {
     errors: Vec<String>,
     /// Stack of scopes for proper variable shadowing
     scope_stack: Vec<HashMap<String, VarId>>,
+    /// Effect declarations: effect_name -> (effect_id, vec of operation names)
+    effects: HashMap<String, (u32, Vec<String>)>,
+    /// Next effect ID to assign
+    next_effect_id: u32,
 }
 
 impl LowerCtx {
@@ -64,7 +68,33 @@ impl LowerCtx {
             builtins: Vec::new(),
             errors: Vec::new(),
             scope_stack: Vec::new(),
+            effects: HashMap::new(),
+            next_effect_id: 0,
         }
+    }
+
+    /// Register an effect declaration with its operations
+    /// Returns the effect ID
+    fn register_effect(&mut self, name: &str, operations: Vec<String>) -> u32 {
+        let effect_id = self.next_effect_id;
+        self.next_effect_id += 1;
+        self.effects.insert(name.to_string(), (effect_id, operations));
+        effect_id
+    }
+
+    /// Look up an effect ID by name
+    fn lookup_effect(&self, name: &str) -> Option<u32> {
+        self.effects.get(name).map(|(id, _)| *id)
+    }
+
+    /// Look up an operation ID within an effect
+    /// Returns (effect_id, op_id) if found
+    fn lookup_operation(&self, effect_name: &str, op_name: &str) -> Option<(u32, u32)> {
+        self.effects.get(effect_name).and_then(|(effect_id, ops)| {
+            ops.iter()
+                .position(|op| op == op_name)
+                .map(|idx| (*effect_id, idx as u32))
+        })
     }
 
     /// Generate a fresh variable
@@ -274,9 +304,17 @@ pub fn lower_program(program: &Program) -> Result<CoreProgram, Vec<String>> {
                     // Type declaration, skip for now
                 }
 
+                Decl::EffectDecl { name, operations, .. } => {
+                    // Register effect with its operation names
+                    let op_names: Vec<String> = operations
+                        .iter()
+                        .map(|op| op.name.clone())
+                        .collect();
+                    ctx.register_effect(name, op_names);
+                }
+
                 _ => {
                     // Other declarations (traits, instances, etc.)
-                    // TODO: handle properly
                 }
             },
 
@@ -863,10 +901,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr, in_tail: bool) -> CoreExpr {
         } => {
             let arg_vars: Vec<VarId> = args.iter().map(|a| lower_to_var(ctx, a)).collect();
 
+            let (effect_id, op_id) = ctx.lookup_operation(effect, operation)
+                .unwrap_or_else(|| {
+                    ctx.error(format!("Unknown effect operation: {}.{}", effect, operation));
+                    (0, 0)
+                });
+
             CoreExpr::Perform {
-                effect: 0, // TODO: effect ID lookup
+                effect: effect_id,
                 effect_name: Some(effect.clone()),
-                op: 0, // TODO: op ID lookup
+                op: op_id,
                 op_name: Some(operation.clone()),
                 args: arg_vars,
             }
@@ -887,7 +931,28 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr, in_tail: bool) -> CoreExpr {
             }
             let return_body = lower_expr(ctx, &return_clause.body, in_tail);
 
-            // Lower operation handlers
+            // Find the effect by looking up the first handler's operation
+            // All handlers should be for the same effect
+            let (effect_id, effect_name) = if let Some(first_handler) = handlers.first() {
+                // Search all effects for one containing this operation
+                let op_name = &first_handler.operation;
+                let mut found = None;
+                for (eff_name, (eff_id, ops)) in &ctx.effects {
+                    if ops.contains(op_name) {
+                        found = Some((*eff_id, eff_name.clone()));
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| {
+                    ctx.error(format!("Unknown effect for operation: {}", op_name));
+                    (0, "unknown".to_string())
+                })
+            } else {
+                ctx.error("Handle with no operation handlers".to_string());
+                (0, "unknown".to_string())
+            };
+
+            // Lower operation handlers with proper operation IDs
             let ops: Vec<OpHandler> = handlers
                 .iter()
                 .map(|h| {
@@ -908,8 +973,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr, in_tail: bool) -> CoreExpr {
                     let handler_body = lower_expr(ctx, &h.body, in_tail);
                     ctx.pop_scope();
 
+                    // Look up operation ID within the effect
+                    let op_id = ctx.lookup_operation(&effect_name, &h.operation)
+                        .map(|(_, id)| id)
+                        .unwrap_or_else(|| {
+                            ctx.error(format!("Unknown operation {} in effect {}", h.operation, effect_name));
+                            0
+                        });
+
                     OpHandler {
-                        op: 0,
+                        op: op_id,
                         op_name: Some(h.operation.clone()),
                         params: param_vars,
                         cont: cont_var,
@@ -923,8 +996,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr, in_tail: bool) -> CoreExpr {
             CoreExpr::Handle {
                 body: Box::new(body_lowered),
                 handler: Handler {
-                    effect: 0,
-                    effect_name: None,
+                    effect: effect_id,
+                    effect_name: Some(effect_name),
                     return_var: ret_var,
                     return_body: Box::new(return_body),
                     ops,
@@ -1342,6 +1415,16 @@ pub fn lower_tprogram(program: &TProgram) -> Result<CoreProgram, Vec<String>> {
             params: type_decl.params.clone(),
             variants,
         });
+    }
+
+    // Register effect declarations
+    for effect_decl in &program.effect_decls {
+        let op_names: Vec<String> = effect_decl
+            .operations
+            .iter()
+            .map(|op| op.name.clone())
+            .collect();
+        ctx.register_effect(&effect_decl.name, op_names);
     }
 
     // Register built-in functions in environment
@@ -2129,10 +2212,16 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
                 arg_lowered.push((var, lower_texpr(ctx, arg, false)));
             }
 
+            let (effect_id, op_id) = ctx.lookup_operation(effect, op)
+                .unwrap_or_else(|| {
+                    ctx.error(format!("Unknown effect operation: {}.{}", effect, op));
+                    (0, 0)
+                });
+
             let perform = CoreExpr::Perform {
-                effect: 0, // Effect ID (placeholder)
+                effect: effect_id,
                 effect_name: Some(effect.clone()),
-                op: 0, // Op ID (placeholder)
+                op: op_id,
                 op_name: Some(op.clone()),
                 args: arg_lowered.iter().map(|(v, _)| *v).collect(),
             };
@@ -2153,6 +2242,32 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
         TExprKind::Handle { body, handler } => {
             let body_lowered = lower_texpr(ctx, body, false);
 
+            // Look up effect ID - try explicit effect name first, then infer from operations
+            let (effect_id, effect_name) = if let Some(eff_name) = &handler.effect {
+                let eff_id = ctx.lookup_effect(eff_name).unwrap_or_else(|| {
+                    ctx.error(format!("Unknown effect: {}", eff_name));
+                    0
+                });
+                (eff_id, eff_name.clone())
+            } else if let Some(first_op) = handler.op_clauses.first() {
+                // Infer effect from first operation
+                let op_name = &first_op.op_name;
+                let mut found = None;
+                for (eff_name, (eff_id, ops)) in &ctx.effects {
+                    if ops.contains(op_name) {
+                        found = Some((*eff_id, eff_name.clone()));
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| {
+                    ctx.error(format!("Unknown effect for operation: {}", op_name));
+                    (0, "unknown".to_string())
+                })
+            } else {
+                ctx.error("Handle with no effect and no operations".to_string());
+                (0, "unknown".to_string())
+            };
+
             let ops: Vec<OpHandler> = handler
                 .op_clauses
                 .iter()
@@ -2171,8 +2286,16 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
                     let handler_body = lower_texpr(ctx, &clause.body, true);
                     ctx.pop_scope();
 
+                    // Look up operation ID within the effect
+                    let op_id = ctx.lookup_operation(&effect_name, &clause.op_name)
+                        .map(|(_, id)| id)
+                        .unwrap_or_else(|| {
+                            ctx.error(format!("Unknown operation {} in effect {}", clause.op_name, effect_name));
+                            0
+                        });
+
                     OpHandler {
-                        op: 0, // Op ID placeholder
+                        op: op_id,
                         op_name: Some(clause.op_name.clone()),
                         params: param_vars,
                         cont: cont_var,
@@ -2197,8 +2320,8 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
             CoreExpr::Handle {
                 body: Box::new(body_lowered),
                 handler: Handler {
-                    effect: 0, // Effect ID placeholder
-                    effect_name: handler.effect.clone(),
+                    effect: effect_id,
+                    effect_name: Some(effect_name),
                     return_var,
                     return_body,
                     ops,

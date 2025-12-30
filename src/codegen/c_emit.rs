@@ -1371,19 +1371,24 @@ impl CEmitter {
                 args,
                 cont,
             } => {
-                // CPS function call: apply all args, then the continuation
-                // func(args..., k) in CPS style
+                // CPS function call: func(args..., k)
+                // For known top-level functions, emit direct call
+                // For closures, use gn_apply chain
                 let func_name = self.get_var_name(*func);
                 let cont_name = self.get_var_name(*cont);
+                let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
 
-                if args.is_empty() {
-                    // Just apply continuation to function (nullary CPS call)
-                    format!("gn_apply({}, {})", func_name, cont_name)
+                if func_name.starts_with("fn_") {
+                    // Known top-level function - emit direct call with cont as last arg
+                    let all_args = std::iter::once("NULL".to_string())
+                        .chain(args_str.into_iter())
+                        .chain(std::iter::once(cont_name))
+                        .collect::<Vec<_>>();
+                    format!("{}({})", func_name, all_args.join(", "))
                 } else {
-                    // Apply args then continuation
+                    // Closure - use gn_apply for each arg including continuation
                     let mut result = func_name;
-                    for arg in args {
-                        let arg_name = self.get_var_name(*arg);
+                    for arg_name in args_str {
                         result = format!("gn_apply({}, {})", result, arg_name);
                     }
                     format!("gn_apply({}, {})", result, cont_name)
@@ -1392,9 +1397,10 @@ impl CEmitter {
 
             CoreExpr::Resume { cont, value } => {
                 // Resume a captured continuation with a value
+                // Use gn_resume_multi for multi-shot continuation support
                 let cont_name = self.get_var_name(*cont);
                 let value_name = self.get_var_name(*value);
-                format!("gn_resume({}, {})", cont_name, value_name)
+                format!("gn_resume_multi({}, {})", cont_name, value_name)
             }
 
             CoreExpr::CaptureK {
@@ -1480,26 +1486,22 @@ impl CEmitter {
                 )
                 .unwrap();
 
-                // Emit body
+                // Emit body as a return statement (CPS: body transfers control, doesn't return)
+                // The handler is popped by gn_perform when an effect is performed
                 let body_result = self.emit_expr(body);
 
-                // Pop handler after body (for normal return path)
+                // For CPS, we need to return the body result directly since it transfers control
+                // The handler cleanup happens in the continuation/return handler, not here
                 writeln!(
                     self.function_defs,
-                    "{}gn_pop_handler();",
-                    self.pad()
-                )
-                .unwrap();
-
-                writeln!(
-                    self.function_defs,
-                    "{}gn_free_handler({});",
+                    "{}return {};",
                     self.pad(),
-                    handler_var
+                    body_result
                 )
                 .unwrap();
 
-                body_result
+                // This is unreachable in CPS, but we return a placeholder
+                "GN_UNIT /* handler body returned */".to_string()
             }
         }
     }
@@ -2043,11 +2045,14 @@ fn find_free_vars(expr: &CoreExpr, bound: &HashSet<VarId>, free: &mut HashSet<Va
                 free.insert(*value);
             }
         }
-        CoreExpr::CaptureK { args, .. } => {
+        CoreExpr::CaptureK { args, cont, .. } => {
             for a in args {
                 if !bound.contains(a) {
                     free.insert(*a);
                 }
+            }
+            if !bound.contains(cont) {
+                free.insert(*cont);
             }
         }
         CoreExpr::WithHandler { handler, body, outer_cont, .. } => {

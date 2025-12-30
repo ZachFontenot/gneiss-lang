@@ -916,21 +916,39 @@ gn_value gn_resume_multi(gn_value cont_val, gn_value value) {
      * Resume a continuation with a value (multi-shot version).
      * The continuation is NOT consumed - can be resumed multiple times.
      *
-     * This is useful for effects like choice/backtracking.
+     * This handles two cases:
+     * 1. TAG_CONTINUATION: A captured effect continuation with handler context
+     * 2. TAG_CLOSURE: A regular CPS continuation (just apply it)
+     *
+     * This dual handling is needed because CPS-transformed code uses Resume
+     * for both effect continuations (from perform) and regular CPS continuations.
      */
-    gn_continuation* cont = (gn_continuation*)cont_val;
+    gn_object* obj;
 
-    if (cont->tag != TAG_CONTINUATION) {
-        gn_panic("resume_multi: not a continuation");
+    if (GN_IS_INT(cont_val)) {
+        gn_panic("resume_multi: expected continuation or closure, got int");
     }
 
-    /* For deep handler semantics, restore the captured handler */
-    if (cont->captured_handler) {
-        gn_push_handler(cont->captured_handler);
-    }
+    obj = GN_OBJ(cont_val);
 
-    /* Apply the resume function to the value (don't free - multi-shot) */
-    return gn_apply(cont->resume_fn, value);
+    if (obj->tag == TAG_CONTINUATION) {
+        /* Effect continuation - restore handler context and resume */
+        gn_continuation* cont;
+        cont = (gn_continuation*)cont_val;
+
+        if (cont->captured_handler) {
+            gn_push_handler(cont->captured_handler);
+        }
+
+        return gn_apply(cont->resume_fn, value);
+    } else if (obj->tag == TAG_CLOSURE) {
+        /* Regular CPS continuation - just apply */
+        return gn_apply(cont_val, value);
+    } else {
+        fprintf(stderr, "resume_multi: expected continuation or closure, got tag %u\n", obj->tag);
+        gn_panic("resume_multi: not a continuation or closure");
+        return GN_UNIT; /* unreachable */
+    }
 }
 
 /* ============================================================================

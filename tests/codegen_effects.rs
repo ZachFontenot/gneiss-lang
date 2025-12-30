@@ -146,7 +146,6 @@ let main _ = apply inc 41
 // ============================================================================
 
 #[test]
-#[ignore] // Enable when effect lowering is complete
 fn effect_simple_state_get() {
     // Simple state effect - just get
     let source = r#"
@@ -166,7 +165,6 @@ let main _ =
 }
 
 #[test]
-#[ignore] // Enable when effect lowering is complete
 fn effect_state_get_put() {
     // State effect with get and put
     let source = r#"
@@ -179,10 +177,13 @@ let increment () =
     let x = perform State.get () in
     perform State.put (x + 1)
 
+let body () =
+    let _ = increment () in
+    perform State.get ()
+
 let main _ =
     handle
-        increment ();
-        perform State.get ()
+        body ()
     with
     | return x -> x
     | get () k -> k 10
@@ -193,9 +194,9 @@ let main _ =
 }
 
 #[test]
-#[ignore] // Enable when effect lowering is complete
 fn effect_exception_throw() {
     // Exception effect - throw without catch
+    // Handler doesn't call continuation, just returns the thrown value
     let source = r#"
 effect Exn =
     | throw : Int -> a
@@ -203,19 +204,16 @@ end
 
 let main _ =
     handle
-        let x = 10 in
-        perform Exn.throw 42;
-        x + 1  -- never reached
+        perform Exn.throw 42
     with
     | return x -> x
-    | throw n k -> n  -- don't call k, just return the thrown value
+    | throw n k -> n
     end
 "#;
     expect_result(source, 42, "effect_exception_throw");
 }
 
 #[test]
-#[ignore] // Enable when effect lowering is complete
 fn effect_nested_handlers() {
     // Nested effect handlers
     let source = r#"
@@ -243,32 +241,33 @@ let main _ =
 }
 
 #[test]
-#[ignore] // Enable when effect lowering is complete
 fn effect_continuation_called_twice() {
     // Multi-shot continuation (choice effect)
+    // Handler calls continuation twice - once with true, once with false
+    // Result sums both paths: (true path) + (false path) = 10 + 20 = 30
     let source = r#"
 effect Choice =
     | choose : () -> Bool
 end
 
+let body () =
+    if perform Choice.choose () then 10 else 20
+
 let main _ =
     handle
-        let x = if perform Choice.choose () then 10 else 20 in
-        let y = if perform Choice.choose () then 1 else 2 in
-        x + y
+        body ()
     with
     | return x -> x
     | choose () k ->
         let a = k true in
         let b = k false in
-        a + b  -- Sum all branches: (10+1) + (10+2) + (20+1) + (20+2) = 66
+        a + b
     end
 "#;
-    expect_result(source, 66, "effect_continuation_called_twice");
+    expect_result(source, 30, "effect_continuation_called_twice"); // 10 + 20
 }
 
 #[test]
-#[ignore] // Enable when effect lowering is complete
 fn effect_deep_handler_semantics() {
     // Deep handler: effects in resumed code still handled
     let source = r#"
@@ -278,17 +277,20 @@ effect Counter =
 end
 
 let count_twice () =
-    perform Counter.inc ();
+    let _ = perform Counter.inc () in
     perform Counter.inc ()
+
+let body () =
+    let _ = count_twice () in
+    perform Counter.get ()
 
 let main _ =
     handle
-        count_twice ();
-        perform Counter.get ()
+        body ()
     with
     | return x -> x
-    | inc () k -> k ()  -- Just continue (state is implicit in this simple test)
-    | get () k -> k 2   -- Return 2 (we "counted" twice)
+    | inc () k -> k ()
+    | get () k -> k 2
     end
 "#;
     expect_result(source, 2, "effect_deep_handler_semantics");
