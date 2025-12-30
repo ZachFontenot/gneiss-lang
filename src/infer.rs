@@ -284,6 +284,8 @@ pub struct Inferencer {
     errors: Vec<TypeError>,
     /// Expression types keyed by span (start, end) for elaboration
     expr_types: HashMap<(usize, usize), Type>,
+    /// Accumulated warnings
+    warnings: Vec<crate::errors::Warning>,
 }
 
 impl Inferencer {
@@ -303,7 +305,13 @@ impl Inferencer {
             used_module_aliases: HashSet::new(),
             errors: Vec::new(),
             expr_types: HashMap::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    /// Get accumulated warnings
+    pub fn warnings(&self) -> &[crate::errors::Warning] {
+        &self.warnings
     }
 
     /// Register a module's type environment for qualified access
@@ -4036,12 +4044,34 @@ impl Inferencer {
             }
         }
 
+        // Collect names that have explicit val declarations
+        // (to distinguish from previous let bindings when checking for declared types)
+        let val_declared_names: HashSet<String> = program
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let Item::Decl(Decl::Val { name, .. }) = item {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Fourth pass: infer types for let declarations and top-level expressions
         for item in &program.items {
             match item {
                 Item::Decl(Decl::Let {
                     name, params, body, ..
                 }) => {
+                    // Warn if this shadows a library function (but not a val declaration)
+                    if !val_declared_names.contains(name) && env.get(name).is_some() {
+                        self.warnings.push(crate::errors::Warning::ShadowingLibraryFunction {
+                            name: name.clone(),
+                            span: body.span.clone(),
+                        });
+                    }
+
                     // Use closure to allow early return on errors while continuing the loop
                     let result: Result<Scheme, TypeError> = (|| {
                         self.level += 1;
@@ -4052,23 +4082,29 @@ impl Inferencer {
                         let mut local_env = env.clone();
                         let mut param_types = Vec::new();
 
-                        // Check if there's a val declaration - if so, use its parameter types
-                        let declared_param_types: Option<Vec<Type>> = env.get(name).map(|scheme| {
-                            let ty = self.instantiate(scheme);
-                            // Extract parameter types from the arrow chain
-                            let mut types = Vec::new();
-                            let mut current = ty;
-                            for _ in 0..params.len() {
-                                match current {
-                                    Type::Arrow { arg, ret, .. } => {
-                                        types.push((*arg).clone());
-                                        current = (*ret).clone();
+                        // Check if there's an EXPLICIT val declaration - if so, use its parameter types
+                        // (Don't use types from previous let bindings - that would prevent shadowing)
+                        let declared_param_types: Option<Vec<Type>> = if val_declared_names.contains(name) {
+                            env.get(name).map(|scheme| {
+                                let ty = self.instantiate(scheme);
+                                // Extract parameter types from the arrow chain
+                                let mut types = Vec::new();
+                                let mut current = ty;
+                                for _ in 0..params.len() {
+                                    match current {
+                                        Type::Arrow { arg, ret, .. } => {
+                                            types.push((*arg).clone());
+                                            current = (*ret).clone();
+                                        }
+                                        _ => break,
                                     }
-                                    _ => break,
                                 }
-                            }
-                            types
-                        });
+                                types
+                            })
+                        } else {
+                            // No val declaration - use fresh type variables (allows shadowing)
+                            None
+                        };
 
                         for (i, param) in params.iter().enumerate() {
                             let param_ty = if let Some(ref decl_types) = declared_param_types {
@@ -4125,12 +4161,15 @@ impl Inferencer {
                         // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
                         // For now, predicates are collected but not checked
 
-                        // Check against declared type signature if one exists (from `val` declaration)
+                        // Check against declared type signature if one exists (from EXPLICIT `val` declaration)
                         // IMPORTANT: Do this BEFORE decrementing level, so instantiated types
                         // are at level > 0 and can be generalized properly
-                        if let Some(declared_scheme) = env.get(name) {
-                            let declared_ty = self.instantiate(declared_scheme);
-                            self.unify_at(&func_ty, &declared_ty, &body.span)?;
+                        // Only check if there's an explicit val declaration, not a previous let binding
+                        if val_declared_names.contains(name) {
+                            if let Some(declared_scheme) = env.get(name) {
+                                let declared_ty = self.instantiate(declared_scheme);
+                                self.unify_at(&func_ty, &declared_ty, &body.span)?;
+                            }
                         }
 
                         self.level -= 1;

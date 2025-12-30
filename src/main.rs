@@ -135,6 +135,11 @@ fn run_file(path: &str, program_args: Vec<String>) {
             }
         };
 
+        // Print any warnings
+        for warning in inferencer.warnings() {
+            eprint!("{}", warning.format(&source_map, Some(&module_path_str), &colors));
+        }
+
         // Collect exported types and register this module's exports
         let exported_types = collect_exported_types(&type_env, &module.exports);
         inferencer.register_module(module.name.clone(), exported_types);
@@ -305,6 +310,11 @@ fn compile_file(args: &[String]) {
             std::process::exit(1);
         }
     };
+
+    // Print any warnings
+    for warning in inferencer.warnings() {
+        eprint!("{}", warning.format(&source_map, Some(&source_path), &colors));
+    }
 
     // Elaborate combined program to TAST
     let tprogram = match elaborate(&program, &inferencer, &type_env) {

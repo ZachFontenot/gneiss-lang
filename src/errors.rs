@@ -18,6 +18,8 @@ use crate::ast::{SourceMap, Span};
 pub enum Warning {
     /// User-defined operator shadows a built-in operator
     ShadowingBuiltinOperator { op: String, span: Span },
+    /// User-defined function shadows a prelude/library function
+    ShadowingLibraryFunction { name: String, span: Span },
 }
 
 impl Warning {
@@ -57,6 +59,48 @@ impl Warning {
                      its default behavior in this scope.",
                     colors.bold(),
                     op,
+                    colors.reset()
+                ));
+                out.push('\n');
+                out.push('\n');
+                out.push_str(&format_snippet(source_map, span, colors));
+                out.push('\n');
+
+                out
+            }
+            Warning::ShadowingLibraryFunction { name, span } => {
+                // Skip if span is out of bounds (e.g., from a different file like prelude)
+                let source_len = source_map.source().len();
+                if span.start >= source_len || span.end > source_len {
+                    return String::new();
+                }
+
+                let mut out = String::new();
+
+                out.push_str(&format!(
+                    "{}-- WARNING {}{}",
+                    colors.yellow(),
+                    "-".repeat(55),
+                    colors.reset()
+                ));
+                out.push('\n');
+                out.push('\n');
+
+                let pos = source_map.position(span.start);
+                let file = filename.unwrap_or("<input>");
+                out.push_str(&format!(
+                    "{}{}:{}{}\n\n",
+                    colors.bold(),
+                    file,
+                    pos,
+                    colors.reset()
+                ));
+
+                out.push_str(&format!(
+                    "You are shadowing the library function `{}{}{}`.\n\
+                     The original function will no longer be accessible in this scope.",
+                    colors.bold(),
+                    name,
                     colors.reset()
                 ));
                 out.push('\n');
