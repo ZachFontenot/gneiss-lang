@@ -772,3 +772,236 @@ gn_value gn_apply(gn_value closure, gn_value arg) {
 gn_value gn_apply2(gn_value closure, gn_value arg1, gn_value arg2) {
     return gn_apply(gn_apply(closure, arg1), arg2);
 }
+
+/* ============================================================================
+ * Algebraic Effects Runtime Support
+ * ============================================================================ */
+
+/* Tag for continuation objects */
+#define TAG_CONTINUATION 0xFFFF0004
+
+/* Global handler stack (thread-local for future concurrency support) */
+static gn_handler* gn_handler_stack = NULL;
+
+/* ============================================================================
+ * Handler Stack Operations
+ * ============================================================================ */
+
+void gn_push_handler(gn_handler* h) {
+    h->parent = gn_handler_stack;
+    gn_handler_stack = h;
+}
+
+gn_handler* gn_pop_handler(void) {
+    gn_handler* h = gn_handler_stack;
+    if (h) {
+        gn_handler_stack = h->parent;
+    }
+    return h;
+}
+
+gn_handler* gn_find_handler(gn_effect_id effect) {
+    gn_handler* h = gn_handler_stack;
+    while (h != NULL) {
+        if (h->effect == effect) {
+            return h;
+        }
+        h = h->parent;
+    }
+    return NULL;
+}
+
+gn_handler* gn_current_handler(void) {
+    return gn_handler_stack;
+}
+
+/* ============================================================================
+ * Handler Creation
+ * ============================================================================ */
+
+gn_handler* gn_create_handler(gn_effect_id effect, gn_value return_fn,
+                              uint32_t n_ops, gn_value* op_fns,
+                              gn_value outer_cont) {
+    gn_handler* h = (gn_handler*)malloc(sizeof(gn_handler));
+    if (!h) {
+        gn_panic("out of memory creating handler");
+    }
+
+    h->effect = effect;
+    h->return_fn = return_fn;
+    h->n_ops = n_ops;
+    h->outer_cont = outer_cont;
+    h->parent = NULL;
+
+    /* Copy operation handlers */
+    if (n_ops > 0) {
+        h->op_fns = (gn_value*)malloc(n_ops * sizeof(gn_value));
+        if (!h->op_fns) {
+            free(h);
+            gn_panic("out of memory creating handler ops");
+        }
+        for (uint32_t i = 0; i < n_ops; i++) {
+            h->op_fns[i] = op_fns[i];
+        }
+    } else {
+        h->op_fns = NULL;
+    }
+
+    return h;
+}
+
+void gn_free_handler(gn_handler* h) {
+    if (h) {
+        if (h->op_fns) {
+            free(h->op_fns);
+        }
+        free(h);
+    }
+}
+
+/* ============================================================================
+ * Continuation Operations
+ * ============================================================================ */
+
+gn_value gn_make_continuation(gn_value resume_fn, gn_handler* captured) {
+    /*
+     * Create a continuation object that captures:
+     * - The resume function (a closure that continues the computation)
+     * - The handler that was active (for deep handler semantics)
+     */
+    gn_continuation* cont = (gn_continuation*)malloc(sizeof(gn_continuation));
+    if (!cont) {
+        gn_panic("out of memory creating continuation");
+    }
+
+    cont->rc = 1;
+    cont->tag = TAG_CONTINUATION;
+    cont->resume_fn = resume_fn;
+    cont->captured_handler = captured;
+
+    return (gn_value)cont;
+}
+
+gn_value gn_resume(gn_value cont_val, gn_value value) {
+    /*
+     * Resume a continuation with a value.
+     * This is the single-shot version - the continuation is consumed.
+     *
+     * For deep handler semantics, we restore the captured handler
+     * before resuming, so effects in the resumed code are still handled.
+     */
+    gn_continuation* cont = (gn_continuation*)cont_val;
+
+    if (cont->tag != TAG_CONTINUATION) {
+        gn_panic("resume: not a continuation");
+    }
+
+    /* For deep handler semantics, restore the captured handler */
+    if (cont->captured_handler) {
+        gn_push_handler(cont->captured_handler);
+    }
+
+    /* Get the resume function and value */
+    gn_value resume_fn = cont->resume_fn;
+
+    /* Free the continuation (single-shot) */
+    free(cont);
+
+    /* Apply the resume function to the value */
+    return gn_apply(resume_fn, value);
+}
+
+gn_value gn_resume_multi(gn_value cont_val, gn_value value) {
+    /*
+     * Resume a continuation with a value (multi-shot version).
+     * The continuation is NOT consumed - can be resumed multiple times.
+     *
+     * This is useful for effects like choice/backtracking.
+     */
+    gn_continuation* cont = (gn_continuation*)cont_val;
+
+    if (cont->tag != TAG_CONTINUATION) {
+        gn_panic("resume_multi: not a continuation");
+    }
+
+    /* For deep handler semantics, restore the captured handler */
+    if (cont->captured_handler) {
+        gn_push_handler(cont->captured_handler);
+    }
+
+    /* Apply the resume function to the value (don't free - multi-shot) */
+    return gn_apply(cont->resume_fn, value);
+}
+
+/* ============================================================================
+ * Effect Perform Operation
+ * ============================================================================ */
+
+gn_value gn_perform(gn_effect_id effect, gn_op_id op,
+                    uint32_t n_args, gn_value* args,
+                    gn_value current_k) {
+    /*
+     * Perform an effect operation:
+     * 1. Find the handler for this effect
+     * 2. Capture the current continuation
+     * 3. Pop handlers up to and including the matched handler
+     * 4. Call the operation handler with (args..., k, outer_k)
+     *
+     * The operation handler decides what to do:
+     * - Call k(value) to resume with a value
+     * - Call k multiple times for non-determinism
+     * - Not call k at all to abort/short-circuit
+     */
+
+    /* Find handler for this effect */
+    gn_handler* h = gn_find_handler(effect);
+    if (!h) {
+        fprintf(stderr, "unhandled effect: %u\n", effect);
+        gn_panic("unhandled effect");
+    }
+
+    /* Validate operation ID */
+    if (op >= h->n_ops) {
+        fprintf(stderr, "invalid operation %u for effect %u (max %u)\n",
+                op, effect, h->n_ops);
+        gn_panic("invalid effect operation");
+    }
+
+    /*
+     * Capture continuation: current_k is already the CPS continuation.
+     * For deep handler semantics, we include h in the captured continuation
+     * so that when resumed, effects are still handled.
+     */
+    gn_value captured_k = gn_make_continuation(current_k, h);
+
+    /* Pop handlers up to and including h */
+    while (gn_handler_stack != NULL && gn_handler_stack != h->parent) {
+        gn_pop_handler();
+    }
+
+    /* Get the operation handler and outer continuation */
+    gn_value op_handler = h->op_fns[op];
+    gn_value outer_k = h->outer_cont;
+
+    /*
+     * Call the operation handler.
+     * Handler signature: (args..., captured_k, outer_k) -> result
+     *
+     * We need to apply args, then captured_k, then outer_k.
+     * For simplicity, we'll build a call depending on n_args.
+     */
+    gn_value result = op_handler;
+
+    /* Apply operation arguments */
+    for (uint32_t i = 0; i < n_args; i++) {
+        result = gn_apply(result, args[i]);
+    }
+
+    /* Apply captured continuation */
+    result = gn_apply(result, captured_k);
+
+    /* Apply outer continuation */
+    result = gn_apply(result, outer_k);
+
+    return result;
+}

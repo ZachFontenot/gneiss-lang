@@ -168,4 +168,55 @@ gn_value gn_make_closure(void* fn, uint32_t arity, uint32_t n_captures, gn_value
 gn_value gn_apply(gn_value closure, gn_value arg);
 gn_value gn_apply2(gn_value closure, gn_value arg1, gn_value arg2);
 
+/* ============================================================================
+ * Algebraic Effects Runtime Support
+ *
+ * Implements handler stack and continuation capture/resume for algebraic effects.
+ * Uses CPS-style where effectful functions take continuation parameters.
+ * ============================================================================ */
+
+/* Effect and operation identifiers */
+typedef uint32_t gn_effect_id;
+typedef uint32_t gn_op_id;
+
+/* Handler structure - installed when entering a 'handle' block */
+typedef struct gn_handler {
+    gn_effect_id effect;           /* Which effect this handles */
+    gn_value return_fn;            /* Return handler: (value, outer_k) -> result */
+    uint32_t n_ops;                /* Number of operations */
+    gn_value* op_fns;              /* Array of op handlers: (args..., k, outer_k) -> result */
+    gn_value outer_cont;           /* Continuation to resume when handler completes */
+    struct gn_handler* parent;     /* Parent handler (for nested handlers) */
+} gn_handler;
+
+/* Continuation structure - captured when performing an effect */
+typedef struct gn_continuation {
+    uint32_t rc;                   /* Reference count */
+    uint32_t tag;                  /* TAG_CONTINUATION */
+    gn_handler* captured_handler;  /* Handler that was active (for deep semantics) */
+    gn_value resume_fn;            /* Function to call to resume: (value) -> result */
+} gn_continuation;
+
+/* Handler stack operations */
+void gn_push_handler(gn_handler* h);
+gn_handler* gn_pop_handler(void);
+gn_handler* gn_find_handler(gn_effect_id effect);
+gn_handler* gn_current_handler(void);
+
+/* Continuation operations */
+gn_value gn_make_continuation(gn_value resume_fn, gn_handler* captured);
+gn_value gn_resume(gn_value cont, gn_value value);
+gn_value gn_resume_multi(gn_value cont, gn_value value);  /* Multi-shot resume (copies cont) */
+
+/* Effect operations */
+gn_value gn_perform(gn_effect_id effect, gn_op_id op,
+                    uint32_t n_args, gn_value* args,
+                    gn_value current_k);
+
+/* Handler creation helper */
+gn_handler* gn_create_handler(gn_effect_id effect, gn_value return_fn,
+                              uint32_t n_ops, gn_value* op_fns,
+                              gn_value outer_cont);
+void gn_free_handler(gn_handler* h);
+
 #endif /* GN_RUNTIME_H */

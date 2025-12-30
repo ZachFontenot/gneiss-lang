@@ -1364,63 +1364,139 @@ impl CEmitter {
                 format!("GN_FIELD({}, {})", tuple_name, index)
             }
 
-            // CPS-transformed expressions - placeholder implementations
-            // These will be properly implemented when the CPS runtime is ready
+            // CPS-transformed expressions
+            // These emit calls to the algebraic effects runtime
             CoreExpr::AppCont {
                 func,
                 args,
                 cont,
             } => {
+                // CPS function call: apply all args, then the continuation
+                // func(args..., k) in CPS style
                 let func_name = self.get_var_name(*func);
-                let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
                 let cont_name = self.get_var_name(*cont);
-                format!(
-                    "gn_apply_cont({}, {}, {})",
-                    func_name,
-                    args_str.join(", "),
-                    cont_name
-                )
+
+                if args.is_empty() {
+                    // Just apply continuation to function (nullary CPS call)
+                    format!("gn_apply({}, {})", func_name, cont_name)
+                } else {
+                    // Apply args then continuation
+                    let mut result = func_name;
+                    for arg in args {
+                        let arg_name = self.get_var_name(*arg);
+                        result = format!("gn_apply({}, {})", result, arg_name);
+                    }
+                    format!("gn_apply({}, {})", result, cont_name)
+                }
             }
 
             CoreExpr::Resume { cont, value } => {
+                // Resume a captured continuation with a value
                 let cont_name = self.get_var_name(*cont);
                 let value_name = self.get_var_name(*value);
                 format!("gn_resume({}, {})", cont_name, value_name)
             }
 
             CoreExpr::CaptureK {
-                effect_name,
-                op_name,
+                effect,
+                op,
                 args,
                 ..
             } => {
-                let effect = effect_name.as_deref().unwrap_or("?");
-                let op = op_name.as_deref().unwrap_or("?");
+                // Perform an effect operation - this is emitted inside effectful code
+                // The current continuation is implicitly passed via the CPS transform
+                // For now, we need the continuation variable from context
+                // This is a simplified emit - full implementation needs continuation tracking
                 let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
-                // Placeholder - will call gn_perform when runtime is ready
-                format!(
-                    "gn_perform(/* {} */, /* {} */, (gn_value[]){{{}}})",
-                    effect,
-                    op,
-                    args_str.join(", ")
-                )
+                let n_args = args.len();
+
+                if args.is_empty() {
+                    format!(
+                        "gn_perform({}, {}, 0, NULL, GN_UNIT /* k placeholder */)",
+                        effect, op
+                    )
+                } else {
+                    format!(
+                        "gn_perform({}, {}, {}, (gn_value[]){{{}}}, GN_UNIT /* k placeholder */)",
+                        effect, op, n_args, args_str.join(", ")
+                    )
+                }
             }
 
             CoreExpr::WithHandler {
-                effect_name,
-                handler: _,
+                effect,
+                handler,
                 body,
                 outer_cont,
                 ..
             } => {
-                let effect = effect_name.as_deref().unwrap_or("?");
+                // Set up effect handler and run body
+                // This emits inline handler setup code
                 let outer_k = self.get_var_name(*outer_cont);
-                // Placeholder - will set up handler when runtime is ready
-                let body_result = self.emit_expr(body);
-                format!(
-                    "/* with_handler {} -> {} */ {}",
-                    effect, outer_k, body_result
+                let return_handler = self.get_var_name(handler.return_handler);
+
+                // Create handler setup
+                let handler_var = self.fresh_var(Some("handler"));
+                let n_ops = handler.op_handlers.len();
+
+                // Emit op handlers array
+                let op_handlers_str: Vec<String> = handler
+                    .op_handlers
+                    .iter()
+                    .map(|op| self.get_var_name(op.handler_fn))
+                    .collect();
+
+                // Write handler creation
+                writeln!(
+                    self.function_defs,
+                    "{}gn_value {}_ops[] = {{{}}};",
+                    self.pad(),
+                    handler_var,
+                    op_handlers_str.join(", ")
                 )
+                .unwrap();
+
+                writeln!(
+                    self.function_defs,
+                    "{}gn_handler* {} = gn_create_handler({}, {}, {}, {}_ops, {});",
+                    self.pad(),
+                    handler_var,
+                    effect,
+                    return_handler,
+                    n_ops,
+                    handler_var,
+                    outer_k
+                )
+                .unwrap();
+
+                writeln!(
+                    self.function_defs,
+                    "{}gn_push_handler({});",
+                    self.pad(),
+                    handler_var
+                )
+                .unwrap();
+
+                // Emit body
+                let body_result = self.emit_expr(body);
+
+                // Pop handler after body (for normal return path)
+                writeln!(
+                    self.function_defs,
+                    "{}gn_pop_handler();",
+                    self.pad()
+                )
+                .unwrap();
+
+                writeln!(
+                    self.function_defs,
+                    "{}gn_free_handler({});",
+                    self.pad(),
+                    handler_var
+                )
+                .unwrap();
+
+                body_result
             }
         }
     }
