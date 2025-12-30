@@ -185,6 +185,37 @@ impl CEmitter {
                 refs.insert(*tuple);
             }
             CoreExpr::Error(_) => {}
+
+            // CPS-transformed expressions
+            CoreExpr::AppCont { func, args, cont } => {
+                refs.insert(*func);
+                for arg in args {
+                    refs.insert(*arg);
+                }
+                refs.insert(*cont);
+            }
+            CoreExpr::Resume { cont, value } => {
+                refs.insert(*cont);
+                refs.insert(*value);
+            }
+            CoreExpr::CaptureK { args, .. } => {
+                for arg in args {
+                    refs.insert(*arg);
+                }
+            }
+            CoreExpr::WithHandler {
+                handler,
+                body,
+                outer_cont,
+                ..
+            } => {
+                refs.insert(handler.return_handler);
+                for op in &handler.op_handlers {
+                    refs.insert(op.handler_fn);
+                }
+                Self::collect_refs_expr(body, refs);
+                refs.insert(*outer_cont);
+            }
         }
     }
 
@@ -332,6 +363,14 @@ impl CEmitter {
                 CoreExpr::Perform { .. } => {}
                 CoreExpr::ExternCall { .. } => {}
                 CoreExpr::DictCall { .. } => {}
+
+                // CPS-transformed expressions
+                CoreExpr::AppCont { .. } => {}
+                CoreExpr::Resume { .. } => {}
+                CoreExpr::CaptureK { .. } => {}
+                CoreExpr::WithHandler { body, .. } => {
+                    collect_from_expr(body, dicts);
+                }
             }
         }
 
@@ -1324,6 +1363,65 @@ impl CEmitter {
                 let tuple_name = self.get_var_name(*tuple);
                 format!("GN_FIELD({}, {})", tuple_name, index)
             }
+
+            // CPS-transformed expressions - placeholder implementations
+            // These will be properly implemented when the CPS runtime is ready
+            CoreExpr::AppCont {
+                func,
+                args,
+                cont,
+            } => {
+                let func_name = self.get_var_name(*func);
+                let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
+                let cont_name = self.get_var_name(*cont);
+                format!(
+                    "gn_apply_cont({}, {}, {})",
+                    func_name,
+                    args_str.join(", "),
+                    cont_name
+                )
+            }
+
+            CoreExpr::Resume { cont, value } => {
+                let cont_name = self.get_var_name(*cont);
+                let value_name = self.get_var_name(*value);
+                format!("gn_resume({}, {})", cont_name, value_name)
+            }
+
+            CoreExpr::CaptureK {
+                effect_name,
+                op_name,
+                args,
+                ..
+            } => {
+                let effect = effect_name.as_deref().unwrap_or("?");
+                let op = op_name.as_deref().unwrap_or("?");
+                let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
+                // Placeholder - will call gn_perform when runtime is ready
+                format!(
+                    "gn_perform(/* {} */, /* {} */, (gn_value[]){{{}}})",
+                    effect,
+                    op,
+                    args_str.join(", ")
+                )
+            }
+
+            CoreExpr::WithHandler {
+                effect_name,
+                handler: _,
+                body,
+                outer_cont,
+                ..
+            } => {
+                let effect = effect_name.as_deref().unwrap_or("?");
+                let outer_k = self.get_var_name(*outer_cont);
+                // Placeholder - will set up handler when runtime is ready
+                let body_result = self.emit_expr(body);
+                format!(
+                    "/* with_handler {} -> {} */ {}",
+                    effect, outer_k, body_result
+                )
+            }
         }
     }
 
@@ -1841,6 +1939,50 @@ fn find_free_vars(expr: &CoreExpr, bound: &HashSet<VarId>, free: &mut HashSet<Va
         CoreExpr::Proj { tuple, .. } => {
             if !bound.contains(tuple) {
                 free.insert(*tuple);
+            }
+        }
+
+        // CPS-transformed expressions
+        CoreExpr::AppCont { func, args, cont } => {
+            if !bound.contains(func) {
+                free.insert(*func);
+            }
+            for a in args {
+                if !bound.contains(a) {
+                    free.insert(*a);
+                }
+            }
+            if !bound.contains(cont) {
+                free.insert(*cont);
+            }
+        }
+        CoreExpr::Resume { cont, value } => {
+            if !bound.contains(cont) {
+                free.insert(*cont);
+            }
+            if !bound.contains(value) {
+                free.insert(*value);
+            }
+        }
+        CoreExpr::CaptureK { args, .. } => {
+            for a in args {
+                if !bound.contains(a) {
+                    free.insert(*a);
+                }
+            }
+        }
+        CoreExpr::WithHandler { handler, body, outer_cont, .. } => {
+            if !bound.contains(&handler.return_handler) {
+                free.insert(handler.return_handler);
+            }
+            for op in &handler.op_handlers {
+                if !bound.contains(&op.handler_fn) {
+                    free.insert(op.handler_fn);
+                }
+            }
+            find_free_vars(body, bound, free);
+            if !bound.contains(outer_cont) {
+                free.insert(*outer_cont);
             }
         }
     }

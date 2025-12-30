@@ -9,6 +9,8 @@
 
 pub mod c_emit;
 pub mod core_ir;
+pub mod cps_transform;
+pub mod effect_analysis;
 pub mod lower;
 pub mod lower_mono;
 // pub mod perceus;  // TODO
@@ -16,5 +18,7 @@ pub mod lower_mono;
 
 pub use c_emit::*;
 pub use core_ir::*;
+pub use cps_transform::*;
+pub use effect_analysis::*;
 pub use lower::*;
 pub use lower_mono::lower_mono;

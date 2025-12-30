@@ -129,6 +129,51 @@ pub enum CoreExpr {
         handler: Handler,
     },
 
+    // =========================================================================
+    // CPS-transformed expressions (produced by CPS transformation pass)
+    // =========================================================================
+
+    /// CPS-style function application
+    /// The continuation receives the result of the function call
+    AppCont {
+        func: VarId,
+        args: Vec<VarId>,
+        /// Continuation to receive the result
+        cont: VarId,
+    },
+
+    /// Resume a continuation with a value
+    /// Used when returning from effectful code back to the continuation
+    Resume {
+        cont: VarId,
+        value: VarId,
+    },
+
+    /// Capture continuation and invoke handler (CPS version of Perform)
+    /// Captures the current continuation up to the nearest matching handler
+    /// and invokes the handler's operation clause
+    CaptureK {
+        effect: EffectId,
+        effect_name: Option<String>,
+        op: OpId,
+        op_name: Option<String>,
+        args: Vec<VarId>,
+    },
+
+    /// Install handler and run body (CPS version of Handle)
+    /// Sets up a handler context, runs the body with that handler active,
+    /// and handles effects/return
+    WithHandler {
+        effect: EffectId,
+        effect_name: Option<String>,
+        /// CPS handler with closures for return and operations
+        handler: CPSHandler,
+        /// The body to run with the handler active
+        body: Box<CoreExpr>,
+        /// Outer continuation to resume when handler completes
+        outer_cont: VarId,
+    },
+
     /// Sequence expressions (for effects/IO)
     Seq {
         first: Box<CoreExpr>,
@@ -252,6 +297,27 @@ pub struct OpHandler {
     pub cont: VarId,
     /// Handler body
     pub body: CoreExpr,
+}
+
+/// CPS-transformed effect handler
+/// Contains closures for return clause and each operation
+#[derive(Debug, Clone)]
+pub struct CPSHandler {
+    /// Return handler closure: (value, outer_k) -> result
+    /// Called when the handled body returns normally
+    pub return_handler: VarId,
+    /// Operation handlers: each is (args..., k, outer_k) -> result
+    pub op_handlers: Vec<CPSOpHandler>,
+}
+
+/// CPS-transformed operation handler
+#[derive(Debug, Clone)]
+pub struct CPSOpHandler {
+    pub op: OpId,
+    pub op_name: Option<String>,
+    /// Handler closure VarId
+    /// This closure takes: (op_args..., captured_k, outer_k) -> result
+    pub handler_fn: VarId,
 }
 
 // ============================================================================
@@ -653,6 +719,43 @@ impl CoreExpr {
                 format!("{};\n{}{}", first.pretty(indent), pad, second.pretty(indent))
             }
             CoreExpr::Error(msg) => format!("ERROR: {}", msg),
+
+            // CPS-transformed expressions
+            CoreExpr::AppCont { func, args, cont } => {
+                let args_str: Vec<_> = args.iter().map(|a| format!("{}", a)).collect();
+                format!("APPCONT {}({}) -> {}", func, args_str.join(", "), cont)
+            }
+            CoreExpr::Resume { cont, value } => {
+                format!("RESUME {} with {}", cont, value)
+            }
+            CoreExpr::CaptureK {
+                effect_name,
+                op_name,
+                args,
+                ..
+            } => {
+                let effect = effect_name.as_deref().unwrap_or("?");
+                let op = op_name.as_deref().unwrap_or("?");
+                let args_str: Vec<_> = args.iter().map(|a| format!("{}", a)).collect();
+                format!("CAPTURE_K {}.{}({})", effect, op, args_str.join(", "))
+            }
+            CoreExpr::WithHandler {
+                effect_name,
+                body,
+                outer_cont,
+                ..
+            } => {
+                let effect = effect_name.as_deref().unwrap_or("?");
+                format!(
+                    "WITH_HANDLER {} do\n{}  {}\n{}end -> {}",
+                    effect,
+                    pad,
+                    body.pretty(indent + 1),
+                    pad,
+                    outer_cont
+                )
+            }
+
             _ => format!("{:?}", self),
         }
     }
