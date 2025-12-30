@@ -43,11 +43,11 @@ pub struct CPSTransformer {
 }
 
 impl CPSTransformer {
-    /// Create a new CPS transformer
-    pub fn new(effect_info: EffectInfo) -> Self {
+    /// Create a new CPS transformer with VarGen starting after existing program IDs
+    pub fn new(effect_info: EffectInfo, max_var_id: u32) -> Self {
         Self {
             effect_info,
-            var_gen: VarGen::new(),
+            var_gen: VarGen::starting_after(max_var_id),
             cont_stack: Vec::new(),
             transformed_funs: HashSet::new(),
             new_functions: Vec::new(),
@@ -62,10 +62,18 @@ impl CPSTransformer {
         let mut functions = Vec::new();
 
         for fun in program.functions {
+            let is_main = fun.name == "main";
             if self.effect_info.is_effectful(fun.var_id) {
-                // Transform effectful function to CPS
-                let cps_fun = self.transform_fun_cps(fun);
-                functions.push(cps_fun);
+                if is_main {
+                    // Main is special: don't add continuation parameter
+                    // Instead, set up identity continuation internally
+                    let cps_fun = self.transform_main_cps(fun);
+                    functions.push(cps_fun);
+                } else {
+                    // Transform effectful function to CPS
+                    let cps_fun = self.transform_fun_cps(fun);
+                    functions.push(cps_fun);
+                }
             } else {
                 // Keep pure function as-is
                 functions.push(fun);
@@ -139,6 +147,46 @@ impl CPSTransformer {
         }
     }
 
+    /// Transform main function - special handling for entry point
+    /// Main doesn't get an external continuation parameter; instead we
+    /// create an identity continuation internally that just returns the value.
+    fn transform_main_cps(&mut self, fun: FunDef) -> FunDef {
+        // Create identity continuation: fun result -> result
+        let final_k_var = self.fresh_var();
+        let result_var = self.fresh_var();
+        let identity_cont = CoreExpr::Lam {
+            params: vec![result_var],
+            param_hints: vec![Some("result".to_string())],
+            body: Box::new(CoreExpr::Return(result_var)),
+        };
+
+        // Push the continuation for body transformation
+        self.cont_stack.push(final_k_var);
+        let cps_body = self.transform_expr(&fun.body);
+        self.cont_stack.pop();
+
+        self.transformed_funs.insert(fun.var_id);
+
+        // Wrap body in let that binds the identity continuation
+        let wrapped_body = CoreExpr::LetExpr {
+            name: final_k_var,
+            name_hint: Some("final_k".to_string()),
+            value: Box::new(identity_cont),
+            body: Box::new(cps_body),
+        };
+
+        FunDef {
+            name: fun.name,
+            var_id: fun.var_id,
+            params: fun.params,         // Keep original params (no k added)
+            param_hints: fun.param_hints,
+            param_types: fun.param_types,
+            return_type: fun.return_type,
+            body: wrapped_body,
+            is_tail_recursive: fun.is_tail_recursive,
+        }
+    }
+
     /// Transform an expression in CPS style
     fn transform_expr(&mut self, expr: &CoreExpr) -> CoreExpr {
         match expr {
@@ -202,9 +250,8 @@ impl CPSTransformer {
                     let result_var = *name;
 
                     // Build continuation: fun result -> [[body]]_k
-                    self.cont_stack.push(self.current_cont());
+                    // Keep current continuation for the body (it's in tail position of the whole let)
                     let transformed_body = self.transform_expr(body);
-                    self.cont_stack.pop();
 
                     let cont_lam = CoreExpr::Lam {
                         params: vec![result_var],
@@ -224,17 +271,18 @@ impl CPSTransformer {
                         body: Box::new(transformed_value),
                     }
                 } else {
-                    // Pure RHS: keep as let
+                    // Pure RHS: keep as let, but don't transform RHS with continuation
+                    // (only body is in tail position)
                     CoreExpr::LetExpr {
                         name: *name,
                         name_hint: name_hint.clone(),
-                        value: Box::new(self.transform_expr(value)),
+                        value: Box::new(self.transform_non_tail(value)),
                         body: Box::new(self.transform_expr(body)),
                     }
                 }
             }
 
-            // Perform → CaptureK
+            // Perform → CaptureK (capture current continuation)
             CoreExpr::Perform { effect, effect_name, op, op_name, args } => {
                 CoreExpr::CaptureK {
                     effect: *effect,
@@ -242,21 +290,52 @@ impl CPSTransformer {
                     op: *op,
                     op_name: op_name.clone(),
                     args: args.clone(),
+                    cont: self.current_cont(),
                 }
             }
 
-            // Handle → WithHandler
+            // Handle → WithHandler with proper closure generation
             CoreExpr::Handle { body, handler } => {
                 let outer_k = self.current_cont();
+                let outer_k_param = self.fresh_var();
 
-                // Create return handler closure
-                let return_handler = self.fresh_var();
-                // TODO: properly build return handler closure
+                // Create return handler closure: fun (value, outer_k) -> return_body
+                let return_handler_var = self.fresh_var();
+                let return_closure = CoreExpr::Lam {
+                    params: vec![handler.return_var, outer_k_param],
+                    param_hints: vec![Some("ret_val".to_string()), Some("outer_k".to_string())],
+                    // The return body is already in the handler, just use it directly
+                    body: handler.return_body.clone(),
+                };
 
                 // Create operation handler closures
+                let mut op_closure_bindings: Vec<(VarId, CoreExpr)> = Vec::new();
                 let op_handlers: Vec<CPSOpHandler> = handler.ops.iter().map(|op| {
                     let handler_fn = self.fresh_var();
-                    // TODO: properly build operation handler closure
+                    let op_outer_k = self.fresh_var();
+
+                    // Build params: [op_params..., k, outer_k]
+                    let mut params = op.params.clone();
+                    params.push(op.cont);
+                    params.push(op_outer_k);
+
+                    let mut param_hints: Vec<Option<String>> = op.params.iter()
+                        .map(|_| Some("arg".to_string()))
+                        .collect();
+                    param_hints.push(Some("k".to_string()));
+                    param_hints.push(Some("outer_k".to_string()));
+
+                    // Transform handler body: convert k(arg) calls to Resume { cont: k, value: arg }
+                    let transformed_body = self.transform_handler_body(&op.body, op.cont);
+
+                    let handler_closure = CoreExpr::Lam {
+                        params,
+                        param_hints,
+                        body: Box::new(transformed_body),
+                    };
+
+                    op_closure_bindings.push((handler_fn, handler_closure));
+
                     CPSOpHandler {
                         op: op.op,
                         op_name: op.op_name.clone(),
@@ -265,19 +344,62 @@ impl CPSTransformer {
                 }).collect();
 
                 let cps_handler = CPSHandler {
-                    return_handler,
+                    return_handler: return_handler_var,
                     op_handlers,
                 };
 
-                // Transform body
-                let transformed_body = self.transform_expr(body);
+                // Create body continuation that calls return handler on normal return
+                // body_cont: fun result -> return_handler(result, outer_k)
+                let body_cont = self.fresh_var();
+                let body_result_var = self.fresh_var();
+                let body_cont_closure = CoreExpr::Lam {
+                    params: vec![body_result_var],
+                    param_hints: vec![Some("body_result".to_string())],
+                    body: Box::new(CoreExpr::App {
+                        func: return_handler_var,
+                        args: vec![body_result_var, outer_k],
+                    }),
+                };
 
-                CoreExpr::WithHandler {
+                // Transform body with body_cont as current continuation
+                self.cont_stack.push(body_cont);
+                let transformed_body = self.transform_expr(body);
+                self.cont_stack.pop();
+
+                // Build the final expression: let closures, then WithHandler
+                let with_handler = CoreExpr::WithHandler {
                     effect: handler.effect,
                     effect_name: handler.effect_name.clone(),
                     handler: cps_handler,
                     body: Box::new(transformed_body),
                     outer_cont: outer_k,
+                };
+
+                // Wrap in body_cont binding
+                let with_body_cont = CoreExpr::LetExpr {
+                    name: body_cont,
+                    name_hint: Some("body_k".to_string()),
+                    value: Box::new(body_cont_closure),
+                    body: Box::new(with_handler),
+                };
+
+                // Wrap in closure bindings (in reverse order)
+                let mut result = with_body_cont;
+                for (var, closure) in op_closure_bindings.into_iter().rev() {
+                    result = CoreExpr::LetExpr {
+                        name: var,
+                        name_hint: Some("op_handler".to_string()),
+                        value: Box::new(closure),
+                        body: Box::new(result),
+                    };
+                }
+
+                // Add return handler binding
+                CoreExpr::LetExpr {
+                    name: return_handler_var,
+                    name_hint: Some("return_handler".to_string()),
+                    value: Box::new(return_closure),
+                    body: Box::new(result),
                 }
             }
 
@@ -618,6 +740,135 @@ impl CPSTransformer {
         }
     }
 
+    /// Transform handler body: convert App { func: cont_var, args: [value] } to Resume
+    /// This is necessary because in handler bodies, calling the continuation k should
+    /// use gn_resume, not gn_apply.
+    fn transform_handler_body(&self, expr: &CoreExpr, cont_var: VarId) -> CoreExpr {
+        match expr {
+            // App where func is the continuation: convert to Resume
+            CoreExpr::App { func, args } if *func == cont_var && args.len() == 1 => {
+                CoreExpr::Resume {
+                    cont: cont_var,
+                    value: args[0],
+                }
+            }
+
+            // TailApp where func is the continuation: convert to Resume
+            CoreExpr::TailApp { func, args } if *func == cont_var && args.len() == 1 => {
+                CoreExpr::Resume {
+                    cont: cont_var,
+                    value: args[0],
+                }
+            }
+
+            // Recurse into other expressions
+            CoreExpr::Let { name, name_hint, value, body } => {
+                CoreExpr::Let {
+                    name: *name,
+                    name_hint: name_hint.clone(),
+                    value: value.clone(),
+                    body: Box::new(self.transform_handler_body(body, cont_var)),
+                }
+            }
+
+            CoreExpr::LetExpr { name, name_hint, value, body } => {
+                CoreExpr::LetExpr {
+                    name: *name,
+                    name_hint: name_hint.clone(),
+                    value: Box::new(self.transform_handler_body(value, cont_var)),
+                    body: Box::new(self.transform_handler_body(body, cont_var)),
+                }
+            }
+
+            CoreExpr::If { cond, then_branch, else_branch } => {
+                CoreExpr::If {
+                    cond: *cond,
+                    then_branch: Box::new(self.transform_handler_body(then_branch, cont_var)),
+                    else_branch: Box::new(self.transform_handler_body(else_branch, cont_var)),
+                }
+            }
+
+            CoreExpr::Lam { params, param_hints, body } => {
+                // Don't recurse into lambdas that shadow cont_var
+                if params.contains(&cont_var) {
+                    expr.clone()
+                } else {
+                    CoreExpr::Lam {
+                        params: params.clone(),
+                        param_hints: param_hints.clone(),
+                        body: Box::new(self.transform_handler_body(body, cont_var)),
+                    }
+                }
+            }
+
+            // Pass through everything else
+            _ => expr.clone(),
+        }
+    }
+
+    /// Transform an expression in non-tail position (no continuation applied)
+    /// This is used for RHS of let bindings, arguments, etc.
+    fn transform_non_tail(&mut self, expr: &CoreExpr) -> CoreExpr {
+        match expr {
+            // Literals and vars in non-tail position stay as-is
+            CoreExpr::Var(v) => CoreExpr::Var(*v),
+            CoreExpr::Lit(lit) => CoreExpr::Lit(lit.clone()),
+            CoreExpr::Return(v) => CoreExpr::Return(*v),
+
+            // Let: transform body but RHS is non-tail
+            CoreExpr::Let { name, name_hint, value, body } => {
+                CoreExpr::Let {
+                    name: *name,
+                    name_hint: name_hint.clone(),
+                    value: value.clone(),
+                    body: Box::new(self.transform_non_tail(body)),
+                }
+            }
+
+            CoreExpr::LetExpr { name, name_hint, value, body } => {
+                CoreExpr::LetExpr {
+                    name: *name,
+                    name_hint: name_hint.clone(),
+                    value: Box::new(self.transform_non_tail(value)),
+                    body: Box::new(self.transform_non_tail(body)),
+                }
+            }
+
+            // For effectful expressions, we still need full CPS treatment
+            CoreExpr::Perform { .. } | CoreExpr::Handle { .. } => {
+                // These need proper CPS transformation
+                self.transform_expr(expr)
+            }
+
+            // Other expressions: just recurse
+            CoreExpr::Lam { params, param_hints, body } => {
+                CoreExpr::Lam {
+                    params: params.clone(),
+                    param_hints: param_hints.clone(),
+                    body: Box::new(self.transform_non_tail(body)),
+                }
+            }
+
+            CoreExpr::App { func, args } => {
+                CoreExpr::App {
+                    func: *func,
+                    args: args.clone(),
+                }
+            }
+
+            CoreExpr::If { cond, then_branch, else_branch } => {
+                CoreExpr::If {
+                    cond: *cond,
+                    then_branch: Box::new(self.transform_non_tail(then_branch)),
+                    else_branch: Box::new(self.transform_non_tail(else_branch)),
+                }
+            }
+
+            // Pass through everything else
+            _ => expr.clone(),
+        }
+    }
+
     /// Generate a fresh variable
     fn fresh_var(&mut self) -> VarId {
         self.var_gen.fresh()
@@ -629,6 +880,172 @@ impl CPSTransformer {
     }
 }
 
+/// Find the maximum VarId used in a program
+fn find_max_var_id(program: &CoreProgram) -> u32 {
+    let mut max_id = 0u32;
+
+    fn max_in_expr(expr: &CoreExpr, max: &mut u32) {
+        match expr {
+            CoreExpr::Var(v) => *max = (*max).max(v.0),
+            CoreExpr::Lit(_) => {}
+            CoreExpr::Let { name, body, .. } => {
+                *max = (*max).max(name.0);
+                max_in_expr(body, max);
+            }
+            CoreExpr::LetExpr { name, value, body, .. } => {
+                *max = (*max).max(name.0);
+                max_in_expr(value, max);
+                max_in_expr(body, max);
+            }
+            CoreExpr::LetRec { name, params, func_body, body, .. } => {
+                *max = (*max).max(name.0);
+                for p in params {
+                    *max = (*max).max(p.0);
+                }
+                max_in_expr(func_body, max);
+                max_in_expr(body, max);
+            }
+            CoreExpr::LetRecMutual { bindings, body } => {
+                for b in bindings {
+                    *max = (*max).max(b.name.0);
+                    for p in &b.params {
+                        *max = (*max).max(p.0);
+                    }
+                    max_in_expr(&b.body, max);
+                }
+                max_in_expr(body, max);
+            }
+            CoreExpr::App { func, args, .. } => {
+                *max = (*max).max(func.0);
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+            }
+            CoreExpr::Lam { params, body, .. } => {
+                for p in params {
+                    *max = (*max).max(p.0);
+                }
+                max_in_expr(body, max);
+            }
+            CoreExpr::If { cond, then_branch, else_branch, .. } => {
+                *max = (*max).max(cond.0);
+                max_in_expr(then_branch, max);
+                max_in_expr(else_branch, max);
+            }
+            CoreExpr::Case { scrutinee, alts, default, .. } => {
+                *max = (*max).max(scrutinee.0);
+                for alt in alts {
+                    for b in &alt.binders {
+                        *max = (*max).max(b.0);
+                    }
+                    max_in_expr(&alt.body, max);
+                }
+                if let Some(d) = default {
+                    max_in_expr(d, max);
+                }
+            }
+            CoreExpr::Perform { args, .. } => {
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+            }
+            CoreExpr::Handle { body, handler } => {
+                max_in_expr(body, max);
+                *max = (*max).max(handler.return_var.0);
+                max_in_expr(&handler.return_body, max);
+                for op in &handler.ops {
+                    for p in &op.params {
+                        *max = (*max).max(p.0);
+                    }
+                    *max = (*max).max(op.cont.0);
+                    max_in_expr(&op.body, max);
+                }
+            }
+            CoreExpr::Return(v) => *max = (*max).max(v.0),
+            CoreExpr::AppCont { func, args, cont } => {
+                *max = (*max).max(func.0);
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+                *max = (*max).max(cont.0);
+            }
+            CoreExpr::Resume { cont, value } => {
+                *max = (*max).max(cont.0);
+                *max = (*max).max(value.0);
+            }
+            CoreExpr::CaptureK { args, cont, .. } => {
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+                *max = (*max).max(cont.0);
+            }
+            CoreExpr::WithHandler { handler, body, outer_cont, .. } => {
+                *max = (*max).max(handler.return_handler.0);
+                for op in &handler.op_handlers {
+                    *max = (*max).max(op.handler_fn.0);
+                }
+                max_in_expr(body, max);
+                *max = (*max).max(outer_cont.0);
+            }
+            CoreExpr::Alloc { fields, .. } => {
+                for f in fields {
+                    *max = (*max).max(f.0);
+                }
+            }
+            CoreExpr::ExternCall { args, .. } => {
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+            }
+            CoreExpr::DictCall { dict, args, .. } => {
+                *max = (*max).max(dict.0);
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+            }
+            CoreExpr::DictValue { .. } => {
+                // DictValue doesn't contain VarIds
+            }
+            CoreExpr::DictRef(v) => *max = (*max).max(v.0),
+            CoreExpr::Proj { tuple, .. } => *max = (*max).max(tuple.0),
+            CoreExpr::TailApp { func, args } => {
+                *max = (*max).max(func.0);
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+            }
+            CoreExpr::Seq { first, second } => {
+                max_in_expr(first, max);
+                max_in_expr(second, max);
+            }
+            CoreExpr::PrimOp { args, .. } => {
+                for a in args {
+                    *max = (*max).max(a.0);
+                }
+            }
+            CoreExpr::Error(_) => {}
+        }
+    }
+
+    for fun in &program.functions {
+        max_id = max_id.max(fun.var_id.0);
+        for p in &fun.params {
+            max_id = max_id.max(p.0);
+        }
+        max_in_expr(&fun.body, &mut max_id);
+    }
+
+    for (var_id, _) in &program.builtins {
+        max_id = max_id.max(var_id.0);
+    }
+
+    if let Some(main) = &program.main {
+        max_in_expr(main, &mut max_id);
+    }
+
+    max_id
+}
+
 /// Transform a program using CPS for effects
 pub fn cps_transform(program: CoreProgram) -> CoreProgram {
     let effect_info = analyze_effects(&program);
@@ -638,7 +1055,8 @@ pub fn cps_transform(program: CoreProgram) -> CoreProgram {
         return program;
     }
 
-    let transformer = CPSTransformer::new(effect_info);
+    let max_var_id = find_max_var_id(&program);
+    let transformer = CPSTransformer::new(effect_info, max_var_id);
     transformer.transform(program)
 }
 

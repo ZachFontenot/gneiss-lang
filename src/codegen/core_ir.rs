@@ -158,6 +158,8 @@ pub enum CoreExpr {
         op: OpId,
         op_name: Option<String>,
         args: Vec<VarId>,
+        /// Current continuation to capture
+        cont: VarId,
     },
 
     /// Install handler and run body (CPS version of Handle)
@@ -549,6 +551,11 @@ pub struct VarGen {
 impl VarGen {
     pub fn new() -> Self {
         VarGen { next: 0 }
+    }
+
+    /// Create a VarGen starting after a given ID
+    pub fn starting_after(max_id: u32) -> Self {
+        VarGen { next: max_id + 1 }
     }
 
     pub fn fresh(&mut self) -> VarId {

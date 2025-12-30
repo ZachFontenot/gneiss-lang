@@ -921,7 +921,7 @@ impl CEmitter {
                     match arity {
                         1 => format!("gn_make_closure1((void*){func_name})"),
                         2 => format!("gn_make_closure2((void*){func_name})"),
-                        _ => format!("GN_UNIT /* lambda with arity {} not yet supported */", arity),
+                        _ => format!("gn_make_closure((void*){}, {}, 0, NULL)", func_name, arity),
                     }
                 } else {
                     // Lambda with captures - create closure with captured environment
@@ -1011,7 +1011,7 @@ impl CEmitter {
                         match arity {
                             1 => format!("gn_make_closure1((void*){func_name})"),
                             2 => format!("gn_make_closure2((void*){func_name})"),
-                            _ => format!("GN_UNIT /* lambda with arity {} not yet supported */", arity),
+                            _ => format!("gn_make_closure((void*){}, {}, 0, NULL)", func_name, arity),
                         }
                     } else {
                         // Build captures array inline
@@ -1401,26 +1401,29 @@ impl CEmitter {
                 effect,
                 op,
                 args,
+                cont,
                 ..
             } => {
-                // Perform an effect operation - this is emitted inside effectful code
-                // The current continuation is implicitly passed via the CPS transform
-                // For now, we need the continuation variable from context
-                // This is a simplified emit - full implementation needs continuation tracking
+                // Perform an effect operation with captured continuation
+                // This transfers control, so we emit it as a return statement
                 let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
+                let cont_name = self.get_var_name(*cont);
                 let n_args = args.len();
 
-                if args.is_empty() {
-                    format!(
-                        "gn_perform({}, {}, 0, NULL, GN_UNIT /* k placeholder */)",
-                        effect, op
-                    )
+                let perform_call = if args.is_empty() {
+                    format!("gn_perform({}, {}, 0, NULL, {})", effect, op, cont_name)
                 } else {
                     format!(
-                        "gn_perform({}, {}, {}, (gn_value[]){{{}}}, GN_UNIT /* k placeholder */)",
-                        effect, op, n_args, args_str.join(", ")
+                        "gn_perform({}, {}, {}, (gn_value[]){{{}}}, {})",
+                        effect, op, n_args, args_str.join(", "), cont_name
                     )
-                }
+                };
+
+                // Emit as return statement since this transfers control
+                writeln!(self.function_defs, "{}return {};", self.pad(), perform_call).unwrap();
+
+                // Return a dummy value - this code is unreachable after the return
+                "GN_UNIT /* unreachable */".to_string()
             }
 
             CoreExpr::WithHandler {
@@ -2143,8 +2146,11 @@ fn escape_string(s: &str) -> String {
 
 /// Compile a CoreProgram to C source code
 pub fn emit_c(program: &CoreProgram) -> String {
+    // Apply CPS transformation for effects if needed
+    let transformed = super::cps_transform::cps_transform(program.clone());
+
     let mut emitter = CEmitter::new();
-    emitter.emit_program(program)
+    emitter.emit_program(&transformed)
 }
 
 // ============================================================================
