@@ -130,6 +130,7 @@ let rec foldr f acc xs =
 let null xs = match xs with | [] -> true | _ -> false end
 let rec length xs = match xs with | [] -> 0 | _ :: rest -> 1 + length rest end
 let rec reverse xs = foldl (fun acc x -> x :: acc) [] xs
+let rec list_append xs ys = match xs with | [] -> ys | x :: rest -> x :: list_append rest ys end
 let head xs = match xs with | [] -> None | x :: _ -> Some x end
 let tail xs = match xs with | [] -> None | _ :: rest -> Some rest end
 

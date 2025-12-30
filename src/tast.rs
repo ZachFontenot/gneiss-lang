@@ -125,7 +125,7 @@ pub enum TExprKind {
         second: Rc<TExpr>,
     },
 
-    /// Monomorphized trait method call
+    /// Monomorphized trait method call (concrete type known)
     /// This is the key for codegen - we know the concrete instance
     MethodCall {
         /// The trait name (e.g., "Show")
@@ -136,6 +136,37 @@ pub enum TExprKind {
         instance_ty: Type,
         /// Arguments to the method
         args: Vec<TExpr>,
+    },
+
+    /// Dictionary-based method call (type is polymorphic/unknown)
+    /// Used when the instance type is a type variable from an enclosing scope
+    DictMethodCall {
+        /// The trait name (e.g., "Show")
+        trait_name: Ident,
+        /// The method name (e.g., "show")
+        method: Ident,
+        /// The type variable ID this dictionary is for
+        type_var: u32,
+        /// Arguments to the method
+        args: Vec<TExpr>,
+    },
+
+    /// Concrete dictionary value (for passing to polymorphic functions)
+    /// Used when calling a function with class constraints at a known type
+    DictValue {
+        /// The trait (e.g., "Show")
+        trait_name: Ident,
+        /// The concrete type (e.g., Int, List Int)
+        instance_ty: Type,
+    },
+
+    /// Reference to a dictionary parameter (from enclosing polymorphic function)
+    /// Used when forwarding dictionaries through polymorphic calls
+    DictRef {
+        /// The trait name
+        trait_name: Ident,
+        /// The type variable ID
+        type_var: u32,
     },
 
     /// Effect operation: perform Effect.op args
@@ -413,4 +444,9 @@ pub struct TBinding {
     pub params: Vec<TPattern>,
     pub body: TExpr,
     pub ty: Type,
+    /// Dictionary parameters required by this function.
+    /// Each entry is (trait_name, type_var_id) - e.g., ("Show", 0) means
+    /// this function needs a Show dictionary for its first type parameter.
+    /// Empty if the function has no class constraints.
+    pub dict_params: Vec<(String, u32)>,
 }

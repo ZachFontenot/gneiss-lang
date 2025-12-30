@@ -1395,6 +1395,17 @@ pub fn lower_tprogram(program: &TProgram) -> Result<CoreProgram, Vec<String>> {
             let mut param_hints = Vec::new();
             let mut param_types = Vec::new();
 
+            // First, bind dictionary parameters if this function has class constraints
+            for (trait_name, type_var_id) in &binding.dict_params {
+                let dict_var = ctx.fresh();
+                let dict_name = format!("${}_{}", trait_name, type_var_id);
+                ctx.bind(&dict_name, dict_var);
+                param_vars.push(dict_var);
+                param_hints.push(dict_name);
+                param_types.push(CoreType::Dict); // Dictionary type
+            }
+
+            // Then bind regular parameters
             for param in &binding.params {
                 let (pvar, hint) = lower_tpattern_bind(&mut ctx, param);
                 param_vars.push(pvar);
@@ -2063,6 +2074,54 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
             }
         }
 
+        TExprKind::DictMethodCall {
+            trait_name,
+            method,
+            type_var,
+            args,
+        } => {
+            // Dictionary-based method call for polymorphic types
+            // Look up the dictionary parameter and call the method through it
+            let dict_name = format!("${}_{}", trait_name, type_var);
+
+            if let Some(dict_var) = ctx.lookup(&dict_name) {
+                // Lower arguments
+                let mut arg_lowered: Vec<(VarId, CoreExpr)> = vec![];
+                for arg in args {
+                    let var = ctx.fresh();
+                    arg_lowered.push((var, lower_texpr(ctx, arg, false)));
+                }
+
+                let arg_vars: Vec<VarId> = arg_lowered.iter().map(|(v, _)| *v).collect();
+
+                // Call through dictionary: dict.method(args)
+                // For now, emit as DictCall in Core IR
+                let dict_call = CoreExpr::DictCall {
+                    dict: dict_var,
+                    method: method.clone(),
+                    args: arg_vars,
+                };
+
+                let mut result = dict_call;
+                for (var, expr) in arg_lowered.into_iter().rev() {
+                    result = CoreExpr::LetExpr {
+                        name: var,
+                        name_hint: Some("arg".into()),
+                        value: Box::new(expr),
+                        body: Box::new(result),
+                    };
+                }
+
+                result
+            } else {
+                ctx.error(format!(
+                    "Dictionary {} not found for method {}",
+                    dict_name, method
+                ));
+                CoreExpr::Error(format!("dict not found: {}", dict_name))
+            }
+        }
+
         TExprKind::Perform { effect, op, args } => {
             let mut arg_lowered: Vec<(VarId, CoreExpr)> = vec![];
             for arg in args {
@@ -2144,6 +2203,31 @@ fn lower_texpr(ctx: &mut LowerCtx, expr: &TExpr, in_tail: bool) -> CoreExpr {
                     return_body,
                     ops,
                 },
+            }
+        }
+
+        TExprKind::DictValue {
+            trait_name,
+            instance_ty,
+        } => {
+            // Create a dictionary value for a concrete instance
+            CoreExpr::DictValue {
+                trait_name: trait_name.clone(),
+                instance_ty: mangle_type(instance_ty),
+            }
+        }
+
+        TExprKind::DictRef { trait_name, type_var } => {
+            // Reference to a dictionary parameter from enclosing scope
+            let dict_name = format!("${}_{}", trait_name, type_var);
+            if let Some(dict_var) = ctx.lookup(&dict_name) {
+                CoreExpr::DictRef(dict_var)
+            } else {
+                ctx.error(format!(
+                    "Dictionary parameter not found: {} for type var {}",
+                    trait_name, type_var
+                ));
+                CoreExpr::Error(format!("missing dict: {}", dict_name))
             }
         }
 

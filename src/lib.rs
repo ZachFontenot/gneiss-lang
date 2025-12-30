@@ -10,6 +10,7 @@ pub mod infer;
 pub mod io_reactor;
 pub mod lexer;
 pub mod module;
+pub mod mono;
 pub mod operators;
 pub mod parser;
 pub mod prelude;

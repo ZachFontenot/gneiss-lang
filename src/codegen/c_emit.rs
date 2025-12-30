@@ -169,6 +169,21 @@ impl CEmitter {
                     refs.insert(*arg);
                 }
             }
+            CoreExpr::DictCall { dict, args, .. } => {
+                refs.insert(*dict);
+                for arg in args {
+                    refs.insert(*arg);
+                }
+            }
+            CoreExpr::DictValue { .. } => {
+                // No variable references - it's a static dictionary lookup
+            }
+            CoreExpr::DictRef(var) => {
+                refs.insert(*var);
+            }
+            CoreExpr::Proj { tuple, .. } => {
+                refs.insert(*tuple);
+            }
             CoreExpr::Error(_) => {}
         }
     }
@@ -253,6 +268,84 @@ impl CEmitter {
         reachable
     }
 
+    /// Collect all dictionaries (trait, type) pairs used in the program
+    fn collect_dictionaries(
+        main: &Option<CoreExpr>,
+        functions: &[FunDef],
+    ) -> HashSet<(String, String)> {
+        let mut dicts = HashSet::new();
+
+        fn collect_from_expr(expr: &CoreExpr, dicts: &mut HashSet<(String, String)>) {
+            match expr {
+                CoreExpr::DictValue { trait_name, instance_ty } => {
+                    dicts.insert((trait_name.clone(), instance_ty.clone()));
+                }
+                CoreExpr::Var(_) | CoreExpr::Lit(_) | CoreExpr::Error(_) | CoreExpr::DictRef(_) | CoreExpr::Proj { .. } => {}
+                CoreExpr::Let { body, .. } => {
+                    // value is Atom, no DictValue in atoms
+                    collect_from_expr(body, dicts);
+                }
+                CoreExpr::LetExpr { value, body, .. } => {
+                    collect_from_expr(value, dicts);
+                    collect_from_expr(body, dicts);
+                }
+                CoreExpr::App { .. } | CoreExpr::TailApp { .. } => {}
+                CoreExpr::Alloc { .. } => {}
+                CoreExpr::Case { alts, default, .. } => {
+                    for alt in alts {
+                        collect_from_expr(&alt.body, dicts);
+                    }
+                    if let Some(def) = default {
+                        collect_from_expr(def, dicts);
+                    }
+                }
+                CoreExpr::If { then_branch, else_branch, .. } => {
+                    collect_from_expr(then_branch, dicts);
+                    collect_from_expr(else_branch, dicts);
+                }
+                CoreExpr::Lam { body, .. } => {
+                    collect_from_expr(body, dicts);
+                }
+                CoreExpr::LetRec { func_body, body, .. } => {
+                    collect_from_expr(func_body, dicts);
+                    collect_from_expr(body, dicts);
+                }
+                CoreExpr::LetRecMutual { bindings, body } => {
+                    for binding in bindings {
+                        collect_from_expr(&binding.body, dicts);
+                    }
+                    collect_from_expr(body, dicts);
+                }
+                CoreExpr::PrimOp { .. } => {}
+                CoreExpr::Seq { first, second } => {
+                    collect_from_expr(first, dicts);
+                    collect_from_expr(second, dicts);
+                }
+                CoreExpr::Return(_) => {}
+                CoreExpr::Handle { body, handler } => {
+                    collect_from_expr(body, dicts);
+                    collect_from_expr(&handler.return_body, dicts);
+                    for op in &handler.ops {
+                        collect_from_expr(&op.body, dicts);
+                    }
+                }
+                CoreExpr::Perform { .. } => {}
+                CoreExpr::ExternCall { .. } => {}
+                CoreExpr::DictCall { .. } => {}
+            }
+        }
+
+        if let Some(main_expr) = main {
+            collect_from_expr(main_expr, &mut dicts);
+        }
+
+        for func in functions {
+            collect_from_expr(&func.body, &mut dicts);
+        }
+
+        dicts
+    }
+
     /// Emit a complete C program from Core IR
     pub fn emit_program(&mut self, program: &CoreProgram) -> String {
         // Header
@@ -284,6 +377,37 @@ impl CEmitter {
             if reachable.contains(&fun.var_id) {
                 self.emit_forward_decl(fun);
             }
+        }
+
+        // Collect and emit dictionaries for type class instances
+        let dicts = Self::collect_dictionaries(&program.main, &program.functions);
+        if !dicts.is_empty() {
+            self.output.push_str("// Type class dictionaries\n");
+
+            // Emit dictionary type definition (generic for all traits with 'show' method)
+            // For now, we use a simple struct with function pointers
+            self.output.push_str("typedef struct {\n");
+            self.output.push_str("    gn_value (*show)(gn_value);\n");
+            self.output.push_str("} GnDict;\n\n");
+
+            // Emit dictionary instances
+            for (trait_name, instance_ty) in &dicts {
+                // Dictionary instance references the trait method function
+                // e.g., Show_Int_dict references fn_Show_Int_show
+                let dict_name = format!("{}_{}_dict", trait_name, instance_ty);
+                let method_name = format!("fn_{}_{}_{}", trait_name, instance_ty, "show");
+
+                // Forward declare the method function
+                self.output
+                    .push_str(&format!("gn_value {}(gn_value);\n", method_name));
+
+                // Emit dictionary structure
+                self.output.push_str(&format!(
+                    "static GnDict {} = {{ .show = {} }};\n",
+                    dict_name, method_name
+                ));
+            }
+            self.output.push('\n');
         }
 
         // Emit function definitions only for reachable functions
@@ -879,17 +1003,20 @@ impl CEmitter {
                 );
                 self.var_names.insert(*name, func_name.clone());
 
-                // Build parameter list
-                let param_strs: Vec<String> = params
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| format!("gn_value arg{}", i))
-                    .collect();
-                let params_str = if param_strs.is_empty() {
-                    "void".to_string()
-                } else {
-                    param_strs.join(", ")
-                };
+                // Register arity so the function is properly wrapped as a closure when used as value
+                let arity = params.len();
+                self.func_arities.insert(*name, arity);
+                self.func_name_arities.insert(func_name.clone(), arity);
+
+                // Build parameter list - include env* for closure compatibility
+                let mut param_strs: Vec<String> = vec!["gn_value* env".to_string()];
+                param_strs.extend(
+                    params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("gn_value arg{}", i)),
+                );
+                let params_str = param_strs.join(", ");
 
                 // Emit forward declaration
                 writeln!(
@@ -968,6 +1095,10 @@ impl CEmitter {
                 // Register function names before finding free vars (they're not free)
                 for (binding, func_name) in bindings.iter().zip(func_names.iter()) {
                     self.var_names.insert(binding.name, func_name.clone());
+                    // Register arity so function is properly wrapped as closure when used as value
+                    let arity = binding.params.len();
+                    self.func_arities.insert(binding.name, arity);
+                    self.func_name_arities.insert(func_name.clone(), arity);
                 }
 
                 // Find free variables for each binding
@@ -1148,6 +1279,50 @@ impl CEmitter {
             CoreExpr::Handle { body, handler: _ } => {
                 // Effects not yet implemented
                 self.emit_expr(body)
+            }
+
+            CoreExpr::DictCall { dict, method, args } => {
+                // Dictionary method call: gn_dict_call(dict, "method", args...)
+                let dict_name = self.get_var_name(*dict);
+                let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
+
+                // For now, emit as a lookup and call
+                // gn_apply(gn_dict_get(dict, "method"), arg)
+                if args.is_empty() {
+                    format!("gn_dict_get({}, \"{}\")", dict_name, method)
+                } else if args.len() == 1 {
+                    format!(
+                        "gn_apply(gn_dict_get({}, \"{}\"), {})",
+                        dict_name, method, args_str[0]
+                    )
+                } else {
+                    // Multiple args - chain applies
+                    let mut result = format!("gn_dict_get({}, \"{}\")", dict_name, method);
+                    for arg in &args_str {
+                        result = format!("gn_apply({}, {})", result, arg);
+                    }
+                    result
+                }
+            }
+
+            CoreExpr::DictValue {
+                trait_name,
+                instance_ty,
+            } => {
+                // Dictionary value: reference to the instance's dictionary
+                // e.g., &Show_Int_dict
+                format!("(&{}_{}_dict)", trait_name, instance_ty)
+            }
+
+            CoreExpr::DictRef(var) => {
+                // Reference to a dictionary parameter
+                self.get_var_name(*var)
+            }
+
+            CoreExpr::Proj { tuple, index } => {
+                // Project field from tuple: GN_FIELD(tuple, index)
+                let tuple_name = self.get_var_name(*tuple);
+                format!("GN_FIELD({}, {})", tuple_name, index)
             }
         }
     }
@@ -1644,6 +1819,29 @@ fn find_free_vars(expr: &CoreExpr, bound: &HashSet<VarId>, free: &mut HashSet<Va
             let mut ret_bound = bound.clone();
             ret_bound.insert(handler.return_var);
             find_free_vars(&handler.return_body, &ret_bound, free);
+        }
+        CoreExpr::DictCall { dict, args, .. } => {
+            if !bound.contains(dict) {
+                free.insert(*dict);
+            }
+            for a in args {
+                if !bound.contains(a) {
+                    free.insert(*a);
+                }
+            }
+        }
+        CoreExpr::DictValue { .. } => {
+            // No free variables - static dictionary reference
+        }
+        CoreExpr::DictRef(var) => {
+            if !bound.contains(var) {
+                free.insert(*var);
+            }
+        }
+        CoreExpr::Proj { tuple, .. } => {
+            if !bound.contains(tuple) {
+                free.insert(*tuple);
+            }
         }
     }
 }

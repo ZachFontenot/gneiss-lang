@@ -83,6 +83,7 @@ impl<'a> ElaborateCtx<'a> {
             Type::String => "String".to_string(),
             Type::Bool => "Bool".to_string(),
             Type::Unit => "Unit".to_string(),
+            Type::Tuple(elems) if elems.is_empty() => "Unit".to_string(), // () is Unit
             Type::Tuple(elems) => {
                 let parts: Vec<_> = elems.iter().map(|t| self.mangle_type(t)).collect();
                 format!("Tuple_{}", parts.join("_"))
@@ -309,10 +310,20 @@ pub fn elaborate(
                 } => {
                     match elaborate_expr(&ctx, body) {
                         Ok(tbody) => {
-                            let ty = if let Some(scheme) = type_env.get(name) {
-                                ctx.resolve_type(&scheme.ty)
+                            let (ty, dict_params) = if let Some(scheme) = type_env.get(name) {
+                                let dicts: Vec<_> = scheme.predicates.iter()
+                                    .filter_map(|pred| {
+                                        // Extract type var ID from predicate type
+                                        if let Type::Generic(id) = &pred.ty {
+                                            Some((pred.trait_name.clone(), *id))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                                (ctx.resolve_type(&scheme.ty), dicts)
                             } else {
-                                ctx.get_expr_type(body)
+                                (ctx.get_expr_type(body), vec![])
                             };
                             let tparams: Vec<_> =
                                 params.iter().map(|p| elaborate_pattern(&ctx, p)).collect();
@@ -321,6 +332,7 @@ pub fn elaborate(
                                 params: tparams,
                                 body: tbody,
                                 ty,
+                                dict_params,
                             });
                         }
                         Err(e) => errors.push(e),
@@ -331,10 +343,19 @@ pub fn elaborate(
                     for rec in recs {
                         match elaborate_expr(&ctx, &rec.body) {
                             Ok(tbody) => {
-                                let ty = if let Some(scheme) = type_env.get(&rec.name.node) {
-                                    ctx.resolve_type(&scheme.ty)
+                                let (ty, dict_params) = if let Some(scheme) = type_env.get(&rec.name.node) {
+                                    let dicts: Vec<_> = scheme.predicates.iter()
+                                        .filter_map(|pred| {
+                                            if let Type::Generic(id) = &pred.ty {
+                                                Some((pred.trait_name.clone(), *id))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect();
+                                    (ctx.resolve_type(&scheme.ty), dicts)
                                 } else {
-                                    ctx.get_expr_type(&rec.body)
+                                    (ctx.get_expr_type(&rec.body), vec![])
                                 };
                                 let tparams: Vec<_> =
                                     rec.params.iter().map(|p| elaborate_pattern(&ctx, p)).collect();
@@ -343,6 +364,7 @@ pub fn elaborate(
                                     params: tparams,
                                     body: tbody,
                                     ty,
+                                    dict_params,
                                 });
                             }
                             Err(e) => errors.push(e),
@@ -363,6 +385,7 @@ pub fn elaborate(
                                 params: tparams,
                                 body: tbody,
                                 ty,
+                                dict_params: vec![], // Operators don't have class constraints
                             });
                         }
                         Err(e) => errors.push(e),
@@ -443,6 +466,22 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
                     let targ = elaborate_expr(ctx, arg)?;
                     let arg_ty = targ.ty.clone();
 
+                    // Check if the argument type is polymorphic (Generic)
+                    // If so, we need dictionary-based dispatch at runtime
+                    if let Type::Generic(type_var_id) = &arg_ty {
+                        return Ok(TExpr::new(
+                            TExprKind::DictMethodCall {
+                                trait_name: trait_name.to_string(),
+                                method: name.clone(),
+                                type_var: *type_var_id,
+                                args: vec![targ],
+                            },
+                            ty,
+                            span,
+                        ));
+                    }
+
+                    // Concrete type - use monomorphized method call
                     return Ok(TExpr::new(
                         TExprKind::MethodCall {
                             trait_name: trait_name.to_string(),
@@ -453,6 +492,89 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
                         ty,
                         span,
                     ));
+                }
+            }
+
+            // Check if calling a function with class constraints
+            // If so, we need to pass dictionary arguments
+            if let ExprKind::Var(name) = &func.node {
+                if let Some(scheme) = ctx.type_env.get(name) {
+                    if !scheme.predicates.is_empty() {
+                        // Function has class constraints - need to pass dictionaries
+                        let targ = elaborate_expr(ctx, arg)?;
+                        let arg_ty = targ.ty.clone();
+
+                        // Build dictionary expressions for each predicate
+                        let mut dict_apps: Vec<TExpr> = Vec::new();
+                        for pred in &scheme.predicates {
+                            // The predicate's type is Generic(id).
+                            // We need to figure out what concrete type it maps to.
+                            // For simple cases like `print x` where x : Int,
+                            // the argument type IS the instantiation.
+                            let dict_expr = match &pred.ty {
+                                Type::Generic(_id) => {
+                                    // The concrete type is the argument type
+                                    // (for single-parameter functions with single constraint)
+                                    match &arg_ty {
+                                        Type::Generic(type_var) => {
+                                            // Still polymorphic - need to pass through dict from scope
+                                            TExpr::new(
+                                                TExprKind::DictRef {
+                                                    trait_name: pred.trait_name.clone(),
+                                                    type_var: *type_var,
+                                                },
+                                                Type::Unit, // Dict type placeholder
+                                                span.clone(),
+                                            )
+                                        }
+                                        _ => {
+                                            // Concrete type - use static dictionary
+                                            TExpr::new(
+                                                TExprKind::DictValue {
+                                                    trait_name: pred.trait_name.clone(),
+                                                    instance_ty: arg_ty.clone(),
+                                                },
+                                                Type::Unit, // Dict type placeholder
+                                                span.clone(),
+                                            )
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // Non-generic predicate type - shouldn't happen in well-formed schemes
+                                    continue;
+                                }
+                            };
+                            dict_apps.push(dict_expr);
+                        }
+
+                        // Build: func dict1 dict2 ... arg
+                        let tfunc = elaborate_expr(ctx, func)?;
+                        let mut result = tfunc;
+
+                        // Apply dictionary arguments first
+                        for dict_expr in dict_apps {
+                            let app_ty = ctx.get_expr_type(expr); // Approximate
+                            result = TExpr::new(
+                                TExprKind::App {
+                                    func: Rc::new(result),
+                                    arg: Rc::new(dict_expr),
+                                },
+                                app_ty.clone(),
+                                span.clone(),
+                            );
+                        }
+
+                        // Then apply the actual argument
+                        return Ok(TExpr::new(
+                            TExprKind::App {
+                                func: Rc::new(result),
+                                arg: Rc::new(targ),
+                            },
+                            ty,
+                            span,
+                        ));
+                    }
                 }
             }
 
@@ -892,7 +1014,7 @@ fn elaborate_binop(op: BinOp, left_ty: &Type) -> TBinOp {
         BinOp::Or => TBinOp::BoolOr,
 
         BinOp::Cons => TBinOp::Cons,
-        BinOp::Concat => TBinOp::StringConcat,
+        BinOp::Concat => TBinOp::StringConcat, // ++ only for strings; use concat for lists
 
         BinOp::Pipe => TBinOp::Pipe,
         BinOp::PipeBack => TBinOp::PipeLeft,

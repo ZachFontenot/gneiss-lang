@@ -156,6 +156,7 @@ gn_value gn_list_cons(gn_value head, gn_value tail);
 gn_value gn_list_head(gn_value list);
 gn_value gn_list_tail(gn_value list);
 gn_value gn_list_is_empty(gn_value list);
+gn_value gn_list_concat(gn_value left, gn_value right);
 
 /* Closure creation and application (for higher-order functions) */
 /* Create a closure with no captured environment (arity 1) */

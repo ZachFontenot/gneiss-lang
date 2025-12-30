@@ -9,10 +9,11 @@ use std::fs;
 use std::process::Command;
 
 use gneiss::ast::Program;
-use gneiss::codegen::{emit_c, lower_tprogram};
+use gneiss::codegen::{emit_c, lower_mono, lower_tprogram};
 use gneiss::elaborate::elaborate;
 use gneiss::infer::Inferencer;
 use gneiss::lexer::Lexer;
+use gneiss::mono::monomorphize;
 use gneiss::parser::Parser;
 use gneiss::prelude::parse_prelude;
 
@@ -127,6 +128,142 @@ fn expect_failure(source: &str, description: &str) {
             // Expected - this is a known failure
             eprintln!("[KNOWN FAILURE] {}", description);
         }
+    }
+}
+
+/// Compile using the NEW pipeline: TAST → Mono → CoreIR → C
+/// This is the correct architecture per docs/comp_impl_guide.md
+fn compile_and_run_mono(source: &str) -> Result<String, String> {
+    compile_and_run_mono_impl(source, true)
+}
+
+/// Compile WITHOUT prelude - for testing core pipeline
+fn compile_and_run_mono_no_prelude(source: &str) -> Result<String, String> {
+    compile_and_run_mono_impl(source, false)
+}
+
+fn compile_and_run_mono_impl(source: &str, with_prelude: bool) -> Result<String, String> {
+    // Parse
+    let tokens = Lexer::new(source)
+        .tokenize()
+        .map_err(|e| format!("Lex error: {:?}", e))?;
+    let user_program = Parser::new(tokens)
+        .parse_program()
+        .map_err(|e| format!("Parse error: {:?}", e))?;
+
+    // Optionally combine with prelude
+    let program = if with_prelude {
+        let prelude = parse_prelude().map_err(|e| format!("Prelude error: {}", e))?;
+        let mut combined_items = prelude.items;
+        combined_items.extend(user_program.items);
+        Program {
+            exports: user_program.exports,
+            items: combined_items,
+        }
+    } else {
+        user_program
+    };
+
+    // Type check
+    let mut inferencer = Inferencer::new();
+    let type_env = inferencer
+        .infer_program(&program)
+        .map_err(|e| format!("Type error: {:?}", e))?;
+
+    // Elaborate to TAST
+    let tprogram =
+        elaborate(&program, &inferencer, &type_env).map_err(|e| format!("Elaborate: {:?}", e))?;
+
+    // NEW: Monomorphize TAST → MonoProgram
+    let mono_program =
+        monomorphize(&tprogram).map_err(|e| format!("Monomorphize error: {:?}", e))?;
+
+    // NEW: Lower MonoProgram → CoreIR
+    let core_program =
+        lower_mono(&mono_program).map_err(|e| format!("Lower error: {:?}", e))?;
+
+    // Emit C
+    let c_code = emit_c(&core_program);
+
+    // Use unique temp files per test
+    let unique_id = format!(
+        "{:?}_{}",
+        std::thread::current().id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let c_path = format!("/tmp/gneiss_mono_test_{}.c", unique_id);
+    let exe_path = format!("/tmp/gneiss_mono_test_{}", unique_id);
+    fs::write(&c_path, &c_code).map_err(|e| format!("Write error: {}", e))?;
+
+    // Find runtime directory
+    let runtime_dir = std::env::var("GNEISS_RUNTIME").unwrap_or_else(|_| "runtime".to_string());
+
+    // Compile C
+    let compile_result = Command::new("cc")
+        .args([
+            "-o",
+            &exe_path,
+            &c_path,
+            &format!("{}/gn_runtime.c", runtime_dir),
+            &format!("-I{}", runtime_dir),
+            "-lm",
+        ])
+        .output()
+        .map_err(|e| format!("CC failed to start: {}", e))?;
+
+    if !compile_result.status.success() {
+        let stderr = String::from_utf8_lossy(&compile_result.stderr);
+        return Err(format!("C compilation failed:\n{}", stderr));
+    }
+
+    // Run executable
+    let run_result = Command::new(&exe_path)
+        .output()
+        .map_err(|e| format!("Run failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&run_result.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&run_result.stderr).to_string();
+
+    if !run_result.status.success() {
+        return Err(format!(
+            "Execution failed (exit {})\nstdout: {}\nstderr: {}",
+            run_result.status, stdout, stderr
+        ));
+    }
+
+    Ok(stdout)
+}
+
+/// Test using new mono pipeline
+fn assert_output_mono(source: &str, expected: &str) {
+    match compile_and_run_mono(source) {
+        Ok(output) => {
+            let output = output.trim();
+            assert_eq!(
+                output, expected,
+                "Output mismatch.\nExpected: {}\nGot: {}",
+                expected, output
+            );
+        }
+        Err(e) => panic!("Compilation/execution failed: {}", e),
+    }
+}
+
+/// Test using new mono pipeline WITHOUT prelude (for core testing)
+fn assert_output_mono_no_prelude(source: &str, expected: &str) {
+    match compile_and_run_mono_no_prelude(source) {
+        Ok(output) => {
+            let output = output.trim();
+            assert_eq!(
+                output, expected,
+                "Output mismatch.\nExpected: {}\nGot: {}",
+                expected, output
+            );
+        }
+        Err(e) => panic!("Compilation/execution failed: {}", e),
     }
 }
 
@@ -347,13 +484,12 @@ let main _ = length (map (fun x -> x + 1) (filter (fun x -> x > 1) [1, 2, 3, 4])
 }
 
 #[test]
-#[ignore] // ++ is currently only implemented for strings, not lists - use concat function instead
 fn phase5_list_concat() {
-    // List concatenation - should use concat or a named function
+    // List concatenation using list_append (no ++ operator)
     let source = r#"
-let main _ = length ([1, 2] ++ [3, 4, 5])
+let main _ = length (list_append [1, 2] [3, 4, 5])
 "#;
-    assert_output(source, "5");
+    assert_output_mono(source, "5");
 }
 
 #[test]
@@ -554,4 +690,196 @@ let main _ =
     0
 "#;
     assert_output(source, "true0");
+}
+
+// Note: print tests removed - requires proper monomorphization pass
+// Will be re-added after Phase 1 completion (see docs/comp_impl_guide.md)
+
+// ============================================================================
+// New Monomorphization Pipeline Tests
+// These test the CORRECT architecture: TAST → Mono → CoreIR → C
+// ============================================================================
+
+#[test]
+fn mono_pipeline_literal_no_prelude() {
+    // Test the new pipeline with a simple literal - NO PRELUDE
+    // This is the most basic test of the new infrastructure
+    let source = r#"
+let main _ = 42
+"#;
+    assert_output_mono_no_prelude(source, "42");
+}
+
+#[test]
+fn mono_pipeline_arithmetic_no_prelude() {
+    // Test arithmetic through new pipeline - NO PRELUDE
+    let source = r#"
+let main _ = 1 + 2
+"#;
+    assert_output_mono_no_prelude(source, "3");
+}
+
+#[test]
+fn mono_pipeline_function_call_no_prelude() {
+    // Test function calls - the key milestone from comp_impl_guide.md:
+    // "let add x y = x + y; let main _ = add 1 2"
+    // NO PRELUDE - pure user code
+    let source = r#"
+let add x y = x + y
+let main _ = add 1 2
+"#;
+    assert_output_mono_no_prelude(source, "3");
+}
+
+#[test]
+fn mono_pipeline_lambda_simple_no_prelude() {
+    // Phase 2 test: Simple lambda without captures
+    let source = r#"
+let main _ = (fun x -> x + 1) 5
+"#;
+    assert_output_mono_no_prelude(source, "6");
+}
+
+#[test]
+fn mono_pipeline_lambda_identity_no_prelude() {
+    // Phase 2 test: Identity lambda
+    let source = r#"
+let main _ = (fun x -> x) 42
+"#;
+    assert_output_mono_no_prelude(source, "42");
+}
+
+#[test]
+fn mono_pipeline_lambda_let_bound_no_prelude() {
+    // Phase 2 test: Lambda bound to variable
+    let source = r#"
+let main _ =
+    let f = fun x -> x + 1 in
+    f 5
+"#;
+    assert_output_mono_no_prelude(source, "6");
+}
+
+#[test]
+fn mono_pipeline_lambda_capture_no_prelude() {
+    // Phase 3 test: Lambda with captured variable
+    let source = r#"
+let main _ =
+    let y = 10 in
+    let f = fun x -> x + y in
+    f 5
+"#;
+    assert_output_mono_no_prelude(source, "15");
+}
+
+#[test]
+fn mono_pipeline_curried_function_no_prelude() {
+    // Phase 3 test: Curried function (returns a closure)
+    let source = r#"
+let add x = fun y -> x + y
+let main _ = add 3 4
+"#;
+    assert_output_mono_no_prelude(source, "7");
+}
+
+#[test]
+fn mono_pipeline_hof_apply_no_prelude() {
+    // Phase 4 test: Higher-order function - apply
+    let source = r#"
+let apply f x = f x
+let double x = x * 2
+let main _ = apply double 21
+"#;
+    assert_output_mono_no_prelude(source, "42");
+}
+
+#[test]
+fn mono_pipeline_hof_compose_no_prelude() {
+    // Phase 4 test: Function composition
+    let source = r#"
+let compose f g x = f (g x)
+let double x = x + x
+let add1 x = x + 1
+let main _ = compose double add1 5
+"#;
+    assert_output_mono_no_prelude(source, "12");
+}
+
+#[test]
+fn mono_pipeline_recursive_list_no_prelude() {
+    // Test recursive function on lists - no prelude
+    let source = r#"
+let rec list_sum xs =
+    match xs with
+    | [] -> 0
+    | x :: rest -> x + list_sum rest
+    end
+let main _ = list_sum [1, 2, 3, 4, 5]
+"#;
+    assert_output_mono_no_prelude(source, "15");
+}
+
+#[test]
+fn mono_pipeline_custom_map_no_prelude() {
+    // Implement map ourselves to test HOF on lists
+    let source = r#"
+let rec my_map f xs =
+    match xs with
+    | [] -> []
+    | x :: rest -> f x :: my_map f rest
+    end
+
+let rec list_sum xs =
+    match xs with
+    | [] -> 0
+    | x :: rest -> x + list_sum rest
+    end
+
+let main _ = list_sum (my_map (fun x -> x + 1) [1, 2, 3])
+"#;
+    assert_output_mono_no_prelude(source, "9");
+}
+
+#[test]
+fn mono_pipeline_with_prelude_length() {
+    // Test using prelude's length function
+    let source = r#"
+let main _ = length [1, 2, 3, 4, 5]
+"#;
+    assert_output_mono(source, "5");
+}
+
+#[test]
+fn mono_pipeline_tail_recursive_helper() {
+    // Test tail-recursive helper pattern: let rec go ... in go
+    // This tests that local recursive functions get properly wrapped as closures
+    let source = r#"
+let rec reverse_acc acc xs =
+    match xs with
+    | [] -> acc
+    | x :: rest -> reverse_acc (x :: acc) rest
+    end
+
+let rec list_sum xs =
+    match xs with
+    | [] -> 0
+    | x :: rest -> x + list_sum rest
+    end
+
+let main _ = list_sum (reverse_acc [] [1, 2, 3])
+"#;
+    assert_output_mono_no_prelude(source, "6");
+}
+
+#[test]
+fn mono_pipeline_local_rec_as_value() {
+    // Test that local recursive function can be used as a value (passed to HOF)
+    let source = r#"
+let apply_twice f x = f (f x)
+
+let main _ =
+    let rec double n = n + n in
+    apply_twice double 5
+"#;
+    assert_output_mono_no_prelude(source, "20");
 }

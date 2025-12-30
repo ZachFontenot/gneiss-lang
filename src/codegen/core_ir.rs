@@ -150,6 +150,30 @@ pub enum CoreExpr {
         args: Vec<VarId>,
     },
 
+    /// Dictionary method call (for polymorphic trait methods)
+    /// Looks up method in the dictionary and calls it
+    DictCall {
+        dict: VarId,
+        method: String,
+        args: Vec<VarId>,
+    },
+
+    /// Concrete dictionary value for a specific trait instance
+    /// e.g., Show_Int dictionary
+    DictValue {
+        trait_name: String,
+        instance_ty: String, // mangled type name
+    },
+
+    /// Reference to a dictionary parameter
+    DictRef(VarId),
+
+    /// Project a field from a tuple/struct
+    Proj {
+        tuple: VarId,
+        index: usize,
+    },
+
     /// Error/unreachable
     Error(String),
 }
@@ -395,6 +419,8 @@ pub enum CoreType {
     String,
     /// Type variable (should be resolved before codegen)
     Var(u32),
+    /// Dictionary for type class constraints (runtime dispatch)
+    Dict,
 }
 
 // ============================================================================

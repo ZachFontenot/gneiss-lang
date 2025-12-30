@@ -613,6 +613,34 @@ gn_value gn_list_is_empty(gn_value list) {
     return GN_OBJ(list)->tag == TAG_NIL ? GN_TRUE : GN_FALSE;
 }
 
+gn_value gn_list_concat(gn_value left, gn_value right) {
+    /* Concatenate two lists: left ++ right */
+    /* If left is empty, return right */
+    if (GN_IS_INT(left) || GN_OBJ(left)->tag == TAG_NIL) {
+        return right;
+    }
+
+    /* Build reversed left list, then cons elements onto right */
+    gn_value reversed = gn_singleton(TAG_NIL);
+    gn_value curr = left;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value head = GN_OBJ(curr)->fields[0];
+        reversed = gn_list_cons(head, reversed);
+        curr = GN_OBJ(curr)->fields[1];
+    }
+
+    /* Now cons reversed elements onto right */
+    gn_value result = right;
+    curr = reversed;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value head = GN_OBJ(curr)->fields[0];
+        result = gn_list_cons(head, result);
+        curr = GN_OBJ(curr)->fields[1];
+    }
+
+    return result;
+}
+
 /* ============================================================================
  * Closure Application
  *
