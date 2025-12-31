@@ -2,6 +2,7 @@
 -- Minimal example of a Gneiss web server
 
 import Http
+import Http/Response
 import Server
 
 let main () =

@@ -2,7 +2,9 @@
 -- Demonstrates the Router API for path-based routing
 
 import Http
+import Http/Response
 import Server
+import Server/Router
 
 let main () =
     let router = Router.new ()
@@ -10,4 +12,4 @@ let main () =
         |> Router.get "/about" (fun _ -> Response.html 200 "<h1>About</h1><p>A Gneiss web server.</p>")
         |> Router.get "/api/health" (fun _ -> Response.json 200 "{\"status\":\"ok\"}")
     in
-    Server.serve Server.defaultConfig router
+    Router.serve Server.defaultConfig router

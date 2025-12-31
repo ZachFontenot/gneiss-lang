@@ -94,16 +94,9 @@ mod let_bindings {
         }
     }
 
-    #[test]
-    fn qualified_name() {
-        let prog = parse("let Html.text s = s");
-        assert_eq!(prog.items.len(), 1);
-        if let Item::Decl(Decl::Let { name, .. }) = &prog.items[0] {
-            assert_eq!(name, "Html.text");
-        } else {
-            panic!("expected let declaration");
-        }
-    }
+    // Note: qualified names on LHS (let Module.name = ...) were removed.
+    // Use proper modules instead: define `let name = ...` in a module file,
+    // and callers access it as `Module.name`.
 }
 
 // ============================================================================
@@ -730,13 +723,6 @@ mod val_decls {
         }
     }
 
-    #[test]
-    fn val_qualified() {
-        let prog = parse("val Http.get : String -> Response");
-        if let Item::Decl(Decl::Val { name, .. }) = &prog.items[0] {
-            assert_eq!(name, "Http.get");
-        } else {
-            panic!("expected val declaration");
-        }
-    }
+    // Note: qualified names (val Module.name : ...) were removed.
+    // Use proper modules instead.
 }

@@ -3,6 +3,8 @@
 -- Simulates DB latency with sleep_ms
 
 import Http
+import Http/Response
+import Http/Request
 import Server
 import Json
 

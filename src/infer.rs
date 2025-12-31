@@ -544,16 +544,6 @@ impl Inferencer {
             }
         }
 
-        // 4. Check for qualified name in imported modules (e.g., Response.notFound from Http module)
-        // This handles cases where a function has a dot in its name like "Response.notFound"
-        if name.contains('.') {
-            for module_env in self.module_envs.values() {
-                if let Some(scheme) = module_env.get(name) {
-                    return Some(scheme.clone());
-                }
-            }
-        }
-
         None
     }
 

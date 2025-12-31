@@ -2,7 +2,9 @@
 -- Simple REST-like API returning JSON
 
 import Http
+import Http/Response
 import Server
+import Server/Router
 
 -- Sample data
 let users = [
@@ -41,4 +43,4 @@ let main () =
             Response.html 200 "<h1>JSON API</h1><p>Try <a href='/api/users'>/api/users</a></p>")
     in
     print "Starting JSON API server...";
-    Server.serve Server.defaultConfig router
+    Router.serve Server.defaultConfig router
