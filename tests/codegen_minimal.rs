@@ -9,7 +9,7 @@ use std::fs;
 use std::process::Command;
 
 use gneiss::ast::Program;
-use gneiss::codegen::{emit_c, lower_mono, lower_tprogram};
+use gneiss::codegen::{emit_c, lower_mono};
 use gneiss::elaborate::elaborate;
 use gneiss::infer::Inferencer;
 use gneiss::lexer::Lexer;
@@ -17,87 +17,11 @@ use gneiss::mono::monomorphize;
 use gneiss::parser::Parser;
 use gneiss::prelude::parse_prelude;
 
-/// Compile a Gneiss program to C, compile the C, run it, and return stdout
+/// Compile a Gneiss program to C using the correct pipeline:
+/// TAST → Monomorphize → Lower → Emit C
+/// This is the ONLY pipeline - per docs/comp_impl_guide.md
 fn compile_and_run(source: &str) -> Result<String, String> {
-    // Parse
-    let tokens = Lexer::new(source)
-        .tokenize()
-        .map_err(|e| format!("Lex error: {:?}", e))?;
-    let user_program = Parser::new(tokens)
-        .parse_program()
-        .map_err(|e| format!("Parse error: {:?}", e))?;
-
-    // Combine with prelude
-    let prelude = parse_prelude().map_err(|e| format!("Prelude error: {}", e))?;
-    let mut combined_items = prelude.items;
-    combined_items.extend(user_program.items);
-    let program = Program {
-        exports: user_program.exports,
-        items: combined_items,
-    };
-
-    // Type check
-    let mut inferencer = Inferencer::new();
-    let type_env = inferencer
-        .infer_program(&program)
-        .map_err(|e| format!("Type error: {:?}", e))?;
-
-    // Elaborate
-    let tprogram =
-        elaborate(&program, &inferencer, &type_env).map_err(|e| format!("Elaborate: {:?}", e))?;
-
-    // Lower to Core IR
-    let core_program =
-        lower_tprogram(&tprogram).map_err(|e| format!("Lower error: {:?}", e))?;
-
-    // Emit C
-    let c_code = emit_c(&core_program);
-
-    // Use unique temp files per test (thread ID + timestamp)
-    let unique_id = format!("{:?}_{}", std::thread::current().id(), std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-    let c_path = format!("/tmp/gneiss_test_{}.c", unique_id);
-    let exe_path = format!("/tmp/gneiss_test_{}", unique_id);
-    fs::write(&c_path, &c_code).map_err(|e| format!("Write error: {}", e))?;
-
-    // Find runtime directory
-    let runtime_dir = std::env::var("GNEISS_RUNTIME")
-        .unwrap_or_else(|_| "runtime".to_string());
-
-    // Compile C
-    let compile_result = Command::new("cc")
-        .args([
-            "-o",
-            &exe_path,
-            &c_path,
-            &format!("{}/gn_runtime.c", runtime_dir),
-            &format!("-I{}", runtime_dir),
-            "-lm",
-        ])
-        .output()
-        .map_err(|e| format!("CC failed to start: {}", e))?;
-
-    if !compile_result.status.success() {
-        let stderr = String::from_utf8_lossy(&compile_result.stderr);
-        return Err(format!("C compilation failed:\n{}", stderr));
-    }
-
-    // Run executable
-    let run_result = Command::new(&exe_path)
-        .output()
-        .map_err(|e| format!("Run failed: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&run_result.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&run_result.stderr).to_string();
-
-    if !run_result.status.success() {
-        return Err(format!(
-            "Execution failed (exit {})\nstdout: {}\nstderr: {}",
-            run_result.status, stdout, stderr
-        ));
-    }
-
-    Ok(stdout)
+    compile_and_run_impl(source, true)
 }
 
 /// Compile and run, expecting a specific output
@@ -115,34 +39,14 @@ fn assert_output(source: &str, expected: &str) {
     }
 }
 
-/// Compile and run, expecting it to fail (documents known failures)
-fn expect_failure(source: &str, description: &str) {
-    match compile_and_run(source) {
-        Ok(output) => {
-            panic!(
-                "Expected failure but got success!\nDescription: {}\nOutput: {}",
-                description, output
-            );
-        }
-        Err(_) => {
-            // Expected - this is a known failure
-            eprintln!("[KNOWN FAILURE] {}", description);
-        }
-    }
-}
-
-/// Compile using the NEW pipeline: TAST → Mono → CoreIR → C
-/// This is the correct architecture per docs/comp_impl_guide.md
-fn compile_and_run_mono(source: &str) -> Result<String, String> {
-    compile_and_run_mono_impl(source, true)
-}
-
 /// Compile WITHOUT prelude - for testing core pipeline
-fn compile_and_run_mono_no_prelude(source: &str) -> Result<String, String> {
-    compile_and_run_mono_impl(source, false)
+fn compile_and_run_no_prelude(source: &str) -> Result<String, String> {
+    compile_and_run_impl(source, false)
 }
 
-fn compile_and_run_mono_impl(source: &str, with_prelude: bool) -> Result<String, String> {
+/// Core implementation of compile and run
+/// Uses the correct pipeline: TAST → Monomorphize → Lower → Emit C
+fn compile_and_run_impl(source: &str, with_prelude: bool) -> Result<String, String> {
     // Parse
     let tokens = Lexer::new(source)
         .tokenize()
@@ -237,24 +141,9 @@ fn compile_and_run_mono_impl(source: &str, with_prelude: bool) -> Result<String,
     Ok(stdout)
 }
 
-/// Test using new mono pipeline
-fn assert_output_mono(source: &str, expected: &str) {
-    match compile_and_run_mono(source) {
-        Ok(output) => {
-            let output = output.trim();
-            assert_eq!(
-                output, expected,
-                "Output mismatch.\nExpected: {}\nGot: {}",
-                expected, output
-            );
-        }
-        Err(e) => panic!("Compilation/execution failed: {}", e),
-    }
-}
-
-/// Test using new mono pipeline WITHOUT prelude (for core testing)
-fn assert_output_mono_no_prelude(source: &str, expected: &str) {
-    match compile_and_run_mono_no_prelude(source) {
+/// Compile and run WITHOUT prelude, expecting a specific output
+fn assert_output_no_prelude(source: &str, expected: &str) {
+    match compile_and_run_no_prelude(source) {
         Ok(output) => {
             let output = output.trim();
             assert_eq!(
@@ -489,7 +378,7 @@ fn phase5_list_concat() {
     let source = r#"
 let main _ = length (list_append [1, 2] [3, 4, 5])
 "#;
-    assert_output_mono(source, "5");
+    assert_output(source, "5");
 }
 
 #[test]
@@ -692,6 +581,33 @@ let main _ =
     assert_output(source, "true0");
 }
 
+#[test]
+fn trait_method_through_polymorphic_fn() {
+    // Test polymorphic function that uses trait method
+    // This exercises DictMethodCall resolution
+    let source = r#"
+let stringify x = show x
+let main _ =
+    let s = stringify 42 in
+    let _ = io_print s in
+    0
+"#;
+    assert_output(source, "420");
+}
+
+#[test]
+fn trait_method_nested_poly() {
+    // Nested polymorphic calls
+    let source = r#"
+let stringify x = show x
+let double x = stringify x ++ stringify x
+let main _ =
+    let _ = io_print (double 5) in
+    0
+"#;
+    assert_output(source, "550");
+}
+
 // Note: print tests removed - requires proper monomorphization pass
 // Will be re-added after Phase 1 completion (see docs/comp_impl_guide.md)
 
@@ -707,7 +623,7 @@ fn mono_pipeline_literal_no_prelude() {
     let source = r#"
 let main _ = 42
 "#;
-    assert_output_mono_no_prelude(source, "42");
+    assert_output_no_prelude(source, "42");
 }
 
 #[test]
@@ -716,7 +632,7 @@ fn mono_pipeline_arithmetic_no_prelude() {
     let source = r#"
 let main _ = 1 + 2
 "#;
-    assert_output_mono_no_prelude(source, "3");
+    assert_output_no_prelude(source, "3");
 }
 
 #[test]
@@ -728,7 +644,7 @@ fn mono_pipeline_function_call_no_prelude() {
 let add x y = x + y
 let main _ = add 1 2
 "#;
-    assert_output_mono_no_prelude(source, "3");
+    assert_output_no_prelude(source, "3");
 }
 
 #[test]
@@ -737,7 +653,7 @@ fn mono_pipeline_lambda_simple_no_prelude() {
     let source = r#"
 let main _ = (fun x -> x + 1) 5
 "#;
-    assert_output_mono_no_prelude(source, "6");
+    assert_output_no_prelude(source, "6");
 }
 
 #[test]
@@ -746,7 +662,7 @@ fn mono_pipeline_lambda_identity_no_prelude() {
     let source = r#"
 let main _ = (fun x -> x) 42
 "#;
-    assert_output_mono_no_prelude(source, "42");
+    assert_output_no_prelude(source, "42");
 }
 
 #[test]
@@ -757,7 +673,7 @@ let main _ =
     let f = fun x -> x + 1 in
     f 5
 "#;
-    assert_output_mono_no_prelude(source, "6");
+    assert_output_no_prelude(source, "6");
 }
 
 #[test]
@@ -769,7 +685,7 @@ let main _ =
     let f = fun x -> x + y in
     f 5
 "#;
-    assert_output_mono_no_prelude(source, "15");
+    assert_output_no_prelude(source, "15");
 }
 
 #[test]
@@ -779,7 +695,7 @@ fn mono_pipeline_curried_function_no_prelude() {
 let add x = fun y -> x + y
 let main _ = add 3 4
 "#;
-    assert_output_mono_no_prelude(source, "7");
+    assert_output_no_prelude(source, "7");
 }
 
 #[test]
@@ -790,7 +706,7 @@ let apply f x = f x
 let double x = x * 2
 let main _ = apply double 21
 "#;
-    assert_output_mono_no_prelude(source, "42");
+    assert_output_no_prelude(source, "42");
 }
 
 #[test]
@@ -802,7 +718,7 @@ let double x = x + x
 let add1 x = x + 1
 let main _ = compose double add1 5
 "#;
-    assert_output_mono_no_prelude(source, "12");
+    assert_output_no_prelude(source, "12");
 }
 
 #[test]
@@ -816,7 +732,7 @@ let rec list_sum xs =
     end
 let main _ = list_sum [1, 2, 3, 4, 5]
 "#;
-    assert_output_mono_no_prelude(source, "15");
+    assert_output_no_prelude(source, "15");
 }
 
 #[test]
@@ -837,7 +753,7 @@ let rec list_sum xs =
 
 let main _ = list_sum (my_map (fun x -> x + 1) [1, 2, 3])
 "#;
-    assert_output_mono_no_prelude(source, "9");
+    assert_output_no_prelude(source, "9");
 }
 
 #[test]
@@ -846,7 +762,7 @@ fn mono_pipeline_with_prelude_length() {
     let source = r#"
 let main _ = length [1, 2, 3, 4, 5]
 "#;
-    assert_output_mono(source, "5");
+    assert_output(source, "5");
 }
 
 #[test]
@@ -868,7 +784,7 @@ let rec list_sum xs =
 
 let main _ = list_sum (reverse_acc [] [1, 2, 3])
 "#;
-    assert_output_mono_no_prelude(source, "6");
+    assert_output_no_prelude(source, "6");
 }
 
 #[test]
@@ -881,5 +797,5 @@ let main _ =
     let rec double n = n + n in
     apply_twice double 5
 "#;
-    assert_output_mono_no_prelude(source, "20");
+    assert_output_no_prelude(source, "20");
 }

@@ -7,8 +7,9 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use gneiss::ast::{ImportSpec, Item, Program};
-use gneiss::codegen::{emit_c, lower_tprogram};
+use gneiss::codegen::{emit_c, lower_mono};
 use gneiss::elaborate::elaborate;
+use gneiss::mono::monomorphize;
 use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
@@ -327,8 +328,17 @@ fn compile_file(args: &[String]) {
         }
     };
 
-    // Lower TAST to Core IR
-    let core_program = match lower_tprogram(&tprogram) {
+    // Monomorphize TAST to MonoProgram (eliminate polymorphism)
+    let mono_program = match monomorphize(&tprogram) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Monomorphization error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Lower MonoProgram to Core IR
+    let core_program = match lower_mono(&mono_program) {
         Ok(p) => p,
         Err(errors) => {
             for e in &errors {

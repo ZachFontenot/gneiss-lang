@@ -12,12 +12,12 @@ use std::collections::HashMap;
 
 use crate::ast::Literal;
 use crate::codegen::core_ir::{
-    Alt, CoreExpr, CoreLit, CoreProgram, CoreType, FunDef, PrimOp, RecBinding, Tag, TagTable,
-    TypeDef, VarGen, VarId, VariantDef,
+    Alt, CoreExpr, CoreLit, CoreProgram, CoreType, EffectId, FunDef, Handler, OpHandler, OpId,
+    PrimOp, RecBinding, Tag, TagTable, TypeDef, VarGen, VarId, VariantDef,
 };
 use crate::mono::{
-    MonoExpr, MonoExprKind, MonoFn, MonoFnId, MonoMatchArm, MonoPattern, MonoPatternKind,
-    MonoProgram, MonoRecBinding, MonoType,
+    MonoExpr, MonoExprKind, MonoFn, MonoFnId, MonoHandler, MonoMatchArm, MonoPattern,
+    MonoPatternKind, MonoProgram, MonoRecBinding, MonoType,
 };
 use crate::tast::{TBinOp, TUnaryOp};
 
@@ -43,6 +43,14 @@ pub struct LowerMonoCtx {
     errors: Vec<String>,
     /// Stack of scopes for proper variable shadowing
     scope_stack: Vec<HashMap<String, VarId>>,
+    /// Effect name to ID mapping
+    effect_ids: HashMap<String, EffectId>,
+    /// Next effect ID to assign
+    next_effect_id: EffectId,
+    /// Operation name to ID mapping (effect_name.op_name -> OpId)
+    op_ids: HashMap<(String, String), OpId>,
+    /// Next op ID to assign
+    next_op_id: OpId,
 }
 
 impl LowerMonoCtx {
@@ -59,6 +67,35 @@ impl LowerMonoCtx {
             builtins: Vec::new(),
             errors: Vec::new(),
             scope_stack: Vec::new(),
+            effect_ids: HashMap::new(),
+            next_effect_id: 0,
+            op_ids: HashMap::new(),
+            next_op_id: 0,
+        }
+    }
+
+    /// Get or create an effect ID for the given effect name
+    fn get_effect_id(&mut self, effect: &str) -> EffectId {
+        if let Some(&id) = self.effect_ids.get(effect) {
+            id
+        } else {
+            let id = self.next_effect_id;
+            self.next_effect_id += 1;
+            self.effect_ids.insert(effect.to_string(), id);
+            id
+        }
+    }
+
+    /// Get or create an op ID for the given effect and operation name
+    fn get_op_id(&mut self, effect: &str, op: &str) -> OpId {
+        let key = (effect.to_string(), op.to_string());
+        if let Some(&id) = self.op_ids.get(&key) {
+            id
+        } else {
+            let id = self.next_op_id;
+            self.next_op_id += 1;
+            self.op_ids.insert(key, id);
+            id
         }
     }
 
@@ -190,8 +227,13 @@ pub fn lower_mono(program: &MonoProgram) -> Result<CoreProgram, Vec<String>> {
         fn_vars.insert(fn_id.clone(), var);
     }
 
-    // Lower all functions
-    for (fn_id, mono_fn) in &program.functions {
+    // Lower all functions in deterministic order
+    // (HashMap iteration order is non-deterministic, which can cause effect IDs to vary)
+    let mut sorted_fn_ids: Vec<_> = program.functions.keys().collect();
+    sorted_fn_ids.sort_by_key(|id| id.mangled_name());
+
+    for fn_id in sorted_fn_ids {
+        let mono_fn = &program.functions[fn_id];
         let var = fn_vars[fn_id];
         lower_function(&mut ctx, var, mono_fn);
     }
@@ -345,9 +387,16 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
             // Collect all arguments for multi-arg application
             let (func_expr, args) = collect_app_args(func, arg);
 
-            // Lower function
+            // Lower function - if it's just a variable, use it directly
+            // This is important for CPS transform to recognize continuation calls
             let func_lowered = lower_expr(ctx, func_expr, false);
-            let func_var = ctx.fresh();
+            let (func_var, func_binding) = match &func_lowered {
+                CoreExpr::Var(v) => (*v, None),
+                _ => {
+                    let v = ctx.fresh();
+                    (v, Some(func_lowered))
+                }
+            };
 
             // Lower arguments
             let mut arg_lowered: Vec<(VarId, CoreExpr)> = vec![];
@@ -383,11 +432,16 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
                 };
             }
 
-            CoreExpr::LetExpr {
-                name: func_var,
-                name_hint: Some("func".into()),
-                value: Box::new(func_lowered),
-                body: Box::new(result),
+            // Only add func binding if the function wasn't already a variable
+            if let Some(func_expr) = func_binding {
+                CoreExpr::LetExpr {
+                    name: func_var,
+                    name_hint: Some("func".into()),
+                    value: Box::new(func_expr),
+                    body: Box::new(result),
+                }
+            } else {
+                result
             }
         }
 
@@ -771,7 +825,122 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
             }
         }
 
+        MonoExprKind::Perform { effect, op, args } => {
+            // Lower arguments and bind to fresh variables
+            let mut arg_vars = Vec::new();
+            let mut bindings = Vec::new();
+
+            for arg in args {
+                let lowered = lower_expr(ctx, arg, false);
+                let v = ctx.fresh();
+                bindings.push((v, lowered));
+                arg_vars.push(v);
+            }
+
+            let effect_id = ctx.get_effect_id(effect);
+            let op_id = ctx.get_op_id(effect, op);
+
+            let perform = CoreExpr::Perform {
+                effect: effect_id,
+                effect_name: Some(effect.clone()),
+                op: op_id,
+                op_name: Some(op.clone()),
+                args: arg_vars,
+            };
+
+            // Wrap in let bindings for arguments
+            let mut result = perform;
+            for (v, lowered) in bindings.into_iter().rev() {
+                result = CoreExpr::LetExpr {
+                    name: v,
+                    name_hint: Some("arg".into()),
+                    value: Box::new(lowered),
+                    body: Box::new(result),
+                };
+            }
+            result
+        }
+
+        MonoExprKind::Handle { body, handler } => {
+            let lowered_body = lower_expr(ctx, body, false);
+            let lowered_handler = lower_handler(ctx, handler);
+
+            CoreExpr::Handle {
+                body: Box::new(lowered_body),
+                handler: lowered_handler,
+            }
+        }
+
         MonoExprKind::Error(msg) => CoreExpr::Error(msg.clone()),
+    }
+}
+
+/// Lower a MonoHandler to a Handler
+fn lower_handler(ctx: &mut LowerMonoCtx, handler: &MonoHandler) -> Handler {
+    // Get effect ID - infer from op_clauses if not explicitly specified
+    let effect_name = handler.effect.clone().unwrap_or_else(|| {
+        // Try to infer effect name from op_clauses by looking up in op_ids
+        // The op_ids map contains (effect_name, op_name) -> OpId entries
+        // populated when we lowered Perform expressions in the handler body
+        for clause in &handler.op_clauses {
+            for ((effect, op), _) in ctx.op_ids.iter() {
+                if op == &clause.op_name {
+                    return effect.clone();
+                }
+            }
+        }
+        // Fallback if we can't infer
+        "unknown".to_string()
+    });
+    let effect_id = ctx.get_effect_id(&effect_name);
+
+    // Lower return clause
+    let (return_var, return_body) = if let Some(clause) = &handler.return_clause {
+        ctx.push_scope();
+        let (var, _) = lower_pattern_bind(ctx, &clause.pattern);
+        let body = lower_expr(ctx, &clause.body, false);
+        ctx.pop_scope();
+        (var, Box::new(body))
+    } else {
+        // Default return clause: return x -> x
+        let var = ctx.fresh();
+        (var, Box::new(CoreExpr::Var(var)))
+    };
+
+    // Lower operation handlers
+    let ops = handler.op_clauses.iter().map(|clause| {
+        ctx.push_scope();
+
+        // Bind parameters
+        let params: Vec<VarId> = clause.params.iter().map(|p| {
+            let (var, _) = lower_pattern_bind(ctx, p);
+            var
+        }).collect();
+
+        // Bind continuation
+        let cont = ctx.fresh_named(&clause.continuation);
+        ctx.bind(&clause.continuation, cont);
+
+        let body = lower_expr(ctx, &clause.body, false);
+        ctx.pop_scope();
+
+        let op_id = ctx.get_op_id(&effect_name, &clause.op_name);
+
+        OpHandler {
+            op: op_id,
+            op_name: Some(clause.op_name.clone()),
+            params,
+            cont,
+            body,
+        }
+    }).collect();
+
+    Handler {
+        effect: effect_id,
+        effect_name: Some(effect_name),
+        return_var,
+        return_body,
+        ops,
     }
 }
 

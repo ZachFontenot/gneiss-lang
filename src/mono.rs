@@ -282,8 +282,52 @@ pub enum MonoExprKind {
         second: Box<MonoExpr>,
     },
 
+    /// Effect operation: perform Effect.op args
+    Perform {
+        effect: Ident,
+        op: Ident,
+        args: Vec<MonoExpr>,
+    },
+
+    /// Effect handler: handle body with handlers
+    Handle {
+        body: Box<MonoExpr>,
+        handler: MonoHandler,
+    },
+
     /// Error placeholder
     Error(String),
+}
+
+// ============================================================================
+// Monomorphized Effect Handlers
+// ============================================================================
+
+/// Monomorphized effect handler
+#[derive(Debug, Clone)]
+pub struct MonoHandler {
+    /// Effect being handled (None for catch-all)
+    pub effect: Option<Ident>,
+    /// Return clause: return x -> body
+    pub return_clause: Option<MonoHandlerClause>,
+    /// Operation handlers
+    pub op_clauses: Vec<MonoOpClause>,
+}
+
+/// Handler clause for return
+#[derive(Debug, Clone)]
+pub struct MonoHandlerClause {
+    pub pattern: MonoPattern,
+    pub body: Box<MonoExpr>,
+}
+
+/// Handler clause for an operation
+#[derive(Debug, Clone)]
+pub struct MonoOpClause {
+    pub op_name: Ident,
+    pub params: Vec<MonoPattern>,
+    pub continuation: Ident,
+    pub body: Box<MonoExpr>,
 }
 
 // ============================================================================
@@ -443,11 +487,133 @@ impl<'a> MonoCtx<'a> {
             }
 
             TExprKind::App { func, arg } => {
-                let mono_func = self.mono_expr(func);
-                let mono_arg = self.mono_expr(arg);
-                MonoExprKind::App {
-                    func: Box::new(mono_func),
-                    arg: Box::new(mono_arg),
+                // Check if the argument is a dictionary node - if so, extract type info and skip it
+                // Dictionary arguments provide type information for monomorphization
+                match &arg.node {
+                    TExprKind::DictValue { instance_ty, type_var, .. } => {
+                        // The DictValue directly provides the type variable mapping
+                        let concrete = self.mono_type(instance_ty);
+                        self.subst.insert(*type_var, concrete.clone());
+
+                        // Check if func is a reference to a top-level polymorphic function
+                        // If so, we need to create a specialized version
+                        // Note: func might be nested in App nodes if there are multiple dict args
+                        let base_name = find_base_function_name(func);
+                        if let Some(name) = base_name {
+                            if let Some(binding) = self.find_binding(&name).cloned() {
+                                // Check if this binding contains dictionary-based calls
+                                // (i.e., is polymorphic and needs specialization)
+                                if binding_needs_specialization(&binding) {
+                                    // Create specialized function name
+                                    let specialized_name = format!("{}_{}", name, concrete.mangle());
+                                    let fn_id = MonoFnId::new(&specialized_name);
+
+                                    // If not already processed, monomorphize it with current subst
+                                    if !self.done.contains_key(&fn_id) && !self.in_progress.contains(&fn_id) {
+                                        self.in_progress.insert(fn_id.clone());
+
+                                        // Extract the actual type variable used in the binding's body
+                                        // (may differ from scheme's Generic ID)
+                                        if let Some(body_type_var) = extract_body_type_var(&binding.body) {
+                                            self.subst.insert(body_type_var, concrete.clone());
+                                        }
+
+                                        // Monomorphize the binding's body with the type substitution
+                                        let mono_params: Vec<_> = binding
+                                            .params
+                                            .iter()
+                                            .map(|p| self.mono_pattern(p))
+                                            .collect();
+                                        let mono_body = self.mono_expr(&binding.body);
+                                        let return_type = self.mono_type(&binding.ty);
+
+                                        let mono_fn = MonoFn {
+                                            id: fn_id.clone(),
+                                            params: mono_params,
+                                            body: mono_body,
+                                            return_type,
+                                        };
+
+                                        self.in_progress.remove(&fn_id);
+                                        self.done.insert(fn_id, mono_fn);
+                                    }
+
+                                    // Return a reference to the specialized function
+                                    return MonoExpr {
+                                        node: MonoExprKind::Var(specialized_name),
+                                        ty,
+                                        span,
+                                    };
+                                }
+                            }
+                        }
+
+                        // Fall through: just process func normally
+                        self.mono_expr(func).node
+                    }
+                    TExprKind::DictRef { type_var, .. } => {
+                        // DictRef references a dictionary from enclosing scope
+                        // The type variable should already be in subst from an outer DictValue
+
+                        // Look up the concrete type from subst
+                        if let Some(concrete) = self.subst.get(type_var).cloned() {
+
+                            // Check if func is a reference to a polymorphic function
+                            if let TExprKind::Var(name) = &func.node {
+                                if let Some(binding) = self.find_binding(name).cloned() {
+                                    if binding_needs_specialization(&binding) {
+                                        // Create specialized version
+                                        let specialized_name = format!("{}_{}", name, concrete.mangle());
+                                        let fn_id = MonoFnId::new(&specialized_name);
+
+                                        if !self.done.contains_key(&fn_id) && !self.in_progress.contains(&fn_id) {
+                                            self.in_progress.insert(fn_id.clone());
+
+                                            // Extract the body's type var and map it
+                                            if let Some(body_type_var) = extract_body_type_var(&binding.body) {
+                                                self.subst.insert(body_type_var, concrete.clone());
+                                            }
+
+                                            let mono_params: Vec<_> = binding
+                                                .params
+                                                .iter()
+                                                .map(|p| self.mono_pattern(p))
+                                                .collect();
+                                            let mono_body = self.mono_expr(&binding.body);
+                                            let return_type = self.mono_type(&binding.ty);
+
+                                            let mono_fn = MonoFn {
+                                                id: fn_id.clone(),
+                                                params: mono_params,
+                                                body: mono_body,
+                                                return_type,
+                                            };
+
+                                            self.in_progress.remove(&fn_id);
+                                            self.done.insert(fn_id, mono_fn);
+                                        }
+
+                                        return MonoExpr {
+                                            node: MonoExprKind::Var(specialized_name),
+                                            ty,
+                                            span,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fall through: just process func normally
+                        self.mono_expr(func).node
+                    }
+                    _ => {
+                        let mono_func = self.mono_expr(func);
+                        let mono_arg = self.mono_expr(arg);
+                        MonoExprKind::App {
+                            func: Box::new(mono_func),
+                            arg: Box::new(mono_arg),
+                        }
+                    }
                 }
             }
 
@@ -597,39 +763,90 @@ impl<'a> MonoCtx<'a> {
                 }
             }
 
-            TExprKind::DictMethodCall { .. } => {
-                // Dictionary method calls should not exist after proper elaboration
-                // For now, return an error
-                MonoExprKind::Error("DictMethodCall should be resolved".to_string())
+            TExprKind::DictMethodCall {
+                trait_name,
+                method,
+                type_var,
+                args,
+            } => {
+                // During monomorphization, resolve type variable to concrete type
+                // Look up in substitution map - the type_var should be bound
+                let concrete_ty = if let Some(mono_ty) = self.subst.get(type_var) {
+                    mono_ty.clone()
+                } else {
+                    // Type variable not in subst - might already be a concrete type
+                    // Try to get it from the expression's type
+                    self.mono_type(&args.first().map(|a| a.ty.clone()).unwrap_or(Type::Unit))
+                };
+
+                // Convert to direct call like MethodCall
+                let mangled = format!("{}_{}_{}", trait_name, concrete_ty.mangle(), method);
+                let fn_id = MonoFnId::new(&mangled);
+
+                let mono_args: Vec<_> = args.iter().map(|a| self.mono_expr(a)).collect();
+
+                MonoExprKind::Call {
+                    func: fn_id,
+                    args: mono_args,
+                }
             }
 
             TExprKind::DictValue { .. } | TExprKind::DictRef { .. } => {
-                // These are artifacts of the old approach - should not exist
-                MonoExprKind::Error("Dict nodes should not exist".to_string())
+                // Dictionary values/refs are not needed after monomorphization
+                // The callee function is specialized, so no dictionary passing required
+                // Return unit - these are essentially erased
+                MonoExprKind::Lit(crate::ast::Literal::Unit)
             }
 
             TExprKind::Perform { effect, op, args } => {
-                // Effects will be handled in a later phase
-                // For now, preserve the structure
+                // Preserve effect structure for later CPS transformation
                 let mono_args: Vec<_> = args.iter().map(|a| self.mono_expr(a)).collect();
-                // Convert to a placeholder - effects handled in effect lowering phase
-                MonoExprKind::Call {
-                    func: MonoFnId::new(&format!("perform_{}_{}", effect, op)),
+                MonoExprKind::Perform {
+                    effect: effect.clone(),
+                    op: op.clone(),
                     args: mono_args,
                 }
             }
 
             TExprKind::Handle { body, handler } => {
-                // Effects handled in later phase
-                let mono_body = self.mono_expr(body);
-                // For now, just return the body - proper effect handling comes later
-                mono_body.node
+                // Preserve handler structure for later CPS transformation
+                let mono_body = Box::new(self.mono_expr(body));
+                let mono_handler = self.mono_handler(handler);
+                MonoExprKind::Handle {
+                    body: mono_body,
+                    handler: mono_handler,
+                }
             }
 
             TExprKind::Error(msg) => MonoExprKind::Error(msg.clone()),
         };
 
         MonoExpr::new(node, ty, span)
+    }
+
+    /// Monomorphize an effect handler
+    fn mono_handler(&mut self, handler: &crate::tast::THandler) -> MonoHandler {
+        let return_clause = handler.return_clause.as_ref().map(|clause| {
+            MonoHandlerClause {
+                pattern: self.mono_pattern(&clause.pattern),
+                body: Box::new(self.mono_expr(&clause.body)),
+            }
+        });
+
+        let op_clauses = handler.op_clauses.iter().map(|clause| {
+            MonoOpClause {
+                op_name: clause.op_name.clone(),
+                params: clause.params.iter().map(|p| self.mono_pattern(p)).collect(),
+                continuation: clause.continuation.clone(),
+                body: Box::new(self.mono_expr(&clause.body)),
+            }
+        }).collect();
+
+        MonoHandler {
+            effect: handler.effect.clone(),
+            return_clause,
+            op_clauses,
+        }
     }
 
     /// Monomorphize a pattern
@@ -730,6 +947,170 @@ fn type_has_generics(ty: &Type) -> bool {
     }
 }
 
+/// Find the base function name by looking through nested App nodes with DictValue/DictRef args.
+/// For `App(App(f, dict1), dict2)`, returns the name from `f` if it's a Var.
+fn find_base_function_name(expr: &TExpr) -> Option<String> {
+    match &expr.node {
+        TExprKind::Var(name) => Some(name.clone()),
+        TExprKind::App { func, arg } => {
+            // If the arg is a dictionary node, recurse into func
+            match &arg.node {
+                TExprKind::DictValue { .. } | TExprKind::DictRef { .. } => {
+                    find_base_function_name(func)
+                }
+                _ => None, // Not a dict arg, so this isn't a dict application
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract the type variable used in dictionary-based calls in a binding's body.
+/// This finds the first DictMethodCall or DictRef and returns its type_var.
+fn extract_body_type_var(expr: &TExpr) -> Option<u32> {
+    match &expr.node {
+        TExprKind::DictMethodCall { type_var, .. } => Some(*type_var),
+        TExprKind::DictRef { type_var, .. } => Some(*type_var),
+        TExprKind::DictValue { instance_ty, .. } => {
+            // If instance_ty is a type variable, extract its ID
+            match instance_ty {
+                Type::Var(id) | Type::Generic(id) => Some(*id),
+                _ => None,
+            }
+        }
+        TExprKind::Var(_) | TExprKind::Lit(_) => None,
+        TExprKind::Lambda { body, .. } => extract_body_type_var(body),
+        TExprKind::App { func, arg } => {
+            extract_body_type_var(func).or_else(|| extract_body_type_var(arg))
+        }
+        TExprKind::Let { value, body, .. } => {
+            extract_body_type_var(value).or_else(|| body.as_ref().and_then(|b| extract_body_type_var(b)))
+        }
+        TExprKind::LetRec { bindings, body } => {
+            bindings.iter().find_map(|b| extract_body_type_var(&b.body))
+                .or_else(|| body.as_ref().and_then(|b| extract_body_type_var(b)))
+        }
+        TExprKind::If { cond, then_branch, else_branch } => {
+            extract_body_type_var(cond)
+                .or_else(|| extract_body_type_var(then_branch))
+                .or_else(|| extract_body_type_var(else_branch))
+        }
+        TExprKind::Match { scrutinee, arms } => {
+            extract_body_type_var(scrutinee).or_else(|| {
+                arms.iter().find_map(|a| {
+                    extract_body_type_var(&a.body)
+                        .or_else(|| a.guard.as_ref().and_then(|g| extract_body_type_var(g)))
+                })
+            })
+        }
+        TExprKind::BinOp { left, right, .. } => {
+            extract_body_type_var(left).or_else(|| extract_body_type_var(right))
+        }
+        TExprKind::UnaryOp { operand, .. } => extract_body_type_var(operand),
+        TExprKind::Tuple(elems) => elems.iter().find_map(|e| extract_body_type_var(e)),
+        TExprKind::List(elems) => elems.iter().find_map(|e| extract_body_type_var(e)),
+        TExprKind::Record { fields, .. } => {
+            fields.iter().find_map(|(_, e)| extract_body_type_var(e))
+        }
+        TExprKind::FieldAccess { record, .. } => extract_body_type_var(record),
+        TExprKind::MethodCall { args, .. } => args.iter().find_map(|a| extract_body_type_var(a)),
+        TExprKind::Constructor { args, .. } => args.iter().find_map(|a| extract_body_type_var(a)),
+        TExprKind::Perform { args, .. } => args.iter().find_map(|a| extract_body_type_var(a)),
+        TExprKind::Handle { body, handler, .. } => {
+            extract_body_type_var(body)
+                .or_else(|| handler.op_clauses.iter().find_map(|op| extract_body_type_var(&op.body)))
+                .or_else(|| handler.return_clause.as_ref().and_then(|r| extract_body_type_var(&r.body)))
+        }
+        TExprKind::RecordUpdate { base, updates, .. } => {
+            extract_body_type_var(base)
+                .or_else(|| updates.iter().find_map(|(_, e)| extract_body_type_var(e)))
+        }
+        TExprKind::Seq { first, second } => {
+            extract_body_type_var(first).or_else(|| extract_body_type_var(second))
+        }
+        TExprKind::Error(_) => None,
+    }
+}
+
+/// Check if a binding needs specialization (is polymorphic and contains dictionary-based calls)
+/// A binding needs specialization only if:
+/// 1. It contains dictionary-based calls (DictMethodCall, DictRef)
+/// 2. These calls use type variables from the binding's own parameters
+///
+/// Functions like `main` that call polymorphic functions don't need specialization themselves.
+fn binding_needs_specialization(binding: &TBinding) -> bool {
+    // Check if the body contains dictionary method calls or refs
+    // but NOT if it just contains DictValue (which is passing dictionaries to other functions)
+    expr_uses_dict_method(&binding.body)
+}
+
+/// Check if an expression uses dictionary methods (DictMethodCall or DictRef)
+/// or passes a polymorphic type to another function (DictValue with type variable instance).
+/// This indicates the function itself is polymorphic and needs specialization.
+fn expr_uses_dict_method(expr: &TExpr) -> bool {
+    match &expr.node {
+        TExprKind::DictMethodCall { .. } => true,
+        TExprKind::DictRef { .. } => true,
+        // DictValue with a type variable instance means we're forwarding a polymorphic type
+        TExprKind::DictValue { instance_ty, .. } => {
+            matches!(instance_ty, Type::Var(_) | Type::Generic(_))
+        }
+        TExprKind::Var(_) | TExprKind::Lit(_) => false,
+        TExprKind::Lambda { body, .. } => expr_uses_dict_method(body),
+        TExprKind::App { func, arg } => {
+            expr_uses_dict_method(func) || expr_uses_dict_method(arg)
+        }
+        TExprKind::Let { value, body, .. } => {
+            expr_uses_dict_method(value)
+                || body.as_ref().map_or(false, |b| expr_uses_dict_method(b))
+        }
+        TExprKind::LetRec { bindings, body } => {
+            bindings.iter().any(|b| expr_uses_dict_method(&b.body))
+                || body.as_ref().map_or(false, |b| expr_uses_dict_method(b))
+        }
+        TExprKind::If { cond, then_branch, else_branch } => {
+            expr_uses_dict_method(cond)
+                || expr_uses_dict_method(then_branch)
+                || expr_uses_dict_method(else_branch)
+        }
+        TExprKind::Match { scrutinee, arms } => {
+            expr_uses_dict_method(scrutinee)
+                || arms.iter().any(|a| {
+                    expr_uses_dict_method(&a.body)
+                        || a.guard.as_ref().map_or(false, |g| expr_uses_dict_method(g))
+                })
+        }
+        TExprKind::BinOp { left, right, .. } => {
+            expr_uses_dict_method(left) || expr_uses_dict_method(right)
+        }
+        TExprKind::UnaryOp { operand, .. } => expr_uses_dict_method(operand),
+        TExprKind::Tuple(elems) => elems.iter().any(|e| expr_uses_dict_method(e)),
+        TExprKind::List(elems) => elems.iter().any(|e| expr_uses_dict_method(e)),
+        TExprKind::Record { fields, .. } => {
+            fields.iter().any(|(_, e)| expr_uses_dict_method(e))
+        }
+        TExprKind::FieldAccess { record, .. } => expr_uses_dict_method(record),
+        TExprKind::MethodCall { args, .. } => {
+            args.iter().any(|a| expr_uses_dict_method(a))
+        }
+        TExprKind::Constructor { args, .. } => args.iter().any(|a| expr_uses_dict_method(a)),
+        TExprKind::Perform { args, .. } => args.iter().any(|a| expr_uses_dict_method(a)),
+        TExprKind::Handle { body, handler, .. } => {
+            expr_uses_dict_method(body)
+                || handler.op_clauses.iter().any(|op| expr_uses_dict_method(&op.body))
+                || handler.return_clause.as_ref().map_or(false, |r| expr_uses_dict_method(&r.body))
+        }
+        TExprKind::RecordUpdate { base, updates, .. } => {
+            expr_uses_dict_method(base)
+                || updates.iter().any(|(_, e)| expr_uses_dict_method(e))
+        }
+        TExprKind::Seq { first, second } => {
+            expr_uses_dict_method(first) || expr_uses_dict_method(second)
+        }
+        TExprKind::Error(_) => false,
+    }
+}
+
 // ============================================================================
 // Main Monomorphization Function
 // ============================================================================
@@ -746,9 +1127,14 @@ pub fn monomorphize(tprogram: &TProgram) -> Result<MonoProgram, String> {
     };
 
     // Process all top-level bindings
-    // For Phase 1, we're not doing full demand-driven monomorphization yet
-    // Just process all bindings with their concrete types
+    // Skip bindings that need specialization - they'll be created on demand when called
     for binding in &tprogram.bindings {
+        // Skip polymorphic bindings that need specialization
+        let needs_spec = binding_needs_specialization(binding);
+        if needs_spec {
+            continue;
+        }
+
         let fn_id = MonoFnId::new(&binding.name);
 
         if ctx.done.contains_key(&fn_id) {

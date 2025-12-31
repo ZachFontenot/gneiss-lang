@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use crate::ast::{Ident, Literal, Span};
-use crate::types::Type;
+use crate::types::{Type, TypeVarId};
 
 // ============================================================================
 // Typed Expressions
@@ -158,6 +158,8 @@ pub enum TExprKind {
         trait_name: Ident,
         /// The concrete type (e.g., Int, List Int)
         instance_ty: Type,
+        /// The type variable this dictionary is for (in the callee's scheme)
+        type_var: TypeVarId,
     },
 
     /// Reference to a dictionary parameter (from enclosing polymorphic function)

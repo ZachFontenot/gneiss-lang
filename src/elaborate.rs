@@ -466,14 +466,19 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
                     let targ = elaborate_expr(ctx, arg)?;
                     let arg_ty = targ.ty.clone();
 
-                    // Check if the argument type is polymorphic (Generic)
+                    // Check if the argument type is polymorphic (Generic or unbound Var)
                     // If so, we need dictionary-based dispatch at runtime
-                    if let Type::Generic(type_var_id) = &arg_ty {
+                    let type_var_id = match &arg_ty {
+                        Type::Generic(id) => Some(*id),
+                        Type::Var(id) if !ctx.infer.is_type_var_bound(*id) => Some(*id),
+                        _ => None,
+                    };
+                    if let Some(type_var_id) = type_var_id {
                         return Ok(TExpr::new(
                             TExprKind::DictMethodCall {
                                 trait_name: trait_name.to_string(),
                                 method: name.clone(),
-                                type_var: *type_var_id,
+                                type_var: type_var_id,
                                 args: vec![targ],
                             },
                             ty,
@@ -529,10 +534,17 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
                                         }
                                         _ => {
                                             // Concrete type - use static dictionary
+                                            // Get the type variable ID from the Generic in the predicate
+                                            let type_var_id = if let Type::Generic(id) = &pred.ty {
+                                                *id
+                                            } else {
+                                                0 // Fallback - shouldn't happen
+                                            };
                                             TExpr::new(
                                                 TExprKind::DictValue {
                                                     trait_name: pred.trait_name.clone(),
                                                     instance_ty: arg_ty.clone(),
+                                                    type_var: type_var_id,
                                                 },
                                                 Type::Unit, // Dict type placeholder
                                                 span.clone(),

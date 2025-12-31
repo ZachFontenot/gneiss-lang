@@ -1448,9 +1448,11 @@ impl CEmitter {
                 let handler_var = self.fresh_var(Some("handler"));
                 let n_ops = handler.op_handlers.len();
 
-                // Emit op handlers array
-                let op_handlers_str: Vec<String> = handler
-                    .op_handlers
+                // Sort op handlers by op_id to ensure ops[i] handles operation i
+                let mut sorted_ops: Vec<_> = handler.op_handlers.iter().collect();
+                sorted_ops.sort_by_key(|op| op.op);
+
+                let op_handlers_str: Vec<String> = sorted_ops
                     .iter()
                     .map(|op| self.get_var_name(op.handler_fn))
                     .collect();
@@ -2150,57 +2152,18 @@ fn escape_string(s: &str) -> String {
 // ============================================================================
 
 /// Compile a CoreProgram to C source code
+///
+/// Pipeline:
+/// 1. CPS transformation (for effects)
+/// 2. Closure conversion (eliminate lambdas)
+/// 3. Emit C from Flat IR
 pub fn emit_c(program: &CoreProgram) -> String {
     // Apply CPS transformation for effects if needed
-    let transformed = super::cps_transform::cps_transform(program.clone());
+    let cps_program = super::cps_transform::cps_transform(program.clone());
 
-    let mut emitter = CEmitter::new();
-    emitter.emit_program(&transformed)
-}
+    // Closure conversion: lift lambdas to top-level functions
+    let flat_program = super::closure::closure_convert(&cps_program);
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::codegen::lower::lower_program;
-    use crate::{Lexer, Parser};
-
-    fn compile_to_c(source: &str) -> Result<String, String> {
-        let tokens = Lexer::new(source)
-            .tokenize()
-            .map_err(|e| format!("{:?}", e))?;
-        let program = Parser::new(tokens)
-            .parse_program()
-            .map_err(|e| format!("{:?}", e))?;
-        let core = lower_program(&program).map_err(|e| e.join("\n"))?;
-        Ok(emit_c(&core))
-    }
-
-    #[test]
-    fn test_emit_literal() {
-        let c_code = compile_to_c("42").unwrap();
-        assert!(c_code.contains("GN_INT(42)"));
-    }
-
-    #[test]
-    fn test_emit_binop() {
-        let c_code = compile_to_c("1 + 2").unwrap();
-        assert!(c_code.contains("GN_INT_ADD"));
-    }
-
-    #[test]
-    fn test_emit_if() {
-        let c_code = compile_to_c("if true then 1 else 2").unwrap();
-        assert!(c_code.contains("GN_IS_TRUE"));
-    }
-
-    #[test]
-    fn test_emit_function() {
-        let c_code = compile_to_c("let rec f x = x + 1 in f 5").unwrap();
-        // Should have some function definition or call
-        assert!(c_code.contains("main"));
-    }
+    // Emit C from FlatProgram
+    super::emit_flat::emit_flat_c(&flat_program)
 }

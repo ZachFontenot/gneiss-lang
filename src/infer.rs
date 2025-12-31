@@ -314,6 +314,11 @@ impl Inferencer {
         &self.warnings
     }
 
+    /// Check if a type variable is bound to a concrete type
+    pub fn is_type_var_bound(&self, id: TypeVarId) -> bool {
+        self.type_uf.is_bound(id)
+    }
+
     /// Register a module's type environment for qualified access
     pub fn register_module(&mut self, name: String, env: TypeEnv) {
         self.module_envs.insert(name, env);
