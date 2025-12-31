@@ -128,6 +128,17 @@ gn_value gn_string_join(gn_value sep, gn_value list);
 gn_value gn_string_split(gn_value sep, gn_value str);
 gn_value gn_string_index_of(gn_value needle, gn_value haystack);
 gn_value gn_string_substring(gn_value start, gn_value end, gn_value str);
+gn_value gn_string_to_upper(gn_value s);
+gn_value gn_string_to_lower(gn_value s);
+gn_value gn_string_trim(gn_value s);
+gn_value gn_string_replace(gn_value old_str, gn_value new_str, gn_value s);
+gn_value gn_string_starts_with(gn_value prefix, gn_value s);
+gn_value gn_string_ends_with(gn_value suffix, gn_value s);
+gn_value gn_string_contains(gn_value needle, gn_value haystack);
+gn_value gn_string_char_at(gn_value index, gn_value s);
+gn_value gn_string_to_chars(gn_value s);
+gn_value gn_chars_to_string(gn_value chars);
+gn_value gn_bytes_to_string(gn_value bytes);
 
 /* I/O operations */
 gn_value gn_io_print(gn_value s);
@@ -193,7 +204,8 @@ typedef struct gn_handler {
 typedef struct gn_continuation {
     uint32_t rc;                   /* Reference count */
     uint32_t tag;                  /* TAG_CONTINUATION */
-    gn_handler* captured_handler;  /* Handler that was active (for deep semantics) */
+    gn_handler* captured_stack_top; /* Top of handler stack when captured (for deep semantics) */
+    gn_handler* stack_bottom;       /* Where the stack was after popping (to know when to stop restoring) */
     gn_value resume_fn;            /* Function to call to resume: (value) -> result */
 } gn_continuation;
 
@@ -204,7 +216,7 @@ gn_handler* gn_find_handler(gn_effect_id effect);
 gn_handler* gn_current_handler(void);
 
 /* Continuation operations */
-gn_value gn_make_continuation(gn_value resume_fn, gn_handler* captured);
+gn_value gn_make_continuation(gn_value resume_fn, gn_handler* stack_top, gn_handler* stack_bottom);
 gn_value gn_resume(gn_value cont, gn_value value);
 gn_value gn_resume_multi(gn_value cont, gn_value value);  /* Multi-shot resume (copies cont) */
 

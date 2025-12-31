@@ -7,15 +7,17 @@
 
 #include "gn_runtime.h"
 #include <inttypes.h>
+#include <ctype.h>
 
 /* ============================================================================
  * Configuration
  * ============================================================================ */
 
 /* Tag values for built-in types */
-#define TAG_STRING   0xFFFF0001
-#define TAG_FLOAT    0xFFFF0002
-#define TAG_CLOSURE  0xFFFF0003
+#define TAG_STRING       0xFFFF0001
+#define TAG_FLOAT        0xFFFF0002
+#define TAG_CLOSURE      0xFFFF0003
+#define TAG_CONTINUATION 0xFFFF0004
 
 /* List constructors (standard Option/List encoding) */
 #define TAG_NIL      6
@@ -460,6 +462,216 @@ gn_value gn_string_substring(gn_value start, gn_value end, gn_value str) {
     return gn_alloc(TAG_STRING, 2, fields);
 }
 
+gn_value gn_string_to_upper(gn_value s) {
+    gn_object* obj = GN_OBJ(s);
+    char* str = (char*)obj->fields[0];
+    size_t len = (size_t)obj->fields[1];
+
+    char* result = (char*)malloc(len + 1);
+    if (!result) gn_panic("out of memory");
+
+    for (size_t i = 0; i < len; i++) {
+        result[i] = toupper((unsigned char)str[i]);
+    }
+    result[len] = '\0';
+
+    gn_value fields[2] = { (gn_value)result, (gn_value)len };
+    return gn_alloc(TAG_STRING, 2, fields);
+}
+
+gn_value gn_string_to_lower(gn_value s) {
+    gn_object* obj = GN_OBJ(s);
+    char* str = (char*)obj->fields[0];
+    size_t len = (size_t)obj->fields[1];
+
+    char* result = (char*)malloc(len + 1);
+    if (!result) gn_panic("out of memory");
+
+    for (size_t i = 0; i < len; i++) {
+        result[i] = tolower((unsigned char)str[i]);
+    }
+    result[len] = '\0';
+
+    gn_value fields[2] = { (gn_value)result, (gn_value)len };
+    return gn_alloc(TAG_STRING, 2, fields);
+}
+
+gn_value gn_string_trim(gn_value s) {
+    gn_object* obj = GN_OBJ(s);
+    char* str = (char*)obj->fields[0];
+    size_t len = (size_t)obj->fields[1];
+
+    /* Find start (skip leading whitespace) */
+    size_t start = 0;
+    while (start < len && isspace((unsigned char)str[start])) {
+        start++;
+    }
+
+    /* Find end (skip trailing whitespace) */
+    size_t end = len;
+    while (end > start && isspace((unsigned char)str[end - 1])) {
+        end--;
+    }
+
+    size_t new_len = end - start;
+    char* result = (char*)malloc(new_len + 1);
+    if (!result) gn_panic("out of memory");
+
+    memcpy(result, str + start, new_len);
+    result[new_len] = '\0';
+
+    gn_value fields[2] = { (gn_value)result, (gn_value)new_len };
+    return gn_alloc(TAG_STRING, 2, fields);
+}
+
+gn_value gn_string_replace(gn_value old_str, gn_value new_str, gn_value s) {
+    gn_object* s_obj = GN_OBJ(s);
+    gn_object* old_obj = GN_OBJ(old_str);
+    gn_object* new_obj = GN_OBJ(new_str);
+
+    char* str = (char*)s_obj->fields[0];
+    size_t str_len = (size_t)s_obj->fields[1];
+    char* old = (char*)old_obj->fields[0];
+    size_t old_len = (size_t)old_obj->fields[1];
+    char* new_s = (char*)new_obj->fields[0];
+    size_t new_len = (size_t)new_obj->fields[1];
+
+    if (old_len == 0) {
+        /* Empty pattern - return original */
+        return s;
+    }
+
+    /* Count occurrences */
+    size_t count = 0;
+    char* p = str;
+    while ((p = strstr(p, old)) != NULL) {
+        count++;
+        p += old_len;
+    }
+
+    if (count == 0) {
+        return s;
+    }
+
+    /* Allocate result */
+    size_t result_len = str_len + count * (new_len - old_len);
+    char* result = (char*)malloc(result_len + 1);
+    if (!result) gn_panic("out of memory");
+
+    /* Build result */
+    char* dst = result;
+    char* src = str;
+    while ((p = strstr(src, old)) != NULL) {
+        size_t prefix_len = p - src;
+        memcpy(dst, src, prefix_len);
+        dst += prefix_len;
+        memcpy(dst, new_s, new_len);
+        dst += new_len;
+        src = p + old_len;
+    }
+    strcpy(dst, src);
+
+    gn_value fields[2] = { (gn_value)result, (gn_value)result_len };
+    return gn_alloc(TAG_STRING, 2, fields);
+}
+
+gn_value gn_string_starts_with(gn_value prefix, gn_value s) {
+    gn_object* prefix_obj = GN_OBJ(prefix);
+    gn_object* s_obj = GN_OBJ(s);
+
+    char* prefix_str = (char*)prefix_obj->fields[0];
+    size_t prefix_len = (size_t)prefix_obj->fields[1];
+    char* str = (char*)s_obj->fields[0];
+    size_t str_len = (size_t)s_obj->fields[1];
+
+    if (prefix_len > str_len) return GN_FALSE;
+    return memcmp(str, prefix_str, prefix_len) == 0 ? GN_TRUE : GN_FALSE;
+}
+
+gn_value gn_string_ends_with(gn_value suffix, gn_value s) {
+    gn_object* suffix_obj = GN_OBJ(suffix);
+    gn_object* s_obj = GN_OBJ(s);
+
+    char* suffix_str = (char*)suffix_obj->fields[0];
+    size_t suffix_len = (size_t)suffix_obj->fields[1];
+    char* str = (char*)s_obj->fields[0];
+    size_t str_len = (size_t)s_obj->fields[1];
+
+    if (suffix_len > str_len) return GN_FALSE;
+    return memcmp(str + str_len - suffix_len, suffix_str, suffix_len) == 0 ? GN_TRUE : GN_FALSE;
+}
+
+gn_value gn_string_contains(gn_value needle, gn_value haystack) {
+    gn_object* needle_obj = GN_OBJ(needle);
+    gn_object* haystack_obj = GN_OBJ(haystack);
+
+    char* needle_str = (char*)needle_obj->fields[0];
+    char* haystack_str = (char*)haystack_obj->fields[0];
+
+    return strstr(haystack_str, needle_str) != NULL ? GN_TRUE : GN_FALSE;
+}
+
+gn_value gn_string_char_at(gn_value index, gn_value s) {
+    gn_object* s_obj = GN_OBJ(s);
+    char* str = (char*)s_obj->fields[0];
+    size_t len = (size_t)s_obj->fields[1];
+    int64_t idx = GN_UNINT(index);
+
+    if (idx < 0 || (size_t)idx >= len) {
+        /* Return None */
+        return gn_singleton(TAG_NONE);
+    }
+
+    /* Return Some(char) */
+    gn_value c = GN_CHAR(str[idx]);
+    return gn_alloc(TAG_SOME, 1, &c);
+}
+
+gn_value gn_string_to_chars(gn_value s) {
+    gn_object* s_obj = GN_OBJ(s);
+    char* str = (char*)s_obj->fields[0];
+    size_t len = (size_t)s_obj->fields[1];
+
+    /* Build list from end to start */
+    gn_value result = gn_singleton(TAG_NIL);
+    for (size_t i = len; i > 0; i--) {
+        gn_value c = GN_CHAR(str[i - 1]);
+        result = gn_list_cons(c, result);
+    }
+    return result;
+}
+
+gn_value gn_chars_to_string(gn_value chars) {
+    /* First pass: count length */
+    size_t len = 0;
+    gn_value current = chars;
+    while (!GN_IS_INT(current) && GN_OBJ(current)->tag == TAG_CONS) {
+        len++;
+        current = GN_OBJ(current)->fields[1];
+    }
+
+    /* Allocate string */
+    char* result = (char*)malloc(len + 1);
+    if (!result) gn_panic("out of memory");
+
+    /* Second pass: fill string */
+    current = chars;
+    for (size_t i = 0; i < len; i++) {
+        gn_value c = GN_OBJ(current)->fields[0];
+        result[i] = (char)GN_UNINT(c);
+        current = GN_OBJ(current)->fields[1];
+    }
+    result[len] = '\0';
+
+    gn_value fields[2] = { (gn_value)result, (gn_value)len };
+    return gn_alloc(TAG_STRING, 2, fields);
+}
+
+gn_value gn_bytes_to_string(gn_value bytes) {
+    /* Same as chars_to_string - bytes are just ints */
+    return gn_chars_to_string(bytes);
+}
+
 /* ============================================================================
  * I/O Operations
  * ============================================================================ */
@@ -712,8 +924,19 @@ gn_value gn_make_closure(void* fn, uint32_t arity, uint32_t n_captures, gn_value
  * - If arity > 1: return a new closure with arity-1, appending arg to applied args
  */
 gn_value gn_apply(gn_value closure, gn_value arg) {
+    if (GN_IS_INT(closure)) {
+        gn_panic("apply: cannot apply an integer");
+    }
+
     gn_object* obj = GN_OBJ(closure);
+
+    /* Handle continuation case - delegate to resume */
+    if (obj->tag == TAG_CONTINUATION) {
+        return gn_resume_multi(closure, arg);
+    }
+
     if (obj->tag != TAG_CLOSURE) {
+        fprintf(stderr, "apply: expected closure, got tag %u\n", obj->tag);
         gn_panic("apply: not a closure");
     }
 
@@ -776,9 +999,6 @@ gn_value gn_apply2(gn_value closure, gn_value arg1, gn_value arg2) {
 /* ============================================================================
  * Algebraic Effects Runtime Support
  * ============================================================================ */
-
-/* Tag for continuation objects */
-#define TAG_CONTINUATION 0xFFFF0004
 
 /* Global handler stack (thread-local for future concurrency support) */
 static gn_handler* gn_handler_stack = NULL;
@@ -863,11 +1083,12 @@ void gn_free_handler(gn_handler* h) {
  * Continuation Operations
  * ============================================================================ */
 
-gn_value gn_make_continuation(gn_value resume_fn, gn_handler* captured) {
+gn_value gn_make_continuation(gn_value resume_fn, gn_handler* stack_top, gn_handler* stack_bottom) {
     /*
      * Create a continuation object that captures:
      * - The resume function (a closure that continues the computation)
-     * - The handler that was active (for deep handler semantics)
+     * - The handler stack from stack_top down to (but not including) stack_bottom
+     *   This allows restoring the full handler context on resume.
      */
     gn_continuation* cont = (gn_continuation*)malloc(sizeof(gn_continuation));
     if (!cont) {
@@ -877,9 +1098,46 @@ gn_value gn_make_continuation(gn_value resume_fn, gn_handler* captured) {
     cont->rc = 1;
     cont->tag = TAG_CONTINUATION;
     cont->resume_fn = resume_fn;
-    cont->captured_handler = captured;
+    cont->captured_stack_top = stack_top;
+    cont->stack_bottom = stack_bottom;
 
     return (gn_value)cont;
+}
+
+/* Helper: restore handler stack from captured chain */
+static void restore_handler_stack(gn_handler* top, gn_handler* bottom) {
+    if (top == bottom || top == NULL) {
+        return;
+    }
+
+    /* Count handlers to restore */
+    int count = 0;
+    gn_handler* h = top;
+    while (h != NULL && h != bottom) {
+        count++;
+        h = h->parent;
+    }
+
+    if (count == 0) return;
+
+    /* Build array of handlers (from top to just above bottom) */
+    gn_handler** handlers = (gn_handler**)malloc(count * sizeof(gn_handler*));
+    if (!handlers) {
+        gn_panic("out of memory restoring handlers");
+    }
+
+    h = top;
+    for (int i = 0; i < count; i++) {
+        handlers[i] = h;
+        h = h->parent;
+    }
+
+    /* Push in reverse order (bottom-most first, then work up to top) */
+    for (int i = count - 1; i >= 0; i--) {
+        gn_push_handler(handlers[i]);
+    }
+
+    free(handlers);
 }
 
 gn_value gn_resume(gn_value cont_val, gn_value value) {
@@ -887,7 +1145,7 @@ gn_value gn_resume(gn_value cont_val, gn_value value) {
      * Resume a continuation with a value.
      * This is the single-shot version - the continuation is consumed.
      *
-     * For deep handler semantics, we restore the captured handler
+     * For deep handler semantics, we restore the full captured handler stack
      * before resuming, so effects in the resumed code are still handled.
      */
     gn_continuation* cont = (gn_continuation*)cont_val;
@@ -896,10 +1154,8 @@ gn_value gn_resume(gn_value cont_val, gn_value value) {
         gn_panic("resume: not a continuation");
     }
 
-    /* For deep handler semantics, restore the captured handler */
-    if (cont->captured_handler) {
-        gn_push_handler(cont->captured_handler);
-    }
+    /* For deep handler semantics, restore the captured handler stack */
+    restore_handler_stack(cont->captured_stack_top, cont->stack_bottom);
 
     /* Get the resume function and value */
     gn_value resume_fn = cont->resume_fn;
@@ -932,13 +1188,11 @@ gn_value gn_resume_multi(gn_value cont_val, gn_value value) {
     obj = GN_OBJ(cont_val);
 
     if (obj->tag == TAG_CONTINUATION) {
-        /* Effect continuation - restore handler context and resume */
+        /* Effect continuation - restore full handler stack and resume */
         gn_continuation* cont;
         cont = (gn_continuation*)cont_val;
 
-        if (cont->captured_handler) {
-            gn_push_handler(cont->captured_handler);
-        }
+        restore_handler_stack(cont->captured_stack_top, cont->stack_bottom);
 
         return gn_apply(cont->resume_fn, value);
     } else if (obj->tag == TAG_CLOSURE) {
@@ -987,15 +1241,20 @@ gn_value gn_perform(gn_effect_id effect, gn_op_id op,
 
     /*
      * Capture continuation: current_k is already the CPS continuation.
-     * For deep handler semantics, we include h in the captured continuation
-     * so that when resumed, effects are still handled.
+     * For deep handler semantics, we capture the full handler stack from top
+     * down to and including the matched handler. This allows restoring all
+     * handlers (including inner ones) when the continuation is resumed.
      */
-    gn_value captured_k = gn_make_continuation(current_k, h);
+    gn_handler* stack_top = gn_handler_stack;
+    gn_handler* stack_bottom = h->parent;  /* Where stack will be after popping */
 
     /* Pop handlers up to and including h */
     while (gn_handler_stack != NULL && gn_handler_stack != h->parent) {
         gn_pop_handler();
     }
+
+    /* Create continuation that captures the full popped handler chain */
+    gn_value captured_k = gn_make_continuation(current_k, stack_top, stack_bottom);
 
     /* Get the operation handler and outer continuation */
     gn_value op_handler = h->op_fns[op];

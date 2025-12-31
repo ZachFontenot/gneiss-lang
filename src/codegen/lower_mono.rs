@@ -8,7 +8,7 @@
 //! - Pattern matching desugaring: patterns become case expressions
 //! - All functions are concrete - no polymorphism handling needed
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::ast::Literal;
 use crate::codegen::core_ir::{
@@ -43,14 +43,13 @@ pub struct LowerMonoCtx {
     errors: Vec<String>,
     /// Stack of scopes for proper variable shadowing
     scope_stack: Vec<HashMap<String, VarId>>,
-    /// Effect name to ID mapping
-    effect_ids: HashMap<String, EffectId>,
+    /// Effect name to ID mapping (BTreeMap for deterministic ordering)
+    effect_ids: BTreeMap<String, EffectId>,
     /// Next effect ID to assign
     next_effect_id: EffectId,
-    /// Operation name to ID mapping (effect_name.op_name -> OpId)
-    op_ids: HashMap<(String, String), OpId>,
-    /// Next op ID to assign
-    next_op_id: OpId,
+    /// Operation name to ID mapping per effect (effect_name -> (op_name -> OpId))
+    /// Op IDs are assigned per-effect starting from 0, so each effect's ops are 0, 1, 2...
+    op_ids: BTreeMap<String, BTreeMap<String, OpId>>,
 }
 
 impl LowerMonoCtx {
@@ -67,10 +66,9 @@ impl LowerMonoCtx {
             builtins: Vec::new(),
             errors: Vec::new(),
             scope_stack: Vec::new(),
-            effect_ids: HashMap::new(),
+            effect_ids: BTreeMap::new(),
             next_effect_id: 0,
-            op_ids: HashMap::new(),
-            next_op_id: 0,
+            op_ids: BTreeMap::new(),
         }
     }
 
@@ -86,15 +84,16 @@ impl LowerMonoCtx {
         }
     }
 
-    /// Get or create an op ID for the given effect and operation name
+    /// Get or create an op ID for the given effect and operation name.
+    /// Op IDs are assigned per-effect starting from 0, ensuring each effect's
+    /// operations are densely indexed for the runtime op_fns array.
     fn get_op_id(&mut self, effect: &str, op: &str) -> OpId {
-        let key = (effect.to_string(), op.to_string());
-        if let Some(&id) = self.op_ids.get(&key) {
+        let effect_ops = self.op_ids.entry(effect.to_string()).or_insert_with(BTreeMap::new);
+        if let Some(&id) = effect_ops.get(op) {
             id
         } else {
-            let id = self.next_op_id;
-            self.next_op_id += 1;
-            self.op_ids.insert(key, id);
+            let id = effect_ops.len() as OpId;  // Next ID is the current count
+            effect_ops.insert(op.to_string(), id);
             id
         }
     }
@@ -1042,11 +1041,10 @@ fn lower_handler(ctx: &mut LowerMonoCtx, handler: &MonoHandler) -> Handler {
     // Get effect ID - infer from op_clauses if not explicitly specified
     let effect_name = handler.effect.clone().unwrap_or_else(|| {
         // Try to infer effect name from op_clauses by looking up in op_ids
-        // The op_ids map contains (effect_name, op_name) -> OpId entries
-        // populated when we lowered Perform expressions in the handler body
+        // The op_ids map is structured as effect_name -> (op_name -> OpId)
         for clause in &handler.op_clauses {
-            for ((effect, op), _) in ctx.op_ids.iter() {
-                if op == &clause.op_name {
+            for (effect, ops) in ctx.op_ids.iter() {
+                if ops.contains_key(&clause.op_name) {
                     return effect.clone();
                 }
             }
