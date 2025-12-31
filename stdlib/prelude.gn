@@ -146,6 +146,10 @@ end
 -- Converts any showable value to a string and prints it to stdout.
 let print x = io_print (show x)
 
+-- println : a -> () { IO } where a : Show
+-- Like print, but adds a newline at the end.
+let println x = io_print (show x ++ "\n")
+
 -- read_line : () -> String { IO }
 -- Reads a line from stdin (wrapper around io_read_line).
 let read_line () = io_read_line ()
