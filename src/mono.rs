@@ -295,6 +295,41 @@ pub enum MonoExprKind {
         handler: MonoHandler,
     },
 
+    // ========================================================================
+    // Dictionary-based trait method dispatch
+    // ========================================================================
+
+    /// Call a trait method through a dictionary
+    /// E.g., `show x` where Show dict is passed as parameter
+    DictCall {
+        trait_name: String,
+        method: String,
+        /// The dictionary to use (either DictParam or DictBuild)
+        dict: Box<MonoExpr>,
+        /// Arguments to the method
+        args: Vec<MonoExpr>,
+    },
+
+    /// Reference to a dictionary parameter of the current function
+    /// E.g., in `let f dict x = dict.show x`, this references `dict`
+    DictParam {
+        trait_name: String,
+        /// Index in the function's dict_params list
+        param_idx: usize,
+    },
+
+    /// Build a dictionary for a concrete type
+    /// For simple instances: returns static dict (e.g., Show_Int)
+    /// For parametric instances: calls factory with sub-dicts (e.g., make_Show_List(Show_Int))
+    DictBuild {
+        trait_name: String,
+        /// The concrete type this dict is for
+        for_type: MonoType,
+        /// Sub-dictionaries needed (for parametric instances)
+        /// E.g., Show (List Int) needs Show Int dict
+        sub_dicts: Vec<MonoExpr>,
+    },
+
     /// Error placeholder
     Error(String),
 }
@@ -385,9 +420,19 @@ pub struct MonoRecBinding {
 // Monomorphized Function
 // ============================================================================
 
+/// A dictionary parameter for a function
+#[derive(Debug, Clone)]
+pub struct MonoDictParam {
+    pub trait_name: String,
+    /// The type variable index this dict is for (from the original scheme)
+    pub type_var: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct MonoFn {
     pub id: MonoFnId,
+    /// Dictionary parameters (passed before regular params)
+    pub dict_params: Vec<MonoDictParam>,
     pub params: Vec<MonoPattern>,
     pub body: MonoExpr,
     pub return_type: MonoType,
@@ -436,6 +481,12 @@ pub struct MonoCtx<'a> {
     subst: HashMap<u32, MonoType>,
     /// Set of function IDs currently being processed (to detect recursion)
     in_progress: HashSet<MonoFnId>,
+    /// Current function's dictionary parameters (for resolving DictRef)
+    /// Maps type_var_id -> (trait_name, param_index)
+    current_dict_params: HashMap<u32, (String, usize)>,
+    /// When specializing an instance method, this maps method names to their
+    /// concrete implementations. E.g., "show" -> "Show_Int_show"
+    instance_method_subst: HashMap<String, String>,
 }
 
 impl<'a> MonoCtx<'a> {
@@ -446,6 +497,8 @@ impl<'a> MonoCtx<'a> {
             done: HashMap::new(),
             subst: HashMap::new(),
             in_progress: HashSet::new(),
+            current_dict_params: HashMap::new(),
+            instance_method_subst: HashMap::new(),
         }
     }
 
@@ -462,6 +515,108 @@ impl<'a> MonoCtx<'a> {
         self.tprogram.bindings.iter().find(|b| b.name == name)
     }
 
+    /// Convert a MonoType back to a Type (for matching against instances)
+    fn subst_to_type(&self, mono: &MonoType) -> Type {
+        match mono {
+            MonoType::Int => Type::Int,
+            MonoType::Float => Type::Float,
+            MonoType::Bool => Type::Bool,
+            MonoType::String => Type::String,
+            MonoType::Char => Type::Char,
+            MonoType::Unit => Type::Unit,
+            MonoType::Bytes => Type::Bytes,
+            MonoType::Tuple(elems) => {
+                Type::Tuple(elems.iter().map(|e| self.subst_to_type(e)).collect())
+            }
+            MonoType::Constructor { name, args } => Type::Constructor {
+                name: name.clone(),
+                args: args.iter().map(|a| self.subst_to_type(a)).collect(),
+            },
+            MonoType::Function { params, ret } => {
+                let mut result = self.subst_to_type(ret);
+                for p in params.iter().rev() {
+                    result = Type::Arrow {
+                        arg: std::rc::Rc::new(self.subst_to_type(p)),
+                        ret: std::rc::Rc::new(result),
+                        effects: crate::types::Row::Empty,
+                    };
+                }
+                result
+            }
+        }
+    }
+
+    /// Build a dictionary expression for a concrete type.
+    /// For simple instances (Show Int), returns DictBuild with no sub-dicts.
+    /// For parametric instances (Show (List Int)), returns DictBuild with sub-dicts.
+    fn build_dict_for_type(&mut self, trait_name: &str, instance_ty: &Type) -> MonoExpr {
+        let mono_ty = self.mono_type(instance_ty);
+        let span = Span::default();
+
+        // Find the instance that matches this type
+        for instance in &self.tprogram.instance_decls {
+            if instance.trait_name != trait_name {
+                continue;
+            }
+
+            // Try to match
+            if let Some(type_subst) = match_instance_type(instance_ty, &instance.instance_ty) {
+                // Found matching instance
+                // For parametric instances, build sub-dicts for each type parameter
+                let mut sub_dicts = Vec::new();
+
+                // If instance has generics, we need sub-dicts and specialized methods
+                if type_has_generics(&instance.instance_ty) {
+                    // Get the constraints from the original instance
+                    // For each Generic in instance_ty, we need a sub-dict
+                    // The type_subst tells us what concrete type each generic maps to
+                    for (_generic_id, concrete_mono_ty) in &type_subst {
+                        // Find what trait constraint this generic has
+                        // For now, assume same trait (Show (List a) where a: Show)
+                        // TODO: look up actual constraints from instance decl
+                        let concrete_ty = self.subst_to_type(concrete_mono_ty);
+                        let sub_dict = self.build_dict_for_type(trait_name, &concrete_ty);
+                        sub_dicts.push(sub_dict);
+                    }
+
+                    // Trigger specialization for all methods in this instance
+                    for method in &instance.methods.clone() {
+                        let mangled = format!("{}_{}_{}", trait_name, mono_ty.mangle(), method.name);
+                        let fn_id = MonoFnId::new(&mangled);
+                        if !self.done.contains_key(&fn_id) && !self.in_progress.contains(&fn_id) {
+                            self.try_specialize_instance_method(
+                                trait_name,
+                                &method.name,
+                                instance_ty,
+                                &fn_id,
+                            );
+                        }
+                    }
+                }
+
+                return MonoExpr::new(
+                    MonoExprKind::DictBuild {
+                        trait_name: trait_name.to_string(),
+                        for_type: mono_ty,
+                        sub_dicts,
+                    },
+                    MonoType::Unit, // dict type is opaque
+                    span,
+                );
+            }
+        }
+
+        // No instance found - error
+        MonoExpr::new(
+            MonoExprKind::Error(format!(
+                "No {} instance for {:?}",
+                trait_name, instance_ty
+            )),
+            MonoType::Unit,
+            span,
+        )
+    }
+
     /// Convert a Type to MonoType using current substitution
     fn mono_type(&self, ty: &Type) -> MonoType {
         MonoType::from_type(ty, &self.subst)
@@ -473,7 +628,14 @@ impl<'a> MonoCtx<'a> {
         let span = expr.span.clone();
 
         let node = match &expr.node {
-            TExprKind::Var(name) => MonoExprKind::Var(name.clone()),
+            TExprKind::Var(name) => {
+                // Check if this variable should be substituted (e.g., "show" -> "Show_Int_show")
+                if let Some(concrete_name) = self.instance_method_subst.get(name) {
+                    MonoExprKind::Var(concrete_name.clone())
+                } else {
+                    MonoExprKind::Var(name.clone())
+                }
+            }
 
             TExprKind::Lit(lit) => MonoExprKind::Lit(lit.clone()),
 
@@ -529,6 +691,7 @@ impl<'a> MonoCtx<'a> {
 
                                         let mono_fn = MonoFn {
                                             id: fn_id.clone(),
+                                            dict_params: vec![],
                                             params: mono_params,
                                             body: mono_body,
                                             return_type,
@@ -584,6 +747,7 @@ impl<'a> MonoCtx<'a> {
 
                                             let mono_fn = MonoFn {
                                                 id: fn_id.clone(),
+                                                dict_params: vec![],
                                                 params: mono_params,
                                                 body: mono_body,
                                                 return_type,
@@ -750,15 +914,17 @@ impl<'a> MonoCtx<'a> {
                 instance_ty,
                 args,
             } => {
-                // Monomorphize trait method call to direct call
-                let concrete_ty = self.mono_type(instance_ty);
-                let mangled = format!("{}_{}_{}", trait_name, concrete_ty.mangle(), method);
-                let fn_id = MonoFnId::new(&mangled);
-
+                // Concrete type is known - build dictionary and call through it
+                let mono_ty = self.mono_type(instance_ty);
                 let mono_args: Vec<_> = args.iter().map(|a| self.mono_expr(a)).collect();
 
-                MonoExprKind::Call {
-                    func: fn_id,
+                // Build the dictionary for this concrete type
+                let dict = self.build_dict_for_type(trait_name, instance_ty);
+
+                MonoExprKind::DictCall {
+                    trait_name: trait_name.clone(),
+                    method: method.clone(),
+                    dict: Box::new(dict),
                     args: mono_args,
                 }
             }
@@ -769,33 +935,69 @@ impl<'a> MonoCtx<'a> {
                 type_var,
                 args,
             } => {
-                // During monomorphization, resolve type variable to concrete type
-                // Look up in substitution map - the type_var should be bound
-                let concrete_ty = if let Some(mono_ty) = self.subst.get(type_var) {
-                    mono_ty.clone()
-                } else {
-                    // Type variable not in subst - might already be a concrete type
-                    // Try to get it from the expression's type
-                    self.mono_type(&args.first().map(|a| a.ty.clone()).unwrap_or(Type::Unit))
-                };
-
-                // Convert to direct call like MethodCall
-                let mangled = format!("{}_{}_{}", trait_name, concrete_ty.mangle(), method);
-                let fn_id = MonoFnId::new(&mangled);
-
+                eprintln!("DEBUG: DictMethodCall {}.{} type_var={} subst={:?}", trait_name, method, type_var, self.subst);
+                // Type is a parameter - look up the dict param
                 let mono_args: Vec<_> = args.iter().map(|a| self.mono_expr(a)).collect();
 
-                MonoExprKind::Call {
-                    func: fn_id,
-                    args: mono_args,
+                // Check if we have a dict param for this type var
+                if let Some((param_trait, param_idx)) = self.current_dict_params.get(type_var) {
+                    MonoExprKind::DictCall {
+                        trait_name: trait_name.clone(),
+                        method: method.clone(),
+                        dict: Box::new(MonoExpr::new(
+                            MonoExprKind::DictParam {
+                                trait_name: param_trait.clone(),
+                                param_idx: *param_idx,
+                            },
+                            MonoType::Unit, // dict type is opaque
+                            expr.span.clone(),
+                        )),
+                        args: mono_args,
+                    }
+                } else if let Some(mono_ty) = self.subst.get(type_var) {
+                    // Type var is bound to a concrete type in current subst
+                    // This happens when specializing a polymorphic function
+                    let concrete_ty = self.subst_to_type(mono_ty);
+                    let dict = self.build_dict_for_type(trait_name, &concrete_ty);
+                    MonoExprKind::DictCall {
+                        trait_name: trait_name.clone(),
+                        method: method.clone(),
+                        dict: Box::new(dict),
+                        args: mono_args,
+                    }
+                } else {
+                    MonoExprKind::Error(format!(
+                        "Unresolved dict for type var {} in {}",
+                        type_var, trait_name
+                    ))
                 }
             }
 
-            TExprKind::DictValue { .. } | TExprKind::DictRef { .. } => {
-                // Dictionary values/refs are not needed after monomorphization
-                // The callee function is specialized, so no dictionary passing required
-                // Return unit - these are essentially erased
-                MonoExprKind::Lit(crate::ast::Literal::Unit)
+            TExprKind::DictValue {
+                trait_name,
+                instance_ty,
+                ..
+            } => {
+                // Build a dictionary for the given type
+                self.build_dict_for_type(trait_name, instance_ty).node
+            }
+
+            TExprKind::DictRef {
+                trait_name,
+                type_var,
+            } => {
+                // Reference to a dict param
+                if let Some((param_trait, param_idx)) = self.current_dict_params.get(type_var) {
+                    MonoExprKind::DictParam {
+                        trait_name: param_trait.clone(),
+                        param_idx: *param_idx,
+                    }
+                } else {
+                    MonoExprKind::Error(format!(
+                        "Unresolved dict ref for type var {} in {}",
+                        type_var, trait_name
+                    ))
+                }
             }
 
             TExprKind::Perform { effect, op, args } => {
@@ -926,6 +1128,90 @@ impl<'a> MonoCtx<'a> {
             ty: mono_ty,
         }
     }
+
+    /// Try to specialize a generic instance method for a concrete type.
+    /// E.g., for Show_List_Int_show, finds Show (List a) and specializes with a->Int.
+    /// Returns true if successful (function added to done), false otherwise.
+    fn try_specialize_instance_method(
+        &mut self,
+        trait_name: &str,
+        method_name: &str,
+        concrete_ty: &Type,
+        fn_id: &MonoFnId,
+    ) -> bool {
+        // Find a matching generic instance
+        for instance in &self.tprogram.instance_decls {
+            if instance.trait_name != trait_name {
+                continue;
+            }
+            // Only consider generic instances (those with type params)
+            if !type_has_generics(&instance.instance_ty) {
+                continue;
+            }
+
+            // Try to match the concrete type against the instance's pattern
+            if let Some(type_subst) = match_instance_type(concrete_ty, &instance.instance_ty) {
+                // Found a match! Now find the method
+                for method in &instance.methods {
+                    if method.name != method_name {
+                        continue;
+                    }
+
+                    // Save current subst, apply new one for this specialization
+                    let old_subst = std::mem::replace(&mut self.subst, type_subst.clone());
+
+                    // Set up method name substitutions for constrained methods
+                    // E.g., in Show (List a) where a : Show, "show" -> "Show_Int_show"
+                    let old_method_subst = std::mem::take(&mut self.instance_method_subst);
+                    for (_generic_id, mono_ty) in &type_subst {
+                        // For each trait method from constraints, set up the substitution
+                        // TODO: properly look up which methods come from constraints
+                        // For now, we assume the same trait's method
+                        let concrete_method = format!("{}_{}_{}", trait_name, mono_ty.mangle(), method_name);
+                        self.instance_method_subst.insert(method_name.to_string(), concrete_method);
+                    }
+
+                    // For each type parameter, set up dict_param mapping
+                    // This allows DictMethodCall in the body to resolve correctly
+                    let old_dict_params = std::mem::take(&mut self.current_dict_params);
+                    for (generic_id, _mono_ty) in &type_subst {
+                        self.current_dict_params.insert(*generic_id, (trait_name.to_string(), 0));
+                    }
+
+                    self.in_progress.insert(fn_id.clone());
+
+                    // Monomorphize the method with the new substitution
+                    let mono_params: Vec<_> = method
+                        .params
+                        .iter()
+                        .map(|p| self.mono_pattern(p))
+                        .collect();
+                    let mono_body = self.mono_expr(&method.body);
+                    let return_type = self.mono_type(&method.body.ty);
+
+                    // Restore context
+                    self.current_dict_params = old_dict_params;
+                    self.instance_method_subst = old_method_subst;
+
+                    let mono_fn = MonoFn {
+                        id: fn_id.clone(),
+                        dict_params: vec![], // TODO: parametric instances need dict params
+                        params: mono_params,
+                        body: mono_body,
+                        return_type,
+                    };
+
+                    // Restore old subst
+                    self.subst = old_subst;
+                    self.in_progress.remove(fn_id);
+                    self.done.insert(fn_id.clone(), mono_fn);
+
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 // ============================================================================
@@ -944,6 +1230,74 @@ fn type_has_generics(ty: &Type) -> bool {
         | Type::Unit | Type::Bytes | Type::FileHandle | Type::TcpSocket
         | Type::TcpListener | Type::Pid | Type::Set => false,
         Type::Var(_) => false, // Type vars are resolved, not generic
+    }
+}
+
+/// Try to match a concrete type against a generic instance type pattern.
+/// Returns a substitution map if successful (generic_id -> MonoType).
+/// E.g., matching `List Int` against `List a` returns {0 -> Int}
+fn match_instance_type(concrete: &Type, pattern: &Type) -> Option<HashMap<u32, MonoType>> {
+    let mut subst = HashMap::new();
+    if match_type_pattern(concrete, pattern, &mut subst) {
+        Some(subst)
+    } else {
+        None
+    }
+}
+
+/// Recursive helper for matching types
+fn match_type_pattern(concrete: &Type, pattern: &Type, subst: &mut HashMap<u32, MonoType>) -> bool {
+    match (concrete, pattern) {
+        // Generic matches anything, binding the type variable
+        (concrete, Type::Generic(id)) => {
+            let mono = MonoType::from_type(concrete, &HashMap::new());
+            if let Some(existing) = subst.get(id) {
+                // Must match existing binding
+                *existing == mono
+            } else {
+                subst.insert(*id, mono);
+                true
+            }
+        }
+        // Constructor types must match name and recursively match args
+        (
+            Type::Constructor { name: n1, args: a1 },
+            Type::Constructor { name: n2, args: a2 },
+        ) => {
+            n1 == n2 && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(c, p)| match_type_pattern(c, p, subst))
+        }
+        // Arrow types
+        (
+            Type::Arrow { arg: a1, ret: r1, .. },
+            Type::Arrow { arg: a2, ret: r2, .. },
+        ) => {
+            match_type_pattern(a1, a2, subst) && match_type_pattern(r1, r2, subst)
+        }
+        // Tuples
+        (Type::Tuple(t1), Type::Tuple(t2)) => {
+            t1.len() == t2.len()
+                && t1.iter().zip(t2.iter()).all(|(c, p)| match_type_pattern(c, p, subst))
+        }
+        // Wrapper types
+        (Type::Channel(c1), Type::Channel(c2)) => match_type_pattern(c1, c2, subst),
+        (Type::Fiber(c1), Type::Fiber(c2)) => match_type_pattern(c1, c2, subst),
+        (Type::Dict(c1), Type::Dict(c2)) => match_type_pattern(c1, c2, subst),
+        // Primitive types must match exactly
+        (Type::Int, Type::Int) => true,
+        (Type::Float, Type::Float) => true,
+        (Type::String, Type::String) => true,
+        (Type::Bool, Type::Bool) => true,
+        (Type::Char, Type::Char) => true,
+        (Type::Unit, Type::Unit) => true,
+        (Type::Bytes, Type::Bytes) => true,
+        (Type::FileHandle, Type::FileHandle) => true,
+        (Type::TcpSocket, Type::TcpSocket) => true,
+        (Type::TcpListener, Type::TcpListener) => true,
+        (Type::Pid, Type::Pid) => true,
+        (Type::Set, Type::Set) => true,
+        // No match
+        _ => false,
     }
 }
 
@@ -1151,8 +1505,19 @@ pub fn monomorphize(tprogram: &TProgram) -> Result<MonoProgram, String> {
         let mono_body = ctx.mono_expr(&binding.body);
         let return_type = ctx.mono_type(&binding.ty);
 
+        // Convert dict_params from TBinding
+        let dict_params: Vec<_> = binding
+            .dict_params
+            .iter()
+            .map(|(trait_name, type_var)| MonoDictParam {
+                trait_name: trait_name.clone(),
+                type_var: *type_var,
+            })
+            .collect();
+
         let mono_fn = MonoFn {
             id: fn_id.clone(),
+            dict_params,
             params: mono_params,
             body: mono_body,
             return_type,
@@ -1193,6 +1558,7 @@ pub fn monomorphize(tprogram: &TProgram) -> Result<MonoProgram, String> {
 
             let mono_fn = MonoFn {
                 id: fn_id.clone(),
+                dict_params: vec![], // Simple instances have no dict params
                 params: mono_params,
                 body: mono_body,
                 return_type,
