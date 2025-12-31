@@ -86,22 +86,16 @@ fn snapshot_type_error_unbound_variable() {
 
 #[test]
 fn snapshot_type_error_with_suggestion() {
-    // First define 'print' in a program, then try to use 'prnt'
-    let source = "let prnt = print"; // This will use the built-in print
+    // Try using an undefined variable similar to a known builtin (io_print)
+    let source = "let result = io_prnt \"hello\"";
     let tokens = Lexer::new(source).tokenize().unwrap();
-    let mut parser = Parser::new(tokens);
-    let _ = parser.parse_program();
-
-    // Now try using an undefined variable similar to a known one
-    let source2 = "let result = prnt 42";
-    let tokens2 = Lexer::new(source2).tokenize().unwrap();
-    let program2 = Parser::new(tokens2).parse_program().unwrap();
+    let program = Parser::new(tokens).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let errors = inferencer.infer_program(&program2, TypeEnv::new()).unwrap_err();
+    let errors = inferencer.infer_program(&program, TypeEnv::new()).unwrap_err();
     let err = &errors[0];
 
-    let source_map = SourceMap::new(source2);
+    let source_map = SourceMap::new(source);
     let colors = Colors::new(false);
 
     let formatted = format_type_error_for_test(err, &source_map, Some("test.gn"), &colors);

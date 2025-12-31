@@ -2,9 +2,9 @@
 
 test.gn:1:14
 
-I cannot find a variable named `prnt`.
+I cannot find a variable named `io_prnt`.
 
-Did you mean print?
+Did you mean io_print?
 
-1 | let result = prnt 42
-                 ^^^^
+1 | let result = io_prnt "hello"
+                 ^^^^^^^

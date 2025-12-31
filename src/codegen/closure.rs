@@ -19,8 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::core_ir::{
-    Alt, Atom, CoreExpr, CoreLit, CoreProgram, CoreType, FunDef, PrimOp, TypeDef, VarId, VarGen,
-    CPSHandler, CPSOpHandler, Handler, OpHandler,
+    Atom, CoreExpr, CoreLit, CoreProgram, CoreType, FunDef, PrimOp, TypeDef, VarId, VarGen,
 };
 
 // ============================================================================

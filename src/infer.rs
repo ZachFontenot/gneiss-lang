@@ -3240,27 +3240,7 @@ impl Inferencer {
         let mut env = env;
 
         // Add built-in functions
-        // print : a -> () { IO } where a : Show
-        let io_effect = Effect {
-            name: "IO".to_string(),
-            params: vec![],
-        };
-        let print_scheme = Scheme {
-            num_generics: 1,
-            predicates: vec![Pred {
-                trait_name: "Show".to_string(),
-                ty: Type::Generic(0),
-            }],
-            ty: Type::Arrow {
-                arg: Rc::new(Type::Generic(0)),
-                ret: Rc::new(Type::Unit),
-                effects: Row::Extend {
-                    effect: io_effect,
-                    rest: Rc::new(Row::Empty),
-                },
-            },
-        };
-        env.insert("print".into(), print_scheme);
+        // Note: `print` is defined in prelude as `let print x = io_print (show x)`
 
         // io_print : String -> () { IO }
         // Low-level print that takes a string directly (used by print implementation)

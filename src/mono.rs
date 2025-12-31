@@ -857,10 +857,9 @@ impl<'a> MonoCtx<'a> {
                 }
             }
 
-            TExprKind::RecordUpdate { base, updates } => {
+            TExprKind::RecordUpdate { base: _, updates } => {
                 // Desugar record update to record construction
-                // For now, treat as field access + record construction
-                let mono_base = self.mono_expr(base);
+                // TODO: Full implementation would merge with base
                 let mono_updates: Vec<_> = updates
                     .iter()
                     .map(|(n, e)| (n.clone(), self.mono_expr(e)))
@@ -915,7 +914,6 @@ impl<'a> MonoCtx<'a> {
                 args,
             } => {
                 // Concrete type is known - build dictionary and call through it
-                let mono_ty = self.mono_type(instance_ty);
                 let mono_args: Vec<_> = args.iter().map(|a| self.mono_expr(a)).collect();
 
                 // Build the dictionary for this concrete type

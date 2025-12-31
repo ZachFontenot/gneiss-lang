@@ -56,6 +56,7 @@ pub struct CEmitter {
     func_name_arities: HashMap<String, usize>,
     /// Map of function captures (for closure conversion)
     /// VarId -> (C var names for captures to pass at call sites)
+    #[allow(dead_code)]
     func_captures: HashMap<VarId, Vec<String>>,
     /// Counter for generating unique names
     name_counter: u32,
@@ -1651,7 +1652,7 @@ impl CEmitter {
 
                 // Now emit the alts as an if-else chain
                 // Each alt's body may have nested case expressions that do the real discrimination
-                let mut first = true;
+                let first = true;
                 for alt in tag_alts {
                     // Bind this alt's binders to the field vars
                     for (i, binder) in alt.binders.iter().enumerate() {
@@ -1672,7 +1673,6 @@ impl CEmitter {
                             body_expr
                         )
                         .unwrap();
-                        first = false;
                         // Note: we only emit the first alt's body because nested cases
                         // will handle the discrimination. This works because the lowering
                         // phase generates nested case expressions that properly fall through.
