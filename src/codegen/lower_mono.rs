@@ -265,6 +265,7 @@ fn register_builtins(ctx: &mut LowerMonoCtx) {
         "string_concat",
         "string_chars",
         "string_to_chars",
+        "chars_to_string",
         "string_index_of",
         "string_substring",
         "string_split",
@@ -279,6 +280,11 @@ fn register_builtins(ctx: &mut LowerMonoCtx) {
         "string_reverse",
         "string_is_empty",
         "string_to_bytes",
+        // Bytes
+        "bytes_to_string",
+        "bytes_length",
+        "bytes_slice",
+        "bytes_concat",
         // Characters
         "char_to_string",
         "char_to_int",
@@ -295,10 +301,46 @@ fn register_builtins(ctx: &mut LowerMonoCtx) {
         "file_read",
         "file_write",
         "file_close",
+        // Networking
+        "tcp_connect",
+        "tcp_listen",
+        "tcp_accept",
+        // Concurrency
+        "spawn",
+        "Fiber.spawn",
+        "Fiber.join",
+        "Fiber.yield",
+        "sleep_ms",
+        // Dict operations
+        "Dict.new",
+        "Dict.insert",
+        "Dict.get",
+        "Dict.remove",
+        "Dict.contains",
+        "Dict.keys",
+        "Dict.values",
+        "Dict.size",
+        "Dict.isEmpty",
+        "Dict.toList",
+        "Dict.fromList",
+        "Dict.merge",
+        "Dict.getOrDefault",
+        // Set operations
+        "Set.new",
+        "Set.insert",
+        "Set.contains",
+        "Set.remove",
+        "Set.union",
+        "Set.intersect",
+        "Set.size",
+        "Set.toList",
         // Misc
         "error",
         "print",
         "debug",
+        "get_args",
+        "html_escape",
+        "json_escape_string",
     ];
 
     for name in builtins {

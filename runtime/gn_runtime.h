@@ -139,10 +139,17 @@ gn_value gn_string_char_at(gn_value index, gn_value s);
 gn_value gn_string_to_chars(gn_value s);
 gn_value gn_chars_to_string(gn_value chars);
 gn_value gn_bytes_to_string(gn_value bytes);
+gn_value gn_char_to_int(gn_value c);
 
 /* I/O operations */
 gn_value gn_io_print(gn_value s);
 gn_value gn_io_read_line(gn_value unit);  /* unit arg ignored */
+
+/* File operations */
+gn_value gn_file_open(gn_value path, gn_value mode);
+gn_value gn_file_read(gn_value handle, gn_value max_bytes);
+gn_value gn_file_write(gn_value handle, gn_value data);
+gn_value gn_file_close(gn_value handle);
 
 /* Float operations (boxed) */
 gn_value gn_float(double f);

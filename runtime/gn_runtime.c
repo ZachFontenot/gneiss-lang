@@ -304,6 +304,10 @@ gn_value gn_char_to_string(gn_value c) {
     return gn_string(buf);
 }
 
+gn_value gn_char_to_int(gn_value c) {
+    return GN_INT((int64_t)GN_UNCHAR(c));
+}
+
 gn_value gn_string_join(gn_value sep, gn_value list) {
     /* Join a list of strings with a separator */
     gn_object* sep_obj = GN_OBJ(sep);
@@ -706,6 +710,85 @@ gn_value gn_io_read_line(gn_value unit) {
     gn_value result = gn_string(line);
     free(line);
     return result;
+}
+
+/* ============================================================================
+ * File Operations
+ * ============================================================================ */
+
+/* File handle tag */
+#define TAG_FILE_HANDLE 0xFFFF0010
+
+/* Result tags for Ok/Err */
+#define TAG_OK  16
+#define TAG_ERR 17
+
+gn_value gn_file_open(gn_value path, gn_value mode) {
+    gn_object* path_obj = GN_OBJ(path);
+    gn_object* mode_obj = GN_OBJ(mode);
+
+    char* path_str = (char*)path_obj->fields[0];
+    char* mode_str = (char*)mode_obj->fields[0];
+
+    FILE* fp = fopen(path_str, mode_str);
+    if (!fp) {
+        /* Return Err(message) */
+        gn_value err_msg = gn_string("Failed to open file");
+        return gn_alloc(TAG_ERR, 1, &err_msg);
+    }
+
+    /* Return Ok(file_handle) */
+    gn_value handle = gn_alloc(TAG_FILE_HANDLE, 1, (gn_value[]){(gn_value)fp});
+    return gn_alloc(TAG_OK, 1, &handle);
+}
+
+gn_value gn_file_read(gn_value handle, gn_value max_bytes) {
+    gn_object* handle_obj = GN_OBJ(handle);
+    FILE* fp = (FILE*)handle_obj->fields[0];
+    int64_t max = GN_UNINT(max_bytes);
+
+    char* buffer = (char*)malloc(max + 1);
+    if (!buffer) {
+        gn_value err_msg = gn_string("Out of memory");
+        return gn_alloc(TAG_ERR, 1, &err_msg);
+    }
+
+    size_t bytes_read = fread(buffer, 1, max, fp);
+    buffer[bytes_read] = '\0';
+
+    /* Return Ok(bytes) as a string for now (Bytes type not fully implemented) */
+    gn_value fields[2] = { (gn_value)buffer, (gn_value)bytes_read };
+    gn_value result = gn_alloc(TAG_STRING, 2, fields);
+    return gn_alloc(TAG_OK, 1, &result);
+}
+
+gn_value gn_file_write(gn_value handle, gn_value data) {
+    gn_object* handle_obj = GN_OBJ(handle);
+    gn_object* data_obj = GN_OBJ(data);
+
+    FILE* fp = (FILE*)handle_obj->fields[0];
+    char* str = (char*)data_obj->fields[0];
+    size_t len = (size_t)data_obj->fields[1];
+
+    size_t written = fwrite(str, 1, len, fp);
+    if (written != len) {
+        gn_value err_msg = gn_string("Write failed");
+        return gn_alloc(TAG_ERR, 1, &err_msg);
+    }
+
+    return gn_alloc(TAG_OK, 1, &(gn_value){GN_UNIT});
+}
+
+gn_value gn_file_close(gn_value handle) {
+    gn_object* handle_obj = GN_OBJ(handle);
+    FILE* fp = (FILE*)handle_obj->fields[0];
+
+    if (fclose(fp) != 0) {
+        gn_value err_msg = gn_string("Failed to close file");
+        return gn_alloc(TAG_ERR, 1, &err_msg);
+    }
+
+    return gn_alloc(TAG_OK, 1, &(gn_value){GN_UNIT});
 }
 
 /* ============================================================================
