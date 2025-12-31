@@ -87,13 +87,16 @@ fn run_file(path: &str, program_args: Vec<String>) {
     };
 
     // Type-check prelude to register its types/traits/instances
-    if let Err(errors) = inferencer.infer_program(&prelude) {
-        eprintln!("Type error in prelude:");
-        for e in &errors {
-            eprintln!("  {}", e);
+    let prelude_env = match inferencer.infer_program(&prelude, TypeEnv::new()) {
+        Ok(env) => env,
+        Err(errors) => {
+            eprintln!("Type error in prelude:");
+            for e in &errors {
+                eprintln!("  {}", e);
+            }
+            return;
         }
-        return;
-    }
+    };
 
     // Run prelude in interpreter to get runtime values
     if let Err(e) = interpreter.run(&prelude) {
@@ -121,8 +124,8 @@ fn run_file(path: &str, program_args: Vec<String>) {
         // Set up imports for this module in the inferencer
         setup_inferencer_imports(&mut inferencer, &module.imports);
 
-        // Type check this module
-        let type_env = match inferencer.infer_program(&module.program) {
+        // Type check this module (with prelude bindings available)
+        let type_env = match inferencer.infer_program(&module.program, prelude_env.clone()) {
             Ok(env) => env,
             Err(errors) => {
                 // Print all accumulated type errors
@@ -300,9 +303,9 @@ fn compile_file(args: &[String]) {
         }
     };
 
-    // Type check combined program (prelude is already included)
+    // Type check combined program (prelude is already included in combined_items)
     let mut inferencer = Inferencer::new();
-    let type_env = match inferencer.infer_program(&program) {
+    let type_env = match inferencer.infer_program(&program, TypeEnv::new()) {
         Ok(env) => env,
         Err(errors) => {
             for e in &errors {
@@ -572,7 +575,7 @@ fn repl() {
     match parse_prelude() {
         Ok(prelude) => {
             // Type-check prelude to register types/traits/instances and get initial type env
-            match inferencer.infer_program(&prelude) {
+            match inferencer.infer_program(&prelude, TypeEnv::new()) {
                 Ok(initial_env) => {
                     for (name, scheme) in initial_env.iter() {
                         type_env.insert(name.clone(), scheme.clone());
@@ -684,7 +687,7 @@ fn repl() {
                     .collect();
 
                 // Type check and add to environment (prelude already loaded at REPL start)
-                match inferencer.infer_program(&program) {
+                match inferencer.infer_program(&program, type_env.clone()) {
                     Ok(new_env) => {
                         // Print types for new declarations
                         for name in &decl_names {

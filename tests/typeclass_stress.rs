@@ -10,6 +10,7 @@
 use gneiss::ast::Program;
 use gneiss::eval::Value;
 use gneiss::prelude::parse_prelude;
+use gneiss::types::TypeEnv;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser};
 
 /// Run a complete program with typeclass support
@@ -32,7 +33,7 @@ fn run_program(source: &str) -> Result<Value, String> {
 
     let mut inferencer = Inferencer::new();
     let _env = inferencer
-        .infer_program(&program)
+        .infer_program(&program, TypeEnv::new())
         .map_err(|errors| errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
 
     let mut interpreter = Interpreter::new();

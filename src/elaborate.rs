@@ -1073,7 +1073,7 @@ mod tests {
         };
 
         let mut inferencer = Inferencer::new();
-        let type_env = inferencer.infer_program(&program).unwrap();
+        let type_env = inferencer.infer_program(&program, TypeEnv::new()).unwrap();
 
         elaborate(&program, &inferencer, &type_env).unwrap()
     }

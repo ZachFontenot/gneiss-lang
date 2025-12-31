@@ -3240,12 +3240,14 @@ impl Inferencer {
     /// On success, returns the type environment.
     /// On failure, returns a non-empty vector of type errors.
     ///
-    /// NOTE: This function does NOT load the prelude. Callers must combine
-    /// prelude + user program before calling this function.
-    pub fn infer_program(&mut self, program: &Program) -> Result<TypeEnv, Vec<TypeError>> {
+    /// Type-check a program, returning the resulting type environment.
+    ///
+    /// The `env` parameter provides initial bindings (typically from the prelude).
+    /// Pass `TypeEnv::new()` for a fresh environment (e.g., when type-checking the prelude itself).
+    pub fn infer_program(&mut self, program: &Program, env: TypeEnv) -> Result<TypeEnv, Vec<TypeError>> {
         // Clear any previous errors
         self.errors.clear();
-        let mut env = TypeEnv::new();
+        let mut env = env;
 
         // Add built-in functions
         // print : a -> () { IO } where a : Show
@@ -4583,7 +4585,7 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
         let mut inferencer = Inferencer::new();
-        inferencer.infer_program(&program)
+        inferencer.infer_program(&program, TypeEnv::new())
     }
 
     #[test]
@@ -4661,7 +4663,7 @@ let result = apply id 42
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
         let mut inferencer = Inferencer::new();
-        let result = inferencer.infer_program(&program);
+        let result = inferencer.infer_program(&program, TypeEnv::new());
         (result, inferencer)
     }
 

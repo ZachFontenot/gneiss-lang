@@ -4620,6 +4620,7 @@ mod tests {
     use super::*;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    use crate::types::TypeEnv;
 
     fn eval(input: &str) -> Result<Value, EvalError> {
         let tokens = Lexer::new(input).tokenize().unwrap();
@@ -4715,7 +4716,7 @@ mod tests {
 
         // Run type inference to set up class_env for trait method resolution
         let mut inferencer = Inferencer::new();
-        let _ = inferencer.infer_program(&program); // Ignore type errors for this test helper
+        let _ = inferencer.infer_program(&program, TypeEnv::new()); // Ignore type errors for this test helper
 
         let mut interp = Interpreter::new();
         // Pass class_env and type_ctx for trait method resolution
@@ -5119,7 +5120,7 @@ let main () =
         // Run type inference to build ClassEnv
         let mut inferencer = Inferencer::new();
         let _env = inferencer
-            .infer_program(&program)
+            .infer_program(&program, TypeEnv::new())
             .map_err(|errors| {
                 errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
             })?;
@@ -5282,7 +5283,7 @@ let result = display 42
 
         // Run type inference to populate class_env
         let mut inferencer = Inferencer::new();
-        let _type_env = inferencer.infer_program(&program).unwrap();
+        let _type_env = inferencer.infer_program(&program, TypeEnv::new()).unwrap();
 
         // Create interpreter and copy the class_env from inferencer
         let mut interp = Interpreter::new();

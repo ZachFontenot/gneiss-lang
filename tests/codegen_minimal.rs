@@ -16,6 +16,7 @@ use gneiss::lexer::Lexer;
 use gneiss::mono::monomorphize;
 use gneiss::parser::Parser;
 use gneiss::prelude::parse_prelude;
+use gneiss::types::TypeEnv;
 
 /// Compile a Gneiss program to C using the correct pipeline:
 /// TAST → Monomorphize → Lower → Emit C
@@ -71,7 +72,7 @@ fn compile_and_run_impl(source: &str, with_prelude: bool) -> Result<String, Stri
     // Type check
     let mut inferencer = Inferencer::new();
     let type_env = inferencer
-        .infer_program(&program)
+        .infer_program(&program, TypeEnv::new())
         .map_err(|e| format!("Type error: {:?}", e))?;
 
     // Elaborate to TAST

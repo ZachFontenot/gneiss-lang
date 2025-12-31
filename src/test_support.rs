@@ -87,7 +87,7 @@ pub fn typecheck_program(input: &str) -> Result<(Program, TypeEnv), String> {
 
     let mut inferencer = Inferencer::new();
     let env = inferencer
-        .infer_program(&program)
+        .infer_program(&program, TypeEnv::new())
         .map_err(|e| format!("Type error: {:?}", e))?;
     Ok((program, env))
 }
@@ -429,7 +429,7 @@ pub fn run_program(input: &str) -> Result<Option<Value>, EvalError> {
 
     // Type check before running - this is critical for catching type errors!
     let mut inferencer = Inferencer::new();
-    inferencer.infer_program(&program).map_err(|e| {
+    inferencer.infer_program(&program, TypeEnv::new()).map_err(|e| {
         EvalError::RuntimeError(format!("Type error: {:?}", e))
     })?;
 

@@ -14,6 +14,7 @@ use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
 use gneiss::parser::ParseError;
+use gneiss::types::TypeEnv;
 use gneiss::{Inferencer, Lexer, Parser};
 
 /// Assert that actual output matches snapshot file, or create/update if UPDATE_SNAPSHOTS=1
@@ -56,7 +57,7 @@ fn snapshot_type_error_mismatch() {
     let program = Parser::new(tokens).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let errors = inferencer.infer_program(&program).unwrap_err();
+    let errors = inferencer.infer_program(&program, TypeEnv::new()).unwrap_err();
     let err = &errors[0];
 
     let source_map = SourceMap::new(source);
@@ -73,7 +74,7 @@ fn snapshot_type_error_unbound_variable() {
     let program = Parser::new(tokens).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let errors = inferencer.infer_program(&program).unwrap_err();
+    let errors = inferencer.infer_program(&program, TypeEnv::new()).unwrap_err();
     let err = &errors[0];
 
     let source_map = SourceMap::new(source);
@@ -97,7 +98,7 @@ fn snapshot_type_error_with_suggestion() {
     let program2 = Parser::new(tokens2).parse_program().unwrap();
 
     let mut inferencer = Inferencer::new();
-    let errors = inferencer.infer_program(&program2).unwrap_err();
+    let errors = inferencer.infer_program(&program2, TypeEnv::new()).unwrap_err();
     let err = &errors[0];
 
     let source_map = SourceMap::new(source2);
