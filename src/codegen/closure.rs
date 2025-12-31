@@ -308,6 +308,8 @@ pub struct FlatAlt {
     pub tag_name: Option<String>,
     pub binders: Vec<VarId>,
     pub binder_hints: Vec<Option<String>>,
+    /// Optional guard condition (for patterns like [x] that need sub-pattern checks)
+    pub guard: Option<Box<FlatExpr>>,
     pub body: FlatExpr,
 }
 
@@ -1053,6 +1055,7 @@ fn convert_expr(ctx: &mut ClosureCtx, expr: &CoreExpr, in_scope: &HashSet<VarId>
                     tag_name: alt.tag_name.clone(),
                     binders: alt.binders.clone(),
                     binder_hints: alt.binder_hints.clone(),
+                    guard: alt.guard.as_ref().map(|g| Box::new(convert_expr(ctx, g, &alt_scope))),
                     body: convert_expr(ctx, &alt.body, &alt_scope),
                 }
             }).collect();

@@ -473,6 +473,7 @@ impl CPSTransformer {
                             tag_name: alt.tag_name.clone(),
                             binders: alt.binders.clone(),
                             binder_hints: alt.binder_hints.clone(),
+                            guard: alt.guard.as_ref().map(|g| Box::new(self.transform_expr(g))),
                             body: self.transform_expr(&alt.body),
                         }
                     }).collect(),

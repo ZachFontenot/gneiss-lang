@@ -23,9 +23,13 @@
 #define TAG_NIL      6
 #define TAG_CONS     7
 
-/* Option constructors */
-#define TAG_SOME     18
-#define TAG_NONE     19
+/* Option constructors (must match codegen) */
+#define TAG_NONE     18
+#define TAG_SOME     19
+
+/* Result constructors (must match codegen) */
+#define TAG_ERR      20
+#define TAG_OK       21
 
 /* ============================================================================
  * Global State
@@ -206,13 +210,16 @@ static void print_value_impl(gn_value v, int depth) {
     }
 }
 
-void gn_print(gn_value v) {
+gn_value gn_print(gn_value* env, gn_value v) {
+    (void)env;  /* Unused - for closure calling convention */
     print_value_impl(v, 0);
+    return GN_UNIT;
 }
 
-void gn_println(void) {
+gn_value gn_println(void) {
     printf("\n");
     fflush(stdout);
+    return GN_UNIT;
 }
 
 /* ============================================================================
@@ -434,10 +441,10 @@ gn_value gn_string_index_of(gn_value needle, gn_value haystack) {
         /* Return Some(index) */
         int64_t index = found - haystack_str;
         gn_value fields[1] = {GN_INT(index)};
-        return gn_alloc(TAG_SOME, 1, fields);  /* TAG_SOME = 18 */
+        return gn_alloc(TAG_SOME, 1, fields);
     } else {
         /* Return None */
-        return gn_singleton(TAG_NONE);  /* TAG_NONE = 19 */
+        return gn_singleton(TAG_NONE);
     }
 }
 
@@ -672,7 +679,11 @@ gn_value gn_chars_to_string(gn_value chars) {
 }
 
 gn_value gn_bytes_to_string(gn_value bytes) {
-    /* Same as chars_to_string - bytes are just ints */
+    /* If already a string (e.g., from file_read), just return it */
+    if (!GN_IS_INT(bytes) && GN_OBJ(bytes)->tag == TAG_STRING) {
+        return bytes;
+    }
+    /* Otherwise convert list of chars/bytes to string */
     return gn_chars_to_string(bytes);
 }
 
@@ -718,10 +729,6 @@ gn_value gn_io_read_line(gn_value unit) {
 
 /* File handle tag */
 #define TAG_FILE_HANDLE 0xFFFF0010
-
-/* Result tags for Ok/Err */
-#define TAG_OK  16
-#define TAG_ERR 17
 
 gn_value gn_file_open(gn_value path, gn_value mode) {
     gn_object* path_obj = GN_OBJ(path);

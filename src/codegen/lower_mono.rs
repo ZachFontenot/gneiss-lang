@@ -614,10 +614,40 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
             let scrutinee_lowered = lower_expr(ctx, scrutinee, false);
             let scrutinee_var = ctx.fresh();
 
-            let alts: Vec<Alt> = arms
-                .iter()
-                .filter_map(|arm| lower_match_arm(ctx, arm, in_tail))
-                .collect();
+            // Process arms, separating alts from default case
+            // Only treat Wildcard and Var patterns as default cases
+            let mut alts = Vec::new();
+            let mut default_expr = None;
+
+            for arm in arms {
+                match &arm.pattern.node {
+                    MonoPatternKind::Wildcard => {
+                        // Wildcard pattern - use as default
+                        ctx.push_scope();
+                        let body = lower_expr(ctx, &arm.body, in_tail);
+                        ctx.pop_scope();
+                        default_expr = Some(Box::new(body));
+                        break; // Only use first default case
+                    }
+                    MonoPatternKind::Var(name) => {
+                        // Variable pattern - bind to scrutinee and use as default
+                        ctx.push_scope();
+                        ctx.bind(name, scrutinee_var);
+                        let body = lower_expr(ctx, &arm.body, in_tail);
+                        ctx.pop_scope();
+                        default_expr = Some(Box::new(body));
+                        break;
+                    }
+                    _ => {
+                        // Other patterns - process normally
+                        if let Some(alt) = lower_match_arm(ctx, arm, in_tail) {
+                            alts.push(alt);
+                        }
+                        // Note: if lower_match_arm returns None for other patterns,
+                        // they are silently dropped (existing behavior)
+                    }
+                }
+            }
 
             CoreExpr::LetExpr {
                 name: scrutinee_var,
@@ -626,7 +656,7 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
                 body: Box::new(CoreExpr::Case {
                     scrutinee: scrutinee_var,
                     alts,
-                    default: None,
+                    default: default_expr,
                 }),
             }
         }
@@ -1283,8 +1313,9 @@ fn lower_match_arm(ctx: &mut LowerMonoCtx, arm: &MonoMatchArm, in_tail: bool) ->
     ctx.push_scope();
 
     // Get tag from pattern, along with any projections needed
+    // The tuple includes an optional guard for patterns like [x] that need sub-pattern checks
     let mut all_projections = Vec::new();
-    let (tag, tag_name, binders, binder_hints) = match &arm.pattern.node {
+    let (tag, tag_name, binders, binder_hints, guard) = match &arm.pattern.node {
         MonoPatternKind::Constructor { name, args } => {
             let tag = ctx.get_tag("ADT", name);
             let mut binders = Vec::new();
@@ -1295,12 +1326,32 @@ fn lower_match_arm(ctx: &mut LowerMonoCtx, arm: &MonoMatchArm, in_tail: bool) ->
                 binder_hints.push(hint);
                 all_projections.extend(projs);
             }
-            (tag, Some(name.clone()), binders, binder_hints)
+            (tag, Some(name.clone()), binders, binder_hints, None)
         }
         MonoPatternKind::List(elems) if elems.is_empty() => {
             // Empty list pattern []
             let tag = ctx.get_tag("List", "Nil");
-            (tag, Some("Nil".to_string()), vec![], vec![])
+            (tag, Some("Nil".to_string()), vec![], vec![], None)
+        }
+        MonoPatternKind::List(elems) if elems.len() == 1 => {
+            // Single-element list pattern [x]
+            // Matches Cons(head, tail) where tail is Nil
+            let cons_tag = ctx.get_tag("List", "Cons");
+            let nil_tag = ctx.get_tag("List", "Nil");
+
+            // Bind head to the pattern element, tail to a fresh var for guard
+            let (head_var, head_hint, head_projs) =
+                lower_pattern_bind_with_projections(ctx, &elems[0]);
+            let tail_var = ctx.fresh_named("tail");
+            all_projections.extend(head_projs);
+
+            // Create guard: tail must have tag Nil
+            let guard = Some(Box::new(CoreExpr::PrimOp {
+                op: PrimOp::TagEq(nil_tag),
+                args: vec![tail_var],
+            }));
+
+            (cons_tag, Some("Cons".to_string()), vec![head_var, tail_var], vec![head_hint, Some("tail".into())], guard)
         }
         MonoPatternKind::Cons { head, tail } => {
             // Cons pattern x :: xs (head might be a tuple pattern)
@@ -1316,15 +1367,16 @@ fn lower_match_arm(ctx: &mut LowerMonoCtx, arm: &MonoMatchArm, in_tail: bool) ->
                 Some("Cons".to_string()),
                 vec![head_var, tail_var],
                 vec![head_hint, tail_hint],
+                None,
             )
         }
         MonoPatternKind::Lit(Literal::Int(n)) => {
             // Integer literal pattern
-            (*n as u32, Some(format!("{}", n)), vec![], vec![])
+            (*n as u32, Some(format!("{}", n)), vec![], vec![], None)
         }
         MonoPatternKind::Lit(Literal::Bool(b)) => {
             let (tag, name) = if *b { (1u32, "True") } else { (0u32, "False") };
-            (tag, Some(name.to_string()), vec![], vec![])
+            (tag, Some(name.to_string()), vec![], vec![], None)
         }
         MonoPatternKind::Wildcard => {
             // Wildcard pattern - we need a default case
@@ -1371,6 +1423,7 @@ fn lower_match_arm(ctx: &mut LowerMonoCtx, arm: &MonoMatchArm, in_tail: bool) ->
         tag_name,
         binders,
         binder_hints,
+        guard,
         body,
     })
 }

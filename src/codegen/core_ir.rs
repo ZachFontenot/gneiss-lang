@@ -261,6 +261,8 @@ pub struct Alt {
     /// Binders for constructor fields
     pub binders: Vec<VarId>,
     pub binder_hints: Vec<Option<String>>,
+    /// Optional guard condition (for patterns like [x] that need sub-pattern checks)
+    pub guard: Option<Box<CoreExpr>>,
     /// Body expression
     pub body: CoreExpr,
 }
@@ -398,6 +400,9 @@ pub enum PrimOp {
     ListHead,
     ListTail,
     ListIsEmpty,
+
+    // Tag checking (for pattern guards)
+    TagEq(Tag), // Check if value's tag equals given tag
 }
 
 impl fmt::Display for PrimOp {
@@ -443,6 +448,7 @@ impl fmt::Display for PrimOp {
             PrimOp::ListHead => write!(f, "list_head"),
             PrimOp::ListTail => write!(f, "list_tail"),
             PrimOp::ListIsEmpty => write!(f, "list_is_empty"),
+            PrimOp::TagEq(tag) => write!(f, "tag_eq_{}", tag),
         }
     }
 }

@@ -214,7 +214,7 @@ impl FlatEmitter {
             self.output.push_str("    gn_init(argc, argv);\n");
             self.output.push_str(&stmts);
             writeln!(self.output, "    gn_value result = {};", result).unwrap();
-            self.output.push_str("    gn_print(result);\n");
+            self.output.push_str("    gn_print(NULL, result);\n");
             self.output.push_str("    gn_println();\n");
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
@@ -224,7 +224,7 @@ impl FlatEmitter {
             self.output.push_str("int main(int argc, char** argv) {\n");
             self.output.push_str("    gn_init(argc, argv);\n");
             self.output.push_str("    gn_value result = fn_main(NULL, GN_UNIT);\n");
-            self.output.push_str("    gn_print(result);\n");
+            self.output.push_str("    gn_print(NULL, result);\n");
             self.output.push_str("    gn_println();\n");
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
@@ -650,14 +650,33 @@ impl FlatEmitter {
     }
 
     fn emit_case(&mut self, scrutinee: VarId, alts: &[FlatAlt], default: Option<&FlatExpr>) -> String {
+        use std::collections::HashMap;
+
         let result_var = self.fresh_var(Some("case_result"));
         let scrut_name = self.get_var_name(scrutinee);
 
         writeln!(self.function_defs, "{}gn_value {};", self.pad(), result_var).unwrap();
         writeln!(self.function_defs, "{}switch (GN_TAG({})) {{", self.pad(), scrut_name).unwrap();
 
+        // Group alts by tag to handle multiple patterns with the same tag
+        let mut tag_groups: HashMap<u32, Vec<&FlatAlt>> = HashMap::new();
         for alt in alts {
+            tag_groups.entry(alt.tag).or_default().push(alt);
+        }
+
+        // Track which tags we've emitted
+        let mut emitted_tags = std::collections::HashSet::new();
+
+        for alt in alts {
+            // Skip if we've already handled this tag
+            if emitted_tags.contains(&alt.tag) {
+                continue;
+            }
+            emitted_tags.insert(alt.tag);
+
+            let alts_for_tag = &tag_groups[&alt.tag];
             let tag_name = alt.tag_name.as_deref().unwrap_or("?");
+
             writeln!(
                 self.function_defs,
                 "{}case {}: /* {} */ {{",
@@ -666,20 +685,14 @@ impl FlatEmitter {
 
             self.indent += 1;
 
-            // Bind fields
-            for (i, binder) in alt.binders.iter().enumerate() {
-                let hint = alt.binder_hints.get(i).and_then(|h| h.as_deref());
-                let var_name = self.fresh_var(hint);
-                self.var_names.insert(*binder, var_name.clone());
-                writeln!(
-                    self.function_defs,
-                    "{}gn_value {} = GN_FIELD({}, {});",
-                    self.pad(), var_name, scrut_name, i
-                ).unwrap();
+            // If there's only one alt for this tag and no guard, emit simple case
+            if alts_for_tag.len() == 1 && alt.guard.is_none() {
+                self.emit_alt_body(alt, &scrut_name, &result_var);
+            } else {
+                // Multiple alts or guard present - emit as if-else chain
+                self.emit_alt_chain(alts_for_tag, &scrut_name, &result_var, default);
             }
 
-            let body_expr = self.emit_expr(&alt.body);
-            writeln!(self.function_defs, "{}{} = {};", self.pad(), result_var, body_expr).unwrap();
             writeln!(self.function_defs, "{}break;", self.pad()).unwrap();
 
             self.indent -= 1;
@@ -703,6 +716,95 @@ impl FlatEmitter {
         writeln!(self.function_defs, "{}}}", self.pad()).unwrap();
 
         result_var
+    }
+
+    /// Emit a simple alt body (bind fields, execute body)
+    fn emit_alt_body(&mut self, alt: &FlatAlt, scrut_name: &str, result_var: &str) {
+        // Bind fields
+        for (i, binder) in alt.binders.iter().enumerate() {
+            let hint = alt.binder_hints.get(i).and_then(|h| h.as_deref());
+            let var_name = self.fresh_var(hint);
+            self.var_names.insert(*binder, var_name.clone());
+            writeln!(
+                self.function_defs,
+                "{}gn_value {} = GN_FIELD({}, {});",
+                self.pad(), var_name, scrut_name, i
+            ).unwrap();
+        }
+
+        let body_expr = self.emit_expr(&alt.body);
+        writeln!(self.function_defs, "{}{} = {};", self.pad(), result_var, body_expr).unwrap();
+    }
+
+    /// Emit a chain of if-else for alts with guards or multiple alts for same tag
+    fn emit_alt_chain(&mut self, alts: &[&FlatAlt], scrut_name: &str, result_var: &str, default: Option<&FlatExpr>) {
+        // First, bind ALL binders from ALL alts upfront
+        // All alts have the same tag, so they have the same number of fields
+        // But different alts may name them differently (e.g., [x] binds head,tail vs _ :: rest binds _,rest)
+        for alt in alts {
+            for (i, binder) in alt.binders.iter().enumerate() {
+                // Only declare if we haven't already for this binder
+                if !self.var_names.contains_key(binder) {
+                    let hint = alt.binder_hints.get(i).and_then(|h| h.as_deref());
+                    let var_name = self.fresh_var(hint);
+                    self.var_names.insert(*binder, var_name.clone());
+                    writeln!(
+                        self.function_defs,
+                        "{}gn_value {} = GN_FIELD({}, {});",
+                        self.pad(), var_name, scrut_name, i
+                    ).unwrap();
+                }
+            }
+        }
+
+        // Emit if-else chain for each alt
+        let mut first = true;
+        for alt in alts {
+            if let Some(guard) = &alt.guard {
+                let guard_expr = self.emit_expr(guard);
+                if first {
+                    writeln!(self.function_defs, "{}if (GN_IS_TRUE({})) {{", self.pad(), guard_expr).unwrap();
+                } else {
+                    writeln!(self.function_defs, "{}}} else if (GN_IS_TRUE({})) {{", self.pad(), guard_expr).unwrap();
+                }
+                first = false;
+
+                self.indent += 1;
+                let body_expr = self.emit_expr(&alt.body);
+                writeln!(self.function_defs, "{}{} = {};", self.pad(), result_var, body_expr).unwrap();
+                self.indent -= 1;
+            } else {
+                // No guard - this is the fallback case
+                if first {
+                    // First alt without guard - just emit directly
+                    let body_expr = self.emit_expr(&alt.body);
+                    writeln!(self.function_defs, "{}{} = {};", self.pad(), result_var, body_expr).unwrap();
+                    return; // No else needed
+                } else {
+                    // After guards, this is the else case
+                    writeln!(self.function_defs, "{}}} else {{", self.pad()).unwrap();
+                    self.indent += 1;
+                    let body_expr = self.emit_expr(&alt.body);
+                    writeln!(self.function_defs, "{}{} = {};", self.pad(), result_var, body_expr).unwrap();
+                    self.indent -= 1;
+                    writeln!(self.function_defs, "{}}}", self.pad()).unwrap();
+                    return;
+                }
+            }
+        }
+
+        // If we get here, all alts had guards - emit else with default or panic
+        writeln!(self.function_defs, "{}}} else {{", self.pad()).unwrap();
+        self.indent += 1;
+        if let Some(def) = default {
+            let def_expr = self.emit_expr(def);
+            writeln!(self.function_defs, "{}{} = {};", self.pad(), result_var, def_expr).unwrap();
+        } else {
+            writeln!(self.function_defs, "{}gn_panic(\"non-exhaustive match\");", self.pad()).unwrap();
+            writeln!(self.function_defs, "{}{} = GN_UNIT;", self.pad(), result_var).unwrap();
+        }
+        self.indent -= 1;
+        writeln!(self.function_defs, "{}}}", self.pad()).unwrap();
     }
 
     fn get_var_name(&self, var: VarId) -> String {
@@ -788,6 +890,7 @@ fn emit_primop(op: &PrimOp, args: &[VarId], var_names: &HashMap<VarId, String>) 
         PrimOp::ListHead => format!("gn_list_head({})", args_str[0]),
         PrimOp::ListTail => format!("gn_list_tail({})", args_str[0]),
         PrimOp::ListIsEmpty => format!("gn_list_is_empty({})", args_str[0]),
+        PrimOp::TagEq(tag) => format!("(GN_TAG({}) == {} ? GN_TRUE : GN_FALSE)", args_str[0], tag),
     }
 }
 

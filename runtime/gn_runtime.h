@@ -111,8 +111,8 @@ gn_value gn_dup(gn_value v);
 void gn_drop(gn_value v);
 
 /* Printing */
-void gn_print(gn_value v);
-void gn_println(void);
+gn_value gn_print(gn_value* env, gn_value v);
+gn_value gn_println(void);
 
 /* Panic/error - returns gn_value for use in expressions (never actually returns) */
 gn_value gn_panic(const char* msg);

@@ -583,7 +583,7 @@ impl CEmitter {
             self.output.push_str("    gn_init(argc, argv);\n");
             self.output.push_str(&main_stmts);
             writeln!(self.output, "    gn_value result = {};", result).unwrap();
-            self.output.push_str("    gn_print(result);\n");
+            self.output.push_str("    gn_print(NULL, result);\n");
             self.output.push_str("    gn_println();\n");
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
@@ -595,7 +595,7 @@ impl CEmitter {
                 .push_str("int main(int argc, char** argv) {\n");
             self.output.push_str("    gn_init(argc, argv);\n");
             self.output.push_str("    gn_value result = fn_main(NULL, GN_UNIT);\n");
-            self.output.push_str("    gn_print(result);\n");
+            self.output.push_str("    gn_print(NULL, result);\n");
             self.output.push_str("    gn_println();\n");
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
@@ -1815,6 +1815,7 @@ impl CEmitter {
             PrimOp::ListHead => format!("gn_list_head({})", args_str[0]),
             PrimOp::ListTail => format!("gn_list_tail({})", args_str[0]),
             PrimOp::ListIsEmpty => format!("gn_list_is_empty({})", args_str[0]),
+            PrimOp::TagEq(tag) => format!("(GN_TAG({}) == {} ? GN_TRUE : GN_FALSE)", args_str[0], tag),
         }
     }
 
