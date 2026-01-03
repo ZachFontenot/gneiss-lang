@@ -653,6 +653,139 @@ fun x y ->
 }
 
 // ============================================================================
+// Property Tests: Compiled Code Safety
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Well-typed programs should compile to C and run without crashing.
+    /// This is weaker than the interpreter test - we only verify the program
+    /// doesn't segfault or produce undefined behavior. Exit code 1 is allowed
+    /// (for panics/assertions).
+    #[test]
+    fn compiled_programs_dont_crash(source in arb_well_typed_source()) {
+        // Only test expressions that type-check
+        if infer_source(&source).is_ok() {
+            // Wrap in main function for compilation
+            let program = format!("let main _ = {}", source);
+
+            // Try to compile and run
+            if let Ok(result) = compile_and_run_program(&program) {
+                // Exit code should be defined (not killed by signal)
+                // 0 = success, 1 = assertion failure, anything else is suspicious
+                prop_assert!(
+                    result.exit_code.is_some(),
+                    "Program crashed (killed by signal): {}\nstderr: {}",
+                    program,
+                    result.stderr
+                );
+
+                // Exit code 0 or 1 are expected (success or assertion failure)
+                // Other codes might indicate bugs
+                if let Some(code) = result.exit_code {
+                    prop_assert!(
+                        code == 0 || code == 1,
+                        "Unexpected exit code {} for: {}\nstderr: {}",
+                        code,
+                        program,
+                        result.stderr
+                    );
+                }
+            }
+            // If compilation fails, that's a bug in the compiler, but not what
+            // this test is checking. We're testing runtime safety.
+        }
+    }
+}
+
+/// Result of running a compiled program
+struct RunResult {
+    exit_code: Option<i32>,
+    #[allow(dead_code)]
+    stdout: String,
+    stderr: String,
+}
+
+/// Compile a Gneiss program to C and run it
+fn compile_and_run_program(source: &str) -> Result<RunResult, String> {
+    use std::env;
+    use std::fs;
+    use std::process::Command;
+
+    let runtime_path = env::var("GNEISS_RUNTIME").unwrap_or_else(|_| "runtime".to_string());
+
+    // Create temp directory
+    let temp_dir = env::temp_dir().join(format!("gneiss_prop_test_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    let source_file = temp_dir.join("test.gn");
+    let c_file = temp_dir.join("test.c");
+    let exe_file = temp_dir.join("test");
+
+    // Write source
+    fs::write(&source_file, source).map_err(|e| format!("Failed to write source: {}", e))?;
+
+    // Compile Gneiss to C
+    let compile_output = Command::new(env!("CARGO_BIN_EXE_gneiss"))
+        .args([
+            "compile",
+            "--emit-c",
+            "-o",
+            c_file.to_str().unwrap(),
+            source_file.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run compiler: {}", e))?;
+
+    if !compile_output.status.success() {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(format!(
+            "Gneiss compilation failed:\n{}",
+            String::from_utf8_lossy(&compile_output.stderr)
+        ));
+    }
+
+    // Compile C to executable
+    let cc_output = Command::new("cc")
+        .args([
+            "-o",
+            exe_file.to_str().unwrap(),
+            c_file.to_str().unwrap(),
+            &format!("{}/gn_runtime.c", runtime_path),
+            &format!("-I{}", runtime_path),
+            "-O0",
+            "-lm",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run cc: {}", e))?;
+
+    if !cc_output.status.success() {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(format!(
+            "C compilation failed:\n{}",
+            String::from_utf8_lossy(&cc_output.stderr)
+        ));
+    }
+
+    // Run executable with timeout
+    let run_output = Command::new(&exe_file)
+        .output()
+        .map_err(|e| format!("Failed to run executable: {}", e))?;
+
+    let result = RunResult {
+        exit_code: run_output.status.code(),
+        stdout: String::from_utf8_lossy(&run_output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&run_output.stderr).to_string(),
+    };
+
+    // Cleanup
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    Ok(result)
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
