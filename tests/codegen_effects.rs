@@ -91,6 +91,8 @@ fn compile_and_run(source: &str, test_name: &str) -> Result<String, String> {
 }
 
 /// Assert that the program produces the expected integer output (for printing tests)
+/// DEPRECATED: Prefer using assert_eq in the Gneiss code and expect_success
+#[allow(dead_code)]
 fn expect_result(source: &str, expected: i32, test_name: &str) {
     match compile_and_run(source, test_name) {
         Ok(stdout) => {
@@ -128,9 +130,9 @@ fn expect_success(source: &str, test_name: &str) {
 fn effect_no_effects_pure_program() {
     // A program with no effects should work as before
     let source = r#"
-let main _ = println 42
+let main _ = assert_eq 42 42
 "#;
-    expect_result(source, 42, "effect_no_effects_pure_program");
+    expect_success(source, "effect_no_effects_pure_program");
 }
 
 #[test]
@@ -138,9 +140,9 @@ fn effect_simple_function_call() {
     // Function calls still work
     let source = r#"
 let add x y = x + y
-let main _ = println (add 20 22)
+let main _ = assert_eq (add 20 22) 42
 "#;
-    expect_result(source, 42, "effect_simple_function_call");
+    expect_success(source, "effect_simple_function_call");
 }
 
 #[test]
@@ -149,9 +151,9 @@ fn effect_hof_still_works() {
     let source = r#"
 let apply f x = f x
 let inc x = x + 1
-let main _ = println (apply inc 41)
+let main _ = assert_eq (apply inc 41) 42
 "#;
-    expect_result(source, 42, "effect_hof_still_works");
+    expect_success(source, "effect_hof_still_works");
 }
 
 // ============================================================================
