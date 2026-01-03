@@ -568,42 +568,34 @@ let main _ =
     expect_success(source);
 }
 
-// NOTE: The following 5 tests use io_print and check stdout because:
-// polymorphic == (via assert_eq) doesn't properly dispatch through Eq dict for String.
-// This is a known limitation: BinOp elaboration falls through to IntEq for type variables.
-// TODO: Fix by generating DictMethodCall for == on type vars with Eq constraint.
+// These tests verify that polymorphic == correctly dispatches through the
+// type-resolved comparison (PolyEq -> StringEq for String types).
 
 #[test]
 fn phase5_show_int() {
     // Show trait for Int
     let source = r#"
-let main _ =
-    let _ = io_print (show 42) in
-    ()
+let main _ = assert_eq (show 42) "42"
 "#;
-    assert_output(source, "42");
+    expect_success(source);
 }
 
 #[test]
 fn phase5_show_string() {
     // Show trait for String
     let source = r#"
-let main _ =
-    let _ = io_print (show "hello") in
-    ()
+let main _ = assert_eq (show "hello") "hello"
 "#;
-    assert_output(source, "hello");
+    expect_success(source);
 }
 
 #[test]
 fn phase5_show_bool() {
     // Show trait for Bool
     let source = r#"
-let main _ =
-    let _ = io_print (show true) in
-    ()
+let main _ = assert_eq (show true) "true"
 "#;
-    assert_output(source, "true");
+    expect_success(source);
 }
 
 #[test]
@@ -612,11 +604,9 @@ fn trait_method_through_polymorphic_fn() {
     // This exercises DictMethodCall resolution
     let source = r#"
 let stringify x = show x
-let main _ =
-    let _ = io_print (stringify 42) in
-    ()
+let main _ = assert_eq (stringify 42) "42"
 "#;
-    assert_output(source, "42");
+    expect_success(source);
 }
 
 #[test]
@@ -625,11 +615,9 @@ fn trait_method_nested_poly() {
     let source = r#"
 let stringify x = show x
 let double x = stringify x ++ stringify x
-let main _ =
-    let _ = io_print (double 5) in
-    ()
+let main _ = assert_eq (double 5) "55"
 "#;
-    assert_output(source, "55");
+    expect_success(source);
 }
 
 // Note: print tests removed - requires proper monomorphization pass
