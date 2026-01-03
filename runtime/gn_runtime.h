@@ -116,6 +116,10 @@ gn_value gn_println(void);
 
 /* Panic/error - returns gn_value for use in expressions (never actually returns) */
 gn_value gn_panic(const char* msg);
+gn_value gn_panic_str(gn_value msg);  /* panic with String value */
+
+/* Assert - panics if condition is false */
+gn_value gn_assert(gn_value cond);
 
 /* String operations */
 gn_value gn_string(const char* s);

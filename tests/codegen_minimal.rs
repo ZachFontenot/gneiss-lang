@@ -25,7 +25,7 @@ fn compile_and_run(source: &str) -> Result<String, String> {
     compile_and_run_impl(source, true)
 }
 
-/// Compile and run, expecting a specific output
+/// Compile and run, expecting a specific output (for tests that explicitly print)
 fn assert_output(source: &str, expected: &str) {
     match compile_and_run(source) {
         Ok(output) => {
@@ -35,6 +35,17 @@ fn assert_output(source: &str, expected: &str) {
                 "Output mismatch.\nExpected: {}\nGot: {}",
                 expected, output
             );
+        }
+        Err(e) => panic!("Compilation/execution failed: {}", e),
+    }
+}
+
+/// Assert that the program compiles and runs successfully (exit code 0)
+/// Use this with programs that use assert_eq instead of printing
+fn expect_success(source: &str) {
+    match compile_and_run(source) {
+        Ok(_) => {
+            // Success - program ran without error
         }
         Err(e) => panic!("Compilation/execution failed: {}", e),
     }
@@ -157,6 +168,16 @@ fn assert_output_no_prelude(source: &str, expected: &str) {
     }
 }
 
+/// Assert that the program compiles and runs successfully WITHOUT prelude (exit code 0)
+fn expect_success_no_prelude(source: &str) {
+    match compile_and_run_no_prelude(source) {
+        Ok(_) => {
+            // Success - program ran without error
+        }
+        Err(e) => panic!("Compilation/execution failed: {}", e),
+    }
+}
+
 // ============================================================================
 // Phase 0 Tests: Minimal Baseline
 // ============================================================================
@@ -165,45 +186,45 @@ fn assert_output_no_prelude(source: &str, expected: &str) {
 fn baseline_literal_int() {
     // Simplest possible program: return an integer literal
     let source = r#"
-let main _ = 42
+let main _ = assert_eq 42 42
 "#;
-    assert_output(source, "42");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_arithmetic_add() {
     // Simple arithmetic: 1 + 2
     let source = r#"
-let main _ = 1 + 2
+let main _ = assert_eq (1 + 2) 3
 "#;
-    assert_output(source, "3");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_arithmetic_complex() {
     // More complex arithmetic
     let source = r#"
-let main _ = (10 + 5) * 2 - 3
+let main _ = assert_eq ((10 + 5) * 2 - 3) 27
 "#;
-    assert_output(source, "27");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_if_true() {
     // Conditional: if true branch
     let source = r#"
-let main _ = if true then 1 else 2
+let main _ = assert_eq (if true then 1 else 2) 1
 "#;
-    assert_output(source, "1");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_if_false() {
     // Conditional: if false branch
     let source = r#"
-let main _ = if false then 1 else 2
+let main _ = assert_eq (if false then 1 else 2) 2
 "#;
-    assert_output(source, "2");
+    expect_success(source);
 }
 
 #[test]
@@ -213,9 +234,9 @@ fn baseline_let_binding() {
 let main _ =
     let x = 10 in
     let y = 20 in
-    x + y
+    assert_eq (x + y) 30
 "#;
-    assert_output(source, "30");
+    expect_success(source);
 }
 
 #[test]
@@ -223,9 +244,9 @@ fn baseline_function_call() {
     // Named function call
     let source = r#"
 let double x = x * 2
-let main _ = double 21
+let main _ = assert_eq (double 21) 42
 "#;
-    assert_output(source, "42");
+    expect_success(source);
 }
 
 #[test]
@@ -236,9 +257,9 @@ let rec factorial n =
     if n <= 1 then 1
     else n * factorial (n - 1)
 
-let main _ = factorial 5
+let main _ = assert_eq (factorial 5) 120
 "#;
-    assert_output(source, "120");
+    expect_success(source);
 }
 
 // ============================================================================
@@ -249,18 +270,18 @@ let main _ = factorial 5
 fn baseline_lambda_simple() {
     // Simple lambda without captures
     let source = r#"
-let main _ = (fun x -> x + 1) 5
+let main _ = assert_eq ((fun x -> x + 1) 5) 6
 "#;
-    assert_output(source, "6");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_lambda_identity() {
     // Identity lambda
     let source = r#"
-let main _ = (fun x -> x) 42
+let main _ = assert_eq ((fun x -> x) 42) 42
 "#;
-    assert_output(source, "42");
+    expect_success(source);
 }
 
 #[test]
@@ -269,9 +290,9 @@ fn baseline_lambda_let_bound() {
     let source = r#"
 let main _ =
     let f = fun x -> x + 1 in
-    f 5
+    assert_eq (f 5) 6
 "#;
-    assert_output(source, "6");
+    expect_success(source);
 }
 
 #[test]
@@ -281,9 +302,9 @@ fn baseline_lambda_capture() {
 let main _ =
     let y = 10 in
     let f = fun x -> x + y in
-    f 5
+    assert_eq (f 5) 15
 "#;
-    assert_output(source, "15");
+    expect_success(source);
 }
 
 #[test]
@@ -291,36 +312,36 @@ fn baseline_curried_function() {
     // Curried function (returns a closure)
     let source = r#"
 let add x = fun y -> x + y
-let main _ = add 3 4
+let main _ = assert_eq (add 3 4) 7
 "#;
-    assert_output(source, "7");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_map() {
     // Higher-order function
     let source = r#"
-let main _ = length (map (fun x -> x + 1) [1, 2, 3])
+let main _ = assert_eq (length (map (fun x -> x + 1) [1, 2, 3])) 3
 "#;
-    assert_output(source, "3");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_filter() {
     // Higher-order filter function
     let source = r#"
-let main _ = length (filter (fun x -> x > 2) [1, 2, 3, 4])
+let main _ = assert_eq (length (filter (fun x -> x > 2) [1, 2, 3, 4])) 2
 "#;
-    assert_output(source, "2");
+    expect_success(source);
 }
 
 #[test]
 fn baseline_foldl() {
     // Higher-order fold function
     let source = r#"
-let main _ = foldl (fun acc x -> acc + x) 0 [1, 2, 3]
+let main _ = assert_eq (foldl (fun acc x -> acc + x) 0 [1, 2, 3]) 6
 "#;
-    assert_output(source, "6");
+    expect_success(source);
 }
 
 // ============================================================================
@@ -334,9 +355,9 @@ fn phase5_compose() {
 let compose f g x = f (g x)
 let double x = x + x
 let add1 x = x + 1
-let main _ = compose double add1 5
+let main _ = assert_eq (compose double add1 5) 12
 "#;
-    assert_output(source, "12");
+    expect_success(source);
 }
 
 #[test]
@@ -348,9 +369,9 @@ let rec list_sum xs =
     | [] -> 0
     | x :: rest -> x + list_sum rest
     end
-let main _ = list_sum [1, 2, 3, 4, 5]
+let main _ = assert_eq (list_sum [1, 2, 3, 4, 5]) 15
 "#;
-    assert_output(source, "15");
+    expect_success(source);
 }
 
 #[test]
@@ -359,27 +380,27 @@ fn phase5_pipe_operator() {
     let source = r#"
 let double x = x * 2
 let add1 x = x + 1
-let main _ = 5 |> add1 |> double
+let main _ = assert_eq (5 |> add1 |> double) 12
 "#;
-    assert_output(source, "12");
+    expect_success(source);
 }
 
 #[test]
 fn phase5_nested_hof() {
     // Nested higher-order functions
     let source = r#"
-let main _ = length (map (fun x -> x + 1) (filter (fun x -> x > 1) [1, 2, 3, 4]))
+let main _ = assert_eq (length (map (fun x -> x + 1) (filter (fun x -> x > 1) [1, 2, 3, 4]))) 3
 "#;
-    assert_output(source, "3");
+    expect_success(source);
 }
 
 #[test]
 fn phase5_list_concat() {
     // List concatenation using list_append (no ++ operator)
     let source = r#"
-let main _ = length (list_append [1, 2] [3, 4, 5])
+let main _ = assert_eq (length (list_append [1, 2] [3, 4, 5])) 5
 "#;
-    assert_output(source, "5");
+    expect_success(source);
 }
 
 #[test]
@@ -400,9 +421,9 @@ let rec eval expr =
 
 let main _ =
   let expr = Add (Mul (Num 2) (Num 3)) (Num 4) in
-  eval expr
+  assert_eq (eval expr) 10
 "#;
-    assert_output(source, "10");
+    expect_success(source);
 }
 
 #[test]
@@ -419,9 +440,9 @@ let rec tree_sum t =
 
 let main _ =
   let t = Node (Node (Leaf 1) (Leaf 2)) (Leaf 3) in
-  tree_sum t
+  assert_eq (tree_sum t) 6
 "#;
-    assert_output(source, "6");
+    expect_success(source);
 }
 
 #[test]
@@ -439,9 +460,9 @@ let get_or_default e d =
 let main _ =
   let e1 = Right 42 in
   let e2 = Left "error" in
-  get_or_default e1 0 + get_or_default e2 100
+  assert_eq (get_or_default e1 0 + get_or_default e2 100) 142
 "#;
-    assert_output(source, "142");
+    expect_success(source);
 }
 
 #[test]
@@ -455,10 +476,9 @@ and is_odd n =
   if n == 0 then false
   else is_even (n - 1)
 
-let main _ =
-  if is_even 10 then 1 else 0
+let main _ = assert_eq (if is_even 10 then 1 else 0) 1
 "#;
-    assert_output(source, "1");
+    expect_success(source);
 }
 
 #[test]
@@ -474,12 +494,13 @@ let rec reverse_acc acc xs =
 let reverse xs = reverse_acc [] xs
 
 let main _ =
-  match reverse [1, 2, 3] with
-  | x :: _ -> x
-  | [] -> 0
-  end
+  let result = match reverse [1, 2, 3] with
+    | x :: _ -> x
+    | [] -> 0
+    end
+  in assert_eq result 3
 "#;
-    assert_output(source, "3");
+    expect_success(source);
 }
 
 #[test]
@@ -493,9 +514,9 @@ let rec take n xs =
     | x :: rest -> x :: take (n - 1) rest
     end
 
-let main _ = length (take 2 [1, 2, 3, 4, 5])
+let main _ = assert_eq (length (take 2 [1, 2, 3, 4, 5])) 2
 "#;
-    assert_output(source, "2");
+    expect_success(source);
 }
 
 #[test]
@@ -514,9 +535,9 @@ let rec zip_with f xs ys =
 
 let main _ =
   let sums = zip_with (fun a b -> a + b) [1, 2, 3] [10, 20, 30] in
-  foldl (fun acc x -> acc + x) 0 sums
+  assert_eq (foldl (fun acc x -> acc + x) 0 sums) 66
 "#;
-    assert_output(source, "66");
+    expect_success(source);
 }
 
 #[test]
@@ -524,12 +545,13 @@ fn phase5_option_some() {
     // Option Some case
     let source = r#"
 let main _ =
-    match Some 42 with
-    | Some x -> x
-    | None -> 0
-    end
+    let result = match Some 42 with
+      | Some x -> x
+      | None -> 0
+      end
+    in assert_eq result 42
 "#;
-    assert_output(source, "42");
+    expect_success(source);
 }
 
 #[test]
@@ -537,25 +559,29 @@ fn phase5_option_none() {
     // Option None case
     let source = r#"
 let main _ =
-    match None with
-    | Some x -> x
-    | None -> 99
-    end
+    let result = match None with
+      | Some x -> x
+      | None -> 99
+      end
+    in assert_eq result 99
 "#;
-    assert_output(source, "99");
+    expect_success(source);
 }
+
+// NOTE: The following 5 tests use io_print and check stdout because:
+// polymorphic == (via assert_eq) doesn't properly dispatch through Eq dict for String.
+// This is a known limitation: BinOp elaboration falls through to IntEq for type variables.
+// TODO: Fix by generating DictMethodCall for == on type vars with Eq constraint.
 
 #[test]
 fn phase5_show_int() {
     // Show trait for Int
     let source = r#"
 let main _ =
-    let s = show 42 in
-    let _ = io_print s in
-    0
+    let _ = io_print (show 42) in
+    ()
 "#;
-    // Output is "42" from io_print + "0" from return value
-    assert_output(source, "420");
+    assert_output(source, "42");
 }
 
 #[test]
@@ -563,11 +589,10 @@ fn phase5_show_string() {
     // Show trait for String
     let source = r#"
 let main _ =
-    let s = show "hello" in
-    let _ = io_print s in
-    0
+    let _ = io_print (show "hello") in
+    ()
 "#;
-    assert_output(source, "hello0");
+    assert_output(source, "hello");
 }
 
 #[test]
@@ -575,11 +600,10 @@ fn phase5_show_bool() {
     // Show trait for Bool
     let source = r#"
 let main _ =
-    let s = show true in
-    let _ = io_print s in
-    0
+    let _ = io_print (show true) in
+    ()
 "#;
-    assert_output(source, "true0");
+    assert_output(source, "true");
 }
 
 #[test]
@@ -589,11 +613,10 @@ fn trait_method_through_polymorphic_fn() {
     let source = r#"
 let stringify x = show x
 let main _ =
-    let s = stringify 42 in
-    let _ = io_print s in
-    0
+    let _ = io_print (stringify 42) in
+    ()
 "#;
-    assert_output(source, "420");
+    assert_output(source, "42");
 }
 
 #[test]
@@ -604,9 +627,9 @@ let stringify x = show x
 let double x = stringify x ++ stringify x
 let main _ =
     let _ = io_print (double 5) in
-    0
+    ()
 "#;
-    assert_output(source, "550");
+    assert_output(source, "55");
 }
 
 // Note: print tests removed - requires proper monomorphization pass
@@ -622,18 +645,18 @@ fn mono_pipeline_literal_no_prelude() {
     // Test the new pipeline with a simple literal - NO PRELUDE
     // This is the most basic test of the new infrastructure
     let source = r#"
-let main _ = 42
+let main _ = assert (42 == 42)
 "#;
-    assert_output_no_prelude(source, "42");
+    expect_success_no_prelude(source);
 }
 
 #[test]
 fn mono_pipeline_arithmetic_no_prelude() {
     // Test arithmetic through new pipeline - NO PRELUDE
     let source = r#"
-let main _ = 1 + 2
+let main _ = assert (1 + 2 == 3)
 "#;
-    assert_output_no_prelude(source, "3");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -643,27 +666,27 @@ fn mono_pipeline_function_call_no_prelude() {
     // NO PRELUDE - pure user code
     let source = r#"
 let add x y = x + y
-let main _ = add 1 2
+let main _ = assert (add 1 2 == 3)
 "#;
-    assert_output_no_prelude(source, "3");
+    expect_success_no_prelude(source);
 }
 
 #[test]
 fn mono_pipeline_lambda_simple_no_prelude() {
     // Phase 2 test: Simple lambda without captures
     let source = r#"
-let main _ = (fun x -> x + 1) 5
+let main _ = assert ((fun x -> x + 1) 5 == 6)
 "#;
-    assert_output_no_prelude(source, "6");
+    expect_success_no_prelude(source);
 }
 
 #[test]
 fn mono_pipeline_lambda_identity_no_prelude() {
     // Phase 2 test: Identity lambda
     let source = r#"
-let main _ = (fun x -> x) 42
+let main _ = assert ((fun x -> x) 42 == 42)
 "#;
-    assert_output_no_prelude(source, "42");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -672,9 +695,9 @@ fn mono_pipeline_lambda_let_bound_no_prelude() {
     let source = r#"
 let main _ =
     let f = fun x -> x + 1 in
-    f 5
+    assert (f 5 == 6)
 "#;
-    assert_output_no_prelude(source, "6");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -684,9 +707,9 @@ fn mono_pipeline_lambda_capture_no_prelude() {
 let main _ =
     let y = 10 in
     let f = fun x -> x + y in
-    f 5
+    assert (f 5 == 15)
 "#;
-    assert_output_no_prelude(source, "15");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -694,9 +717,9 @@ fn mono_pipeline_curried_function_no_prelude() {
     // Phase 3 test: Curried function (returns a closure)
     let source = r#"
 let add x = fun y -> x + y
-let main _ = add 3 4
+let main _ = assert (add 3 4 == 7)
 "#;
-    assert_output_no_prelude(source, "7");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -705,9 +728,9 @@ fn mono_pipeline_hof_apply_no_prelude() {
     let source = r#"
 let apply f x = f x
 let double x = x * 2
-let main _ = apply double 21
+let main _ = assert (apply double 21 == 42)
 "#;
-    assert_output_no_prelude(source, "42");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -717,9 +740,9 @@ fn mono_pipeline_hof_compose_no_prelude() {
 let compose f g x = f (g x)
 let double x = x + x
 let add1 x = x + 1
-let main _ = compose double add1 5
+let main _ = assert (compose double add1 5 == 12)
 "#;
-    assert_output_no_prelude(source, "12");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -731,9 +754,9 @@ let rec list_sum xs =
     | [] -> 0
     | x :: rest -> x + list_sum rest
     end
-let main _ = list_sum [1, 2, 3, 4, 5]
+let main _ = assert (list_sum [1, 2, 3, 4, 5] == 15)
 "#;
-    assert_output_no_prelude(source, "15");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -752,18 +775,18 @@ let rec list_sum xs =
     | x :: rest -> x + list_sum rest
     end
 
-let main _ = list_sum (my_map (fun x -> x + 1) [1, 2, 3])
+let main _ = assert (list_sum (my_map (fun x -> x + 1) [1, 2, 3]) == 9)
 "#;
-    assert_output_no_prelude(source, "9");
+    expect_success_no_prelude(source);
 }
 
 #[test]
 fn mono_pipeline_with_prelude_length() {
     // Test using prelude's length function
     let source = r#"
-let main _ = length [1, 2, 3, 4, 5]
+let main _ = assert_eq (length [1, 2, 3, 4, 5]) 5
 "#;
-    assert_output(source, "5");
+    expect_success(source);
 }
 
 #[test]
@@ -783,9 +806,9 @@ let rec list_sum xs =
     | x :: rest -> x + list_sum rest
     end
 
-let main _ = list_sum (reverse_acc [] [1, 2, 3])
+let main _ = assert (list_sum (reverse_acc [] [1, 2, 3]) == 6)
 "#;
-    assert_output_no_prelude(source, "6");
+    expect_success_no_prelude(source);
 }
 
 #[test]
@@ -796,7 +819,7 @@ let apply_twice f x = f (f x)
 
 let main _ =
     let rec double n = n + n in
-    apply_twice double 5
+    assert (apply_twice double 5 == 20)
 "#;
-    assert_output_no_prelude(source, "20");
+    expect_success_no_prelude(source);
 }

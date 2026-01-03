@@ -232,6 +232,22 @@ gn_value gn_panic(const char* msg) {
     return GN_UNIT;  /* Never reached, but satisfies return type */
 }
 
+gn_value gn_panic_str(gn_value msg) {
+    gn_object* obj = GN_OBJ(msg);
+    char* str = (char*)obj->fields[0];
+    fprintf(stderr, "panic: %s\n", str);
+    exit(1);
+    return GN_UNIT;  /* Never reached, but satisfies return type */
+}
+
+gn_value gn_assert(gn_value cond) {
+    if (!GN_IS_TRUE(cond)) {
+        fprintf(stderr, "assertion failed\n");
+        exit(1);
+    }
+    return GN_UNIT;
+}
+
 /* ============================================================================
  * String Operations
  * ============================================================================ */

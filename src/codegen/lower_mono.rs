@@ -341,6 +341,9 @@ fn register_builtins(ctx: &mut LowerMonoCtx) {
         "get_args",
         "html_escape",
         "json_escape_string",
+        // Testing
+        "assert",
+        "panic_str",
     ];
 
     for name in builtins {
@@ -528,7 +531,7 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
 
         MonoExprKind::Let { pattern, value, body } => {
             let value_lowered = lower_expr(ctx, value, false);
-            let (var, _hint) = lower_pattern_bind(ctx, pattern);
+            let (var, _hint, projections) = lower_pattern_bind_with_projections(ctx, pattern);
 
             let body_lowered = if let Some(b) = body {
                 lower_expr(ctx, b, in_tail)
@@ -536,11 +539,25 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
                 CoreExpr::Var(var)
             };
 
+            // Wrap body with projection let-bindings (in reverse order so they nest correctly)
+            let mut wrapped_body = body_lowered;
+            for proj in projections.into_iter().rev() {
+                wrapped_body = CoreExpr::LetExpr {
+                    name: proj.var,
+                    name_hint: proj.hint,
+                    value: Box::new(CoreExpr::Proj {
+                        tuple: proj.source_var,
+                        index: proj.field_idx,
+                    }),
+                    body: Box::new(wrapped_body),
+                };
+            }
+
             CoreExpr::LetExpr {
                 name: var,
                 name_hint: Some(pattern_hint(pattern)),
                 value: Box::new(value_lowered),
-                body: Box::new(body_lowered),
+                body: Box::new(wrapped_body),
             }
         }
 
@@ -1204,6 +1221,72 @@ struct PatternProjection {
     field_idx: usize,
 }
 
+/// Collect bindings from a pattern, given a variable that holds its value.
+/// This is used for nested patterns where we've already extracted the value.
+fn collect_pattern_bindings(
+    ctx: &mut LowerMonoCtx,
+    pattern: &MonoPattern,
+    source_var: VarId,
+    projections: &mut Vec<PatternProjection>,
+) {
+    match &pattern.node {
+        MonoPatternKind::Var(name) => {
+            // Bind this variable directly to the source var
+            // (no projection needed - source_var already holds the value)
+            ctx.bind(name, source_var);
+        }
+        MonoPatternKind::Wildcard => {
+            // No binding needed
+        }
+        MonoPatternKind::Tuple(elems) => {
+            for (i, elem) in elems.iter().enumerate() {
+                let elem_var = ctx.fresh();
+                projections.push(PatternProjection {
+                    var: elem_var,
+                    hint: None,
+                    source_var,
+                    field_idx: i,
+                });
+                collect_pattern_bindings(ctx, elem, elem_var, projections);
+            }
+        }
+        MonoPatternKind::Cons { head, tail } => {
+            let head_var = ctx.fresh();
+            projections.push(PatternProjection {
+                var: head_var,
+                hint: None,
+                source_var,
+                field_idx: 0,
+            });
+            collect_pattern_bindings(ctx, head, head_var, projections);
+
+            let tail_var = ctx.fresh();
+            projections.push(PatternProjection {
+                var: tail_var,
+                hint: None,
+                source_var,
+                field_idx: 1,
+            });
+            collect_pattern_bindings(ctx, tail, tail_var, projections);
+        }
+        MonoPatternKind::Constructor { args, .. } => {
+            for (i, arg) in args.iter().enumerate() {
+                let arg_var = ctx.fresh();
+                projections.push(PatternProjection {
+                    var: arg_var,
+                    hint: None,
+                    source_var,
+                    field_idx: i,
+                });
+                collect_pattern_bindings(ctx, arg, arg_var, projections);
+            }
+        }
+        _ => {
+            // Literals, etc. - no bindings to collect
+        }
+    }
+}
+
 /// Bind a pattern and return the variable.
 /// Also returns any projections needed to bind nested patterns.
 fn lower_pattern_bind_with_projections(
@@ -1227,33 +1310,62 @@ fn lower_pattern_bind_with_projections(
 
             // Create projections for each tuple element
             for (i, elem) in elems.iter().enumerate() {
-                match &elem.node {
-                    MonoPatternKind::Var(name) => {
-                        let elem_var = ctx.fresh_named(name);
-                        ctx.bind(name, elem_var);
-                        projections.push(PatternProjection {
-                            var: elem_var,
-                            hint: Some(name.clone()),
-                            source_var: tuple_var,
-                            field_idx: i,
-                        });
-                    }
-                    MonoPatternKind::Wildcard => {
-                        // No binding needed
-                    }
-                    _ => {
-                        // Nested complex patterns - for now, just create a var
-                        let elem_var = ctx.fresh();
-                        projections.push(PatternProjection {
-                            var: elem_var,
-                            hint: None,
-                            source_var: tuple_var,
-                            field_idx: i,
-                        });
-                    }
-                }
+                // First, create a projection to extract this element
+                let elem_var = ctx.fresh();
+                projections.push(PatternProjection {
+                    var: elem_var,
+                    hint: None,
+                    source_var: tuple_var,
+                    field_idx: i,
+                });
+                // Then recursively handle the element pattern to bind nested vars
+                collect_pattern_bindings(ctx, elem, elem_var, &mut projections);
             }
             (tuple_var, None, projections)
+        }
+        MonoPatternKind::Cons { head, tail } => {
+            // Cons pattern x :: xs
+            let cons_var = ctx.fresh();
+            let mut projections = Vec::new();
+
+            // Head is field 0, tail is field 1
+            let head_var = ctx.fresh();
+            projections.push(PatternProjection {
+                var: head_var,
+                hint: None,
+                source_var: cons_var,
+                field_idx: 0,
+            });
+            collect_pattern_bindings(ctx, head, head_var, &mut projections);
+
+            let tail_var = ctx.fresh();
+            projections.push(PatternProjection {
+                var: tail_var,
+                hint: None,
+                source_var: cons_var,
+                field_idx: 1,
+            });
+            collect_pattern_bindings(ctx, tail, tail_var, &mut projections);
+
+            (cons_var, None, projections)
+        }
+        MonoPatternKind::Constructor { name, args } => {
+            // Constructor pattern like Some(x)
+            let ctor_var = ctx.fresh();
+            let mut projections = Vec::new();
+
+            for (i, arg) in args.iter().enumerate() {
+                let arg_var = ctx.fresh();
+                projections.push(PatternProjection {
+                    var: arg_var,
+                    hint: None,
+                    source_var: ctor_var,
+                    field_idx: i,
+                });
+                collect_pattern_bindings(ctx, arg, arg_var, &mut projections);
+            }
+
+            (ctor_var, Some(name.clone()), projections)
         }
         _ => {
             // Other complex patterns - bind a variable for the whole thing
@@ -1377,6 +1489,19 @@ fn lower_match_arm(ctx: &mut LowerMonoCtx, arm: &MonoMatchArm, in_tail: bool) ->
         MonoPatternKind::Lit(Literal::Bool(b)) => {
             let (tag, name) = if *b { (1u32, "True") } else { (0u32, "False") };
             (tag, Some(name.to_string()), vec![], vec![], None)
+        }
+        MonoPatternKind::Tuple(elems) => {
+            // Tuple pattern (x, y, z)
+            let tag = 0; // Tuples always have tag 0
+            let mut binders = Vec::new();
+            let mut binder_hints = Vec::new();
+            for elem in elems {
+                let (var, hint, projs) = lower_pattern_bind_with_projections(ctx, elem);
+                binders.push(var);
+                binder_hints.push(hint);
+                all_projections.extend(projs);
+            }
+            (tag, Some("Tuple".to_string()), binders, binder_hints, None)
         }
         MonoPatternKind::Wildcard => {
             // Wildcard pattern - we need a default case

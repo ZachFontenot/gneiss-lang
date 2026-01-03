@@ -452,3 +452,17 @@ let is_ok res = match res with | Ok _ -> true | Err _ -> false end
 
 -- is_err res: Check if Result is Err
 let is_err res = match res with | Err _ -> true | Ok _ -> false end
+
+-- ============================================================================
+-- Testing / Assertions
+-- ============================================================================
+
+-- panic : String -> a
+-- Exit the program with an error message. Never returns.
+let panic msg = panic_str msg
+
+-- assert_eq : a -> a -> () where a : Eq, Show
+-- Assert that two values are equal. Panics with a message showing both values if not.
+let assert_eq x y =
+    if x == y then ()
+    else panic ("assertion failed: " ++ show x ++ " != " ++ show y)

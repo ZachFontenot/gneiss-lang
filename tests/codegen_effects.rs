@@ -90,7 +90,7 @@ fn compile_and_run(source: &str, test_name: &str) -> Result<String, String> {
     Ok(stdout)
 }
 
-/// Assert that the program produces the expected integer output
+/// Assert that the program produces the expected integer output (for printing tests)
 fn expect_result(source: &str, expected: i32, test_name: &str) {
     match compile_and_run(source, test_name) {
         Ok(stdout) => {
@@ -107,6 +107,19 @@ fn expect_result(source: &str, expected: i32, test_name: &str) {
     }
 }
 
+/// Assert that the program compiles and runs successfully (exit code 0)
+/// Use this with programs that use assert_eq instead of printing
+fn expect_success(source: &str, test_name: &str) {
+    match compile_and_run(source, test_name) {
+        Ok(_) => {
+            // Success - program ran without error
+        }
+        Err(e) => {
+            panic!("Test '{}' failed: {}", test_name, e);
+        }
+    }
+}
+
 // ============================================================================
 // Basic Effect Tests (without actual effects - just testing the infrastructure)
 // ============================================================================
@@ -115,7 +128,7 @@ fn expect_result(source: &str, expected: i32, test_name: &str) {
 fn effect_no_effects_pure_program() {
     // A program with no effects should work as before
     let source = r#"
-let main _ = 42
+let main _ = println 42
 "#;
     expect_result(source, 42, "effect_no_effects_pure_program");
 }
@@ -125,7 +138,7 @@ fn effect_simple_function_call() {
     // Function calls still work
     let source = r#"
 let add x y = x + y
-let main _ = add 20 22
+let main _ = println (add 20 22)
 "#;
     expect_result(source, 42, "effect_simple_function_call");
 }
@@ -136,7 +149,7 @@ fn effect_hof_still_works() {
     let source = r#"
 let apply f x = f x
 let inc x = x + 1
-let main _ = apply inc 41
+let main _ = println (apply inc 41)
 "#;
     expect_result(source, 42, "effect_hof_still_works");
 }
@@ -154,14 +167,15 @@ effect State =
 end
 
 let main _ =
-    handle
+    let result = handle
         perform State.get ()
     with
     | return x -> x
     | get () k -> k 42
     end
+    in assert_eq result 42
 "#;
-    expect_result(source, 42, "effect_simple_state_get");
+    expect_success(source, "effect_simple_state_get");
 }
 
 #[test]
@@ -182,15 +196,16 @@ let body () =
     perform State.get ()
 
 let main _ =
-    handle
+    let result = handle
         body ()
     with
     | return x -> x
     | get () k -> k 10
     | put _ k -> k ()
     end
+    in assert_eq result 10
 "#;
-    expect_result(source, 10, "effect_state_get_put"); // Returns 10 (initial state, put is ignored in this handler)
+    expect_success(source, "effect_state_get_put");
 }
 
 #[test]
@@ -203,14 +218,15 @@ effect Exn =
 end
 
 let main _ =
-    handle
+    let result = handle
         perform Exn.throw 42
     with
     | return x -> x
     | throw n k -> n
     end
+    in assert_eq result 42
 "#;
-    expect_result(source, 42, "effect_exception_throw");
+    expect_success(source, "effect_exception_throw");
 }
 
 #[test]
@@ -225,7 +241,7 @@ let inner () =
     perform Reader.ask ()
 
 let main _ =
-    handle
+    let result = handle
         handle
             inner ()
         with
@@ -236,8 +252,9 @@ let main _ =
     | return x -> x
     | ask () k -> k 100  -- not used, inner handler catches
     end
+    in assert_eq result 30
 "#;
-    expect_result(source, 30, "effect_nested_handlers"); // 20 + 10
+    expect_success(source, "effect_nested_handlers");
 }
 
 #[test]
@@ -254,7 +271,7 @@ let body () =
     if perform Choice.choose () then 10 else 20
 
 let main _ =
-    handle
+    let result = handle
         body ()
     with
     | return x -> x
@@ -263,8 +280,9 @@ let main _ =
         let b = k false in
         a + b
     end
+    in assert_eq result 30
 "#;
-    expect_result(source, 30, "effect_continuation_called_twice"); // 10 + 20
+    expect_success(source, "effect_continuation_called_twice");
 }
 
 #[test]
@@ -285,13 +303,14 @@ let body () =
     perform Counter.get ()
 
 let main _ =
-    handle
+    let result = handle
         body ()
     with
     | return x -> x
     | inc () k -> k ()
     | get () k -> k 2
     end
+    in assert_eq result 2
 "#;
-    expect_result(source, 2, "effect_deep_handler_semantics");
+    expect_success(source, "effect_deep_handler_semantics");
 }

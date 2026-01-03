@@ -1386,7 +1386,23 @@ impl Inferencer {
             ExprKind::Tuple(exprs) => exprs.iter().all(Self::is_syntactic_value),
             // Lists of values are values
             ExprKind::List(exprs) => exprs.iter().all(Self::is_syntactic_value),
-            // Everything else (applications, channel ops, etc.) is not a value
+            // Constructor application: MySome x is a value if x is a value
+            // This handles the case where constructors are parsed as applications
+            ExprKind::App { func, arg } => {
+                Self::is_constructor_application(func) && Self::is_syntactic_value(arg)
+            }
+            // Everything else (channel ops, etc.) is not a value
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a constructor or a constructor application
+    fn is_constructor_application(expr: &Expr) -> bool {
+        match &expr.node {
+            ExprKind::Constructor { .. } => true,
+            ExprKind::App { func, arg } => {
+                Self::is_constructor_application(func) && Self::is_syntactic_value(arg)
+            }
             _ => false,
         }
     }
@@ -2657,6 +2673,10 @@ impl Inferencer {
     }
 
     /// Bind pattern variables with a pre-computed scheme (for let-polymorphism)
+    ///
+    /// This function preserves polymorphism when destructuring complex patterns.
+    /// For example, `let (f, g) = (fun x -> x, fun y -> y)` should give both
+    /// f and g polymorphic types, not monomorphic ones.
     fn bind_pattern_scheme(
         &mut self,
         env: &mut TypeEnv,
@@ -2668,12 +2688,147 @@ impl Inferencer {
                 env.insert(name.clone(), scheme);
                 Ok(())
             }
-            // For complex patterns in let bindings, we just use monomorphic types
-            _ => {
-                let ty = self.instantiate(&scheme);
-                self.bind_pattern(env, pattern, &ty)
+
+            PatternKind::Wildcard => Ok(()),
+
+            PatternKind::Tuple(pats) => {
+                match &scheme.ty {
+                    Type::Tuple(tys) if tys.len() == pats.len() => {
+                        for (pat, ty) in pats.iter().zip(tys.iter()) {
+                            let component_scheme = Scheme {
+                                num_generics: scheme.num_generics,
+                                predicates: scheme.predicates.clone(),
+                                ty: ty.clone(),
+                            };
+                            self.bind_pattern_scheme(env, pat, component_scheme)?;
+                        }
+                        Ok(())
+                    }
+                    _ => self.bind_pattern_mono(env, pattern, &scheme),
+                }
             }
+
+            PatternKind::Constructor { name, args } => {
+                self.bind_constructor_pattern_scheme(env, name, args, pattern, &scheme)
+            }
+
+            PatternKind::List(pats) => {
+                self.bind_list_pattern_scheme(env, pats, &scheme)
+            }
+
+            PatternKind::Cons { head, tail } => {
+                self.bind_cons_pattern_scheme(env, head, tail, &scheme)
+            }
+
+            // Fallback for patterns that can't preserve polymorphism (literals, records)
+            _ => self.bind_pattern_mono(env, pattern, &scheme),
         }
+    }
+
+    /// Fallback: instantiate and bind monomorphically
+    fn bind_pattern_mono(
+        &mut self,
+        env: &mut TypeEnv,
+        pattern: &Pattern,
+        scheme: &Scheme,
+    ) -> Result<(), TypeError> {
+        let ty = self.instantiate(scheme);
+        self.bind_pattern(env, pattern, &ty)
+    }
+
+    /// Bind constructor pattern while preserving polymorphism
+    fn bind_constructor_pattern_scheme(
+        &mut self,
+        env: &mut TypeEnv,
+        ctor_name: &str,
+        args: &[Pattern],
+        pattern: &Pattern,
+        scheme: &Scheme,
+    ) -> Result<(), TypeError> {
+        // Look up constructor info
+        let info = match self.type_ctx.get_constructor(ctor_name).cloned() {
+            Some(info) => info,
+            None => return self.bind_pattern_mono(env, pattern, scheme),
+        };
+
+        // Extract type arguments from the scheme's type
+        let type_args = match &scheme.ty {
+            Type::Constructor { name, args } if name == &info.type_name => args.clone(),
+            _ => return self.bind_pattern_mono(env, pattern, scheme),
+        };
+
+        // Build substitution from Generic indices to component types
+        let mut subst: std::collections::HashMap<TypeVarId, Type> = std::collections::HashMap::new();
+        for (i, ty) in type_args.iter().enumerate() {
+            subst.insert(i as TypeVarId, ty.clone());
+        }
+
+        // Bind each field with a component scheme
+        for (pat, field_ty) in args.iter().zip(&info.field_types) {
+            let substituted_ty = self.substitute(field_ty, &subst);
+            let component_scheme = Scheme {
+                num_generics: scheme.num_generics,
+                predicates: scheme.predicates.clone(),
+                ty: substituted_ty,
+            };
+            self.bind_pattern_scheme(env, pat, component_scheme)?;
+        }
+        Ok(())
+    }
+
+    /// Bind list pattern [x, y, z] while preserving polymorphism
+    fn bind_list_pattern_scheme(
+        &mut self,
+        env: &mut TypeEnv,
+        pats: &[Pattern],
+        scheme: &Scheme,
+    ) -> Result<(), TypeError> {
+        // Extract element type from List<elem_ty>
+        let elem_ty = match &scheme.ty {
+            Type::Constructor { name, args } if name == "List" && args.len() == 1 => {
+                args[0].clone()
+            }
+            _ => return self.bind_pattern_mono(env, &Pattern { node: PatternKind::List(pats.to_vec()), span: crate::ast::Span { start: 0, end: 0 } }, scheme),
+        };
+
+        // Each element gets the same element scheme
+        for pat in pats {
+            let component_scheme = Scheme {
+                num_generics: scheme.num_generics,
+                predicates: scheme.predicates.clone(),
+                ty: elem_ty.clone(),
+            };
+            self.bind_pattern_scheme(env, pat, component_scheme)?;
+        }
+        Ok(())
+    }
+
+    /// Bind cons pattern (x :: xs) while preserving polymorphism
+    fn bind_cons_pattern_scheme(
+        &mut self,
+        env: &mut TypeEnv,
+        head: &Pattern,
+        tail: &Pattern,
+        scheme: &Scheme,
+    ) -> Result<(), TypeError> {
+        // Extract element type from List<elem_ty>
+        let elem_ty = match &scheme.ty {
+            Type::Constructor { name, args } if name == "List" && args.len() == 1 => {
+                args[0].clone()
+            }
+            _ => return self.bind_pattern_mono(env, &Pattern { node: PatternKind::Cons { head: std::rc::Rc::new(head.clone()), tail: std::rc::Rc::new(tail.clone()) }, span: crate::ast::Span { start: 0, end: 0 } }, scheme),
+        };
+
+        // Head gets element type
+        let head_scheme = Scheme {
+            num_generics: scheme.num_generics,
+            predicates: scheme.predicates.clone(),
+            ty: elem_ty,
+        };
+        self.bind_pattern_scheme(env, head, head_scheme)?;
+
+        // Tail gets full List<elem> type (same as original scheme)
+        self.bind_pattern_scheme(env, tail, scheme.clone())
     }
 
 
@@ -3991,6 +4146,26 @@ impl Inferencer {
         };
         env.insert("get_args".into(), get_args_scheme);
 
+        // assert : Bool -> ()
+        // Panics if the condition is false
+        env.insert(
+            "assert".into(),
+            Scheme::mono(Type::arrow(Type::Bool, Type::Unit)),
+        );
+
+        // panic_str : forall a. String -> a
+        // Never returns - can be any type
+        let panic_str_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::String),
+                ret: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty,
+            },
+        };
+        env.insert("panic_str".into(), panic_str_scheme);
+
         // Process all items from the program
         // (Caller is responsible for combining prelude + user program before calling)
 
@@ -4958,5 +5133,86 @@ let y = x + 1
             assert_eq!(errors.len(), 1);
             assert!(matches!(errors[0], TypeError::TypeMismatch { .. }));
         }
+    }
+
+    // ========================================================================
+    // Polymorphism Preservation with Complex Patterns
+    // ========================================================================
+
+    #[test]
+    fn test_tuple_pattern_polymorphism() {
+        // (f, g) = (id, id) where id : ∀a. a -> a
+        // Both f and g should remain polymorphic
+        let source = "let (f, g) = (fun x -> x, fun y -> y) in (f 1, g true)";
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Tuple pattern should preserve polymorphism: {:?}", result);
+    }
+
+    #[test]
+    fn test_tuple_pattern_same_function_used_twice() {
+        // This tests that f can be used at multiple types
+        let source = "let (f, _) = (fun x -> x, fun y -> y) in (f 1, f true)";
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Function from tuple should be polymorphic: {:?}", result);
+    }
+
+    #[test]
+    fn test_nested_tuple_polymorphism() {
+        // Nested tuple destructuring should preserve polymorphism
+        let source = "let ((a, b), c) = ((fun x -> x, 1), fun y -> y) in (a true, c \"hi\")";
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Nested tuple should preserve polymorphism: {:?}", result);
+    }
+
+    #[test]
+    fn test_constructor_pattern_polymorphism() {
+        // Destructuring Some should preserve polymorphism
+        // Note: Option and Some are defined in prelude, but we define locally to be explicit
+        let source = r#"
+type MyOption a = | MySome a | MyNone
+let main _ =
+    let MySome f = MySome (fun x -> x) in
+    let _ = f 1 in
+    f true
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Constructor pattern should preserve polymorphism: {:?}", result);
+    }
+
+    #[test]
+    fn test_wildcard_in_tuple_pattern() {
+        // Wildcard should be allowed in tuple patterns
+        let source = "let (f, _) = (fun x -> x, 42) in f true";
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Wildcard in tuple should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_cons_pattern_polymorphism() {
+        // Head of cons pattern should preserve polymorphism
+        let source = r#"
+let main _ =
+    let (x :: _) = [fun x -> x] in
+    let _ = x 1 in
+    x true
+"#;
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Cons pattern should preserve polymorphism: {:?}", result);
+    }
+
+    #[test]
+    fn test_monomorphic_tuple_still_works() {
+        // Non-polymorphic tuple destructuring should still work
+        let source = "let (a, b) = (1, true) in a + 1";
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Monomorphic tuple should work: {:?}", result);
+    }
+
+    #[test]
+    fn test_polymorphic_value_used_at_single_type() {
+        // If polymorphic value is only used at one type, should still work
+        let source = "let (f, g) = (fun x -> x, fun y -> y) in f 1";
+        let result = typecheck_program(source);
+        assert!(result.is_ok(), "Single use of polymorphic value: {:?}", result);
     }
 }
