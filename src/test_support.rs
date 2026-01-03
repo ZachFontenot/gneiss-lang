@@ -16,11 +16,15 @@
 //! - RuntimeEffects produced and how the scheduler handles them
 
 use crate::ast::{Expr, ExprKind, Program};
-use crate::eval::{EnvInner, EvalError, RuntimeEffect, Interpreter, Value};
+use crate::codegen::{closure_convert, lower_mono, CoreProgram, FlatProgram};
+use crate::elaborate::elaborate;
+use crate::eval::{EnvInner, EvalError, Interpreter, RuntimeEffect, Value};
 use crate::infer::Inferencer;
 use crate::lexer::Lexer;
+use crate::mono::{monomorphize, MonoProgram};
 use crate::parser::Parser;
 use crate::prelude::parse_prelude;
+use crate::tast::TProgram;
 use crate::types::{InferResult, Type, TypeEnv};
 
 // ============================================================================
@@ -90,6 +94,88 @@ pub fn typecheck_program(input: &str) -> Result<(Program, TypeEnv), String> {
         .infer_program(&program, TypeEnv::new())
         .map_err(|e| format!("Type error: {:?}", e))?;
     Ok((program, env))
+}
+
+// ============================================================================
+// Compilation Pipeline Helpers
+// ============================================================================
+
+/// Compile source through type inference and elaboration, returning TAST.
+/// Does NOT include prelude - for testing core pipeline.
+pub fn compile_to_tast(input: &str) -> Result<(TProgram, Inferencer), String> {
+    let program = parse_program(input)?;
+
+    let mut inferencer = Inferencer::new();
+    let type_env = inferencer
+        .infer_program(&program, TypeEnv::new())
+        .map_err(|e| format!("Type error: {:?}", e))?;
+
+    let tprogram = elaborate(&program, &inferencer, &type_env)
+        .map_err(|e| format!("Elaborate error: {:?}", e))?;
+
+    Ok((tprogram, inferencer))
+}
+
+/// Compile source through type inference, elaboration, and monomorphization.
+/// Does NOT include prelude - for testing core pipeline.
+pub fn compile_to_mono(input: &str) -> Result<MonoProgram, String> {
+    let (tprogram, _) = compile_to_tast(input)?;
+    monomorphize(&tprogram).map_err(|e| format!("Monomorphize error: {}", e))
+}
+
+/// Compile source through the full pipeline to Core IR.
+/// Does NOT include prelude - for testing core pipeline.
+pub fn compile_to_core(input: &str) -> Result<CoreProgram, String> {
+    let mono = compile_to_mono(input)?;
+    lower_mono(&mono).map_err(|e| format!("Lower error: {:?}", e))
+}
+
+/// Compile source through the full pipeline to Flat IR (after closure conversion).
+/// Does NOT include prelude - for testing core pipeline.
+pub fn compile_to_flat(input: &str) -> Result<FlatProgram, String> {
+    let core = compile_to_core(input)?;
+    Ok(closure_convert(&core))
+}
+
+/// Compile source with prelude through the full pipeline to TAST.
+pub fn compile_to_tast_with_prelude(input: &str) -> Result<(TProgram, Inferencer), String> {
+    let prelude = parse_prelude().map_err(|e| format!("Prelude error: {}", e))?;
+    let user_program = parse_program(input)?;
+
+    let mut combined_items = prelude.items;
+    combined_items.extend(user_program.items);
+    let program = Program {
+        exports: user_program.exports,
+        items: combined_items,
+    };
+
+    let mut inferencer = Inferencer::new();
+    let type_env = inferencer
+        .infer_program(&program, TypeEnv::new())
+        .map_err(|e| format!("Type error: {:?}", e))?;
+
+    let tprogram = elaborate(&program, &inferencer, &type_env)
+        .map_err(|e| format!("Elaborate error: {:?}", e))?;
+
+    Ok((tprogram, inferencer))
+}
+
+/// Compile source with prelude through the full pipeline to Mono IR.
+pub fn compile_to_mono_with_prelude(input: &str) -> Result<MonoProgram, String> {
+    let (tprogram, _) = compile_to_tast_with_prelude(input)?;
+    monomorphize(&tprogram).map_err(|e| format!("Monomorphize error: {}", e))
+}
+
+/// Compile source with prelude through the full pipeline to Core IR.
+pub fn compile_to_core_with_prelude(input: &str) -> Result<CoreProgram, String> {
+    let mono = compile_to_mono_with_prelude(input)?;
+    lower_mono(&mono).map_err(|e| format!("Lower error: {:?}", e))
+}
+
+/// Compile source with prelude through the full pipeline to Flat IR.
+pub fn compile_to_flat_with_prelude(input: &str) -> Result<FlatProgram, String> {
+    let core = compile_to_core_with_prelude(input)?;
+    Ok(closure_convert(&core))
 }
 
 // ============================================================================
@@ -591,5 +677,83 @@ mod tests {
         assert!(expr_matches("1 + 2", |e| matches!(e, ExprKind::BinOp { .. })));
         assert!(expr_matches("fun x -> x", |e| matches!(e, ExprKind::Lambda { .. })));
         assert!(!expr_matches("1 + 2", |e| matches!(e, ExprKind::Lambda { .. })));
+    }
+
+    // ========================================================================
+    // Compilation Pipeline Tests
+    // ========================================================================
+
+    #[test]
+    fn test_compile_to_tast() {
+        // Use a bare expression for main - function declarations don't set tprogram.main
+        let source = "let add x y = x + y";
+        let (tprogram, _) = compile_to_tast(source).expect("should compile to TAST");
+        // Check we have at least one binding
+        assert!(!tprogram.bindings.is_empty(), "should have bindings");
+    }
+
+    #[test]
+    fn test_compile_to_tast_with_main_expr() {
+        // A bare expression becomes the main
+        let source = "1 + 2";
+        let (tprogram, _) = compile_to_tast(source).expect("should compile to TAST");
+        assert!(tprogram.main.is_some(), "should have main expression");
+    }
+
+    #[test]
+    fn test_compile_to_mono() {
+        let source = "let double x = x * 2";
+        let mono = compile_to_mono(source).expect("should compile to Mono");
+        // Functions should be in the functions list, not main
+        assert!(!mono.functions.is_empty(), "should have functions");
+    }
+
+    #[test]
+    fn test_compile_to_core() {
+        let source = "let triple x = x * 3";
+        let core = compile_to_core(source).expect("should compile to Core");
+        // Core should have lowered functions
+        assert!(!core.functions.is_empty(), "should have functions");
+    }
+
+    #[test]
+    fn test_compile_to_flat() {
+        let source = "let quad x = x * 4";
+        let flat = compile_to_flat(source).expect("should compile to Flat");
+        // Flat program should have functions
+        assert!(!flat.functions.is_empty(), "should have functions");
+    }
+
+    #[test]
+    fn test_compile_polymorphic_function() {
+        let source = r#"
+            let id x = x
+            let use_id _ = id 42
+        "#;
+        let mono = compile_to_mono(source).expect("should compile");
+        // After monomorphization, we should have specialized versions
+        assert!(!mono.functions.is_empty());
+    }
+
+    #[test]
+    fn test_compile_closure() {
+        let source = r#"
+            let make_adder x = fun y -> x + y
+        "#;
+        let flat = compile_to_flat(source).expect("should compile");
+        // Closure conversion should produce functions
+        assert!(!flat.functions.is_empty());
+    }
+
+    #[test]
+    fn test_compile_main_expression() {
+        // Test with an actual main expression (bare expr at top level)
+        let source = r#"
+            let f x = x + 1
+        "#;
+        // This is a function declaration, not a main expr
+        let (tprogram, _) = compile_to_tast(source).expect("should compile");
+        assert!(tprogram.main.is_none(), "function decl should not set main");
+        assert!(!tprogram.bindings.is_empty(), "should have binding for f");
     }
 }
