@@ -680,6 +680,14 @@ impl<'a> MonoCtx<'a> {
                                             self.subst.insert(body_type_var, concrete.clone());
                                         }
 
+                                        // Also add substitution for parameter types
+                                        // The params might use a different type var ID than the body
+                                        for param in &binding.params {
+                                            if let Type::Var(id) | Type::Generic(id) = &param.ty {
+                                                self.subst.insert(*id, concrete.clone());
+                                            }
+                                        }
+
                                         // Monomorphize the binding's body with the type substitution
                                         let mono_params: Vec<_> = binding
                                             .params
@@ -933,7 +941,6 @@ impl<'a> MonoCtx<'a> {
                 type_var,
                 args,
             } => {
-                eprintln!("DEBUG: DictMethodCall {}.{} type_var={} subst={:?}", trait_name, method, type_var, self.subst);
                 // Type is a parameter - look up the dict param
                 let mono_args: Vec<_> = args.iter().map(|a| self.mono_expr(a)).collect();
 

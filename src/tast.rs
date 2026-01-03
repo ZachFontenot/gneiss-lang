@@ -332,9 +332,15 @@ pub enum TBinOp {
     // Boolean
     BoolAnd,
     BoolOr,
+    BoolEq,
+    BoolNe,
 
     // List
     Cons,
+
+    // Polymorphic equality (resolved to concrete type at monomorphization)
+    PolyEq,
+    PolyNe,
 
     // Pipe operators (become App during elaboration, but kept for reference)
     Pipe,

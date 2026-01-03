@@ -791,7 +791,26 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
             let left_var = ctx.fresh();
             let right_var = ctx.fresh();
 
-            let prim_op = match op {
+            // Resolve polymorphic equality based on the actual operand type
+            let resolved_op = match op {
+                TBinOp::PolyEq => match &left.ty {
+                    MonoType::Float => TBinOp::FloatEq,
+                    MonoType::String => TBinOp::StringEq,
+                    MonoType::Bool => TBinOp::BoolEq,
+                    MonoType::Char => TBinOp::IntEq, // Char uses int comparison
+                    _ => TBinOp::IntEq,
+                },
+                TBinOp::PolyNe => match &left.ty {
+                    MonoType::Float => TBinOp::FloatNe,
+                    MonoType::String => TBinOp::StringNe,
+                    MonoType::Bool => TBinOp::BoolNe,
+                    MonoType::Char => TBinOp::IntNe,
+                    _ => TBinOp::IntNe,
+                },
+                other => *other,
+            };
+
+            let prim_op = match resolved_op {
                 TBinOp::IntAdd => PrimOp::IntAdd,
                 TBinOp::IntSub => PrimOp::IntSub,
                 TBinOp::IntMul => PrimOp::IntMul,
@@ -814,15 +833,12 @@ fn lower_expr(ctx: &mut LowerMonoCtx, expr: &MonoExpr, in_tail: bool) -> CoreExp
                 TBinOp::FloatGt => PrimOp::FloatGt,
                 TBinOp::FloatGe => PrimOp::FloatGe,
                 TBinOp::StringEq => PrimOp::StringEq,
-                TBinOp::StringNe => {
-                    // StringNe needs to be lowered as NOT(StringEq)
-                    // For now, treat as StringEq (will need post-processing)
-                    ctx.error("StringNe not yet supported - using StringEq".to_string());
-                    PrimOp::StringEq
-                }
+                TBinOp::StringNe => PrimOp::StringNe,
                 TBinOp::StringConcat => PrimOp::StringConcat,
                 TBinOp::BoolAnd => PrimOp::BoolAnd,
                 TBinOp::BoolOr => PrimOp::BoolOr,
+                TBinOp::BoolEq => PrimOp::IntEq, // Bool equality uses int comparison
+                TBinOp::BoolNe => PrimOp::IntNe,
                 TBinOp::Cons => PrimOp::ListCons,
                 _ => {
                     ctx.error(format!("Unsupported binary op: {:?}", op));

@@ -1425,19 +1425,40 @@ impl Inferencer {
     /// This is the public API that returns just the type.
     /// Internally uses effect tracking for algebraic effects.
     pub fn infer_expr(&mut self, env: &TypeEnv, expr: &Expr) -> Result<Type, TypeError> {
-        let result = self.infer_expr_full(env, expr)?;
+        let result = self.infer_and_record(env, expr)?;
+        // Return the resolved type
+        Ok(result.ty.resolve(&self.type_uf))
+    }
+
+    /// Infer expression with full effect tracking AND record the type for elaboration.
+    /// This is the internal API that should be used for all sub-expressions
+    /// so that the elaborator can look up types by span.
+    fn infer_and_record(&mut self, env: &TypeEnv, expr: &Expr) -> Result<InferResult, TypeError> {
+        let result = self.infer_expr_impl(env, expr)?;
         // Resolve the type to follow union-find bindings
         let resolved_ty = result.ty.resolve(&self.type_uf);
         // Record for elaboration pass
-        self.record_expr_type(&expr.span, resolved_ty.clone());
-        Ok(resolved_ty)
+        self.record_expr_type(&expr.span, resolved_ty);
+        Ok(result)
     }
 
     /// Infer a single expression with full effect tracking.
     /// Returns InferResult with ty and effects row.
     /// Pure expressions have an empty effect row (Row::Empty).
     /// Effectful expressions accumulate effects in the row.
+    /// Note: Use infer_and_record for sub-expressions to ensure types are recorded.
     pub fn infer_expr_full(
+        &mut self,
+        env: &TypeEnv,
+        expr: &Expr,
+    ) -> Result<InferResult, TypeError> {
+        // Delegate to impl and record
+        self.infer_and_record(env, expr)
+    }
+
+    /// Internal implementation of expression inference.
+    /// Does NOT record the type - callers should use infer_and_record for sub-expressions.
+    fn infer_expr_impl(
         &mut self,
         env: &TypeEnv,
         expr: &Expr,
@@ -1515,7 +1536,7 @@ impl Inferencer {
                 }
 
                 // Infer body with full answer-type tracking
-                let body_result = self.infer_expr_full(&current_env, body)?;
+                let body_result = self.infer_and_record(&current_env, body)?;
 
                 // Build the function type
                 // For multi-param lambdas, fold from right: a -> b -> c becomes a -> (b -> c)
@@ -1552,8 +1573,8 @@ impl Inferencer {
                 let (func_name, param_num) = Self::extract_func_info(func);
 
                 // Infer function and argument types
-                let fun_result = self.infer_expr_full(env, func)?;
-                let arg_result = self.infer_expr_full(env, arg)?;
+                let fun_result = self.infer_and_record(env, func)?;
+                let arg_result = self.infer_and_record(env, arg)?;
 
                 // Record arg type for elaboration (trait method calls need this)
                 let arg_ty_resolved = arg_result.ty.resolve(&self.type_uf);
@@ -1617,14 +1638,14 @@ impl Inferencer {
                         let preliminary_ty = self.fresh_var();
                         recursive_env.insert(name.clone(), Scheme::mono(preliminary_ty.clone()));
 
-                        let inferred_result = self.infer_expr_full(&recursive_env, value)?;
+                        let inferred_result = self.infer_and_record(&recursive_env, value)?;
                         self.unify_at(&preliminary_ty, &inferred_result.ty, &value.span)?;
                         inferred_result
                     } else {
                         unreachable!()
                     }
                 } else {
-                    self.infer_expr_full(env, value)?
+                    self.infer_and_record(env, value)?
                 };
 
                 self.level -= 1;
@@ -1650,7 +1671,7 @@ impl Inferencer {
                 self.bind_pattern_scheme(&mut new_env, pattern, scheme)?;
 
                 if let Some(body) = body {
-                    let body_result = self.infer_expr_full(&new_env, body)?;
+                    let body_result = self.infer_and_record(&new_env, body)?;
 
                     // Combined effects = value.effects ∪ body.effects
                     let combined = self.union_rows(&value_result.effects, &body_result.effects);
@@ -1701,7 +1722,7 @@ impl Inferencer {
                         param_types.push(param_ty);
                     }
 
-                    let body_result = self.infer_expr_full(&body_env, &binding.body)?;
+                    let body_result = self.infer_and_record(&body_env, &binding.body)?;
 
                     // Build the function type
                     let func_ty = if param_types.is_empty() {
@@ -1752,7 +1773,7 @@ impl Inferencer {
 
                 // Step 5: Infer body if present
                 if let Some(body) = body {
-                    let body_result = self.infer_expr_full(&new_env, body)?;
+                    let body_result = self.infer_and_record(&new_env, body)?;
                     Ok(body_result)
                 } else {
                     // No body - just declarations, pure
@@ -1766,7 +1787,7 @@ impl Inferencer {
                 then_branch,
                 else_branch,
             } => {
-                let cond_result = self.infer_expr_full(env, cond)?;
+                let cond_result = self.infer_and_record(env, cond)?;
                 self.unify_with_context(
                     &cond_result.ty,
                     &Type::Bool,
@@ -1774,8 +1795,8 @@ impl Inferencer {
                     UnifyContext::IfCondition,
                 )?;
 
-                let then_result = self.infer_expr_full(env, then_branch)?;
-                let else_result = self.infer_expr_full(env, else_branch)?;
+                let then_result = self.infer_and_record(env, then_branch)?;
+                let else_result = self.infer_and_record(env, else_branch)?;
 
                 // Branches must have same type
                 self.unify_with_context(
@@ -1795,7 +1816,7 @@ impl Inferencer {
 
             // Match: combine effects from scrutinee and all arms
             ExprKind::Match { scrutinee, arms } => {
-                let scrutinee_result = self.infer_expr_full(env, scrutinee)?;
+                let scrutinee_result = self.infer_and_record(env, scrutinee)?;
                 let result_ty = self.fresh_var();
                 let mut combined_effects = scrutinee_result.effects;
 
@@ -1805,12 +1826,12 @@ impl Inferencer {
 
                     // Handle guard if present
                     if let Some(guard) = &arm.guard {
-                        let guard_result = self.infer_expr_full(&arm_env, guard)?;
+                        let guard_result = self.infer_and_record(&arm_env, guard)?;
                         self.unify_at(&guard_result.ty, &Type::Bool, &guard.span)?;
                         combined_effects = self.union_rows(&combined_effects, &guard_result.effects);
                     }
 
-                    let body_result = self.infer_expr_full(&arm_env, &arm.body)?;
+                    let body_result = self.infer_and_record(&arm_env, &arm.body)?;
                     self.unify_with_context(
                         &result_ty,
                         &body_result.ty,
@@ -1916,8 +1937,8 @@ impl Inferencer {
 
             // BinOp: combine effects from both operands
             ExprKind::BinOp { op, left, right } => {
-                let left_result = self.infer_expr_full(env, left)?;
-                let right_result = self.infer_expr_full(env, right)?;
+                let left_result = self.infer_and_record(env, left)?;
+                let right_result = self.infer_and_record(env, right)?;
 
                 let result_ty = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
@@ -2050,8 +2071,8 @@ impl Inferencer {
 
             // Seq: combine effects from both expressions
             ExprKind::Seq { first, second } => {
-                let first_result = self.infer_expr_full(env, first)?;
-                let second_result = self.infer_expr_full(env, second)?;
+                let first_result = self.infer_and_record(env, first)?;
+                let second_result = self.infer_and_record(env, second)?;
 
                 // Combined effects = first ∪ second
                 let combined = self.union_rows(&first_result.effects, &second_result.effects);
@@ -2131,7 +2152,7 @@ impl Inferencer {
                     let result_ty = self.fresh_var();
                     let mut combined_effects = Row::Empty;
                     for arg in args {
-                        let arg_result = self.infer_expr_full(env, arg)?;
+                        let arg_result = self.infer_and_record(env, arg)?;
                         combined_effects = self.union_rows(&combined_effects, &arg_result.effects);
                     }
                     let effect_row = Row::Extend {
@@ -2190,7 +2211,7 @@ impl Inferencer {
                 // Infer types for arguments, unify with expected types, and collect effects
                 let mut combined_effects = Row::Empty;
                 for (arg, expected_ty) in args.iter().zip(instantiated_params.iter()) {
-                    let arg_result = self.infer_expr_full(env, arg)?;
+                    let arg_result = self.infer_and_record(env, arg)?;
                     self.unify_at(&arg_result.ty, expected_ty, &arg.span)?;
                     combined_effects = self.union_rows(&combined_effects, &arg_result.effects);
                 }
@@ -2209,7 +2230,7 @@ impl Inferencer {
 
             ExprKind::Handle { body, return_clause, handlers } => {
                 // Infer body type and collect its effects
-                let body_result = self.infer_expr_full(env, body)?;
+                let body_result = self.infer_and_record(env, body)?;
 
                 // Collect which effects are handled by these handlers
                 let mut handled_effects: HashSet<String> = HashSet::new();
@@ -2227,7 +2248,7 @@ impl Inferencer {
                 self.bind_pattern(&mut return_env, &return_clause.pattern, &return_pattern_ty)?;
                 self.unify_at(&body_result.ty, &return_pattern_ty, &return_clause.pattern.span)?;
 
-                let return_body_result = self.infer_expr_full(&return_env, &return_clause.body)?;
+                let return_body_result = self.infer_and_record(&return_env, &return_clause.body)?;
                 let result_ty = return_body_result.ty.clone();
 
                 // Infer each handler arm and verify types
@@ -2302,7 +2323,7 @@ impl Inferencer {
                     }
 
                     // Infer handler body - should unify with result type
-                    let handler_body_result = self.infer_expr_full(&handler_env, &handler.body)?;
+                    let handler_body_result = self.infer_and_record(&handler_env, &handler.body)?;
                     self.unify_at(&handler_body_result.ty, &result_ty, &handler.body.span)?;
                 }
 
@@ -4282,7 +4303,7 @@ impl Inferencer {
                         local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
 
                         // Use infer_expr_full to get answer type information
-                        let body_result = self.infer_expr_full(&local_env, body)?;
+                        let body_result = self.infer_and_record(&local_env, body)?;
 
                         // Unify the body type with what we predicted
                         self.unify_at(&ret_ty, &body_result.ty, &body.span)?;
@@ -4427,7 +4448,7 @@ impl Inferencer {
                             param_types.push(param_ty);
                         }
 
-                        let body_result = self.infer_expr_full(&local_env, body)?;
+                        let body_result = self.infer_and_record(&local_env, body)?;
 
                         let func_ty = if param_types.is_empty() {
                             body_result.ty
@@ -4530,7 +4551,7 @@ impl Inferencer {
                                 param_types.push(param_ty);
                             }
 
-                            let body_result = self.infer_expr_full(&body_env, &binding.body)?;
+                            let body_result = self.infer_and_record(&body_env, &binding.body)?;
 
                             let func_ty = if param_types.is_empty() {
                                 body_result.ty

@@ -383,6 +383,7 @@ pub enum PrimOp {
     StringConcat,
     StringLength,
     StringEq,
+    StringNe,
 
     // Conversion
     IntToFloat,
@@ -437,6 +438,7 @@ impl fmt::Display for PrimOp {
             PrimOp::StringConcat => write!(f, "string_concat"),
             PrimOp::StringLength => write!(f, "string_length"),
             PrimOp::StringEq => write!(f, "string_eq"),
+            PrimOp::StringNe => write!(f, "string_ne"),
             PrimOp::IntToFloat => write!(f, "int_to_float"),
             PrimOp::FloatToInt => write!(f, "float_to_int"),
             PrimOp::IntToString => write!(f, "int_to_string"),

@@ -213,9 +213,7 @@ impl FlatEmitter {
             self.output.push_str("int main(int argc, char** argv) {\n");
             self.output.push_str("    gn_init(argc, argv);\n");
             self.output.push_str(&stmts);
-            writeln!(self.output, "    gn_value result = {};", result).unwrap();
-            self.output.push_str("    gn_print(NULL, result);\n");
-            self.output.push_str("    gn_println();\n");
+            writeln!(self.output, "    (void){};", result).unwrap();
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
             self.output.push_str("}\n");
@@ -223,9 +221,7 @@ impl FlatEmitter {
             self.output.push_str("// Main entry point\n");
             self.output.push_str("int main(int argc, char** argv) {\n");
             self.output.push_str("    gn_init(argc, argv);\n");
-            self.output.push_str("    gn_value result = fn_main(NULL, GN_UNIT);\n");
-            self.output.push_str("    gn_print(NULL, result);\n");
-            self.output.push_str("    gn_println();\n");
+            self.output.push_str("    (void)fn_main(NULL, GN_UNIT);\n");
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
             self.output.push_str("}\n");
@@ -879,6 +875,7 @@ fn emit_primop(op: &PrimOp, args: &[VarId], var_names: &HashMap<VarId, String>) 
         PrimOp::StringConcat => format!("gn_string_concat({}, {})", args_str[0], args_str[1]),
         PrimOp::StringLength => format!("gn_string_length({})", args_str[0]),
         PrimOp::StringEq => format!("gn_string_eq({}, {})", args_str[0], args_str[1]),
+        PrimOp::StringNe => format!("GN_BOOL_NOT(gn_string_eq({}, {}))", args_str[0], args_str[1]),
         PrimOp::IntToFloat => format!("gn_int_to_float({})", args_str[0]),
         PrimOp::FloatToInt => format!("gn_float_to_int({})", args_str[0]),
         PrimOp::IntToString => format!("gn_int_to_string({})", args_str[0]),

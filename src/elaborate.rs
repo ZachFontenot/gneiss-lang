@@ -757,7 +757,7 @@ fn elaborate_expr(ctx: &ElaborateCtx, expr: &Expr) -> Result<TExpr, String> {
             let tright = elaborate_expr(ctx, right)?;
             let left_ty = &tleft.ty;
 
-            let top = elaborate_binop(op.clone(), left_ty);
+            let top = elaborate_binop_with_ctx(op.clone(), left_ty);
             TExprKind::BinOp {
                 op: top,
                 left: Rc::new(tleft),
@@ -973,6 +973,25 @@ fn elaborate_handler(
     })
 }
 
+/// Convert AST binary operator to typed binary operator based on operand type.
+/// For equality operators, always use PolyEq/PolyNe which will be resolved to
+/// the correct type-specific operator at monomorphization time.
+fn elaborate_binop_with_ctx(op: BinOp, left_ty_resolved: &Type) -> TBinOp {
+    // For equality operators, always use PolyEq/PolyNe
+    // These will be resolved to the correct operator at monomorphization time
+    // when we know the actual concrete types (handles polymorphic functions correctly)
+    if matches!(op, BinOp::Eq | BinOp::Neq) {
+        return match op {
+            BinOp::Eq => TBinOp::PolyEq,
+            BinOp::Neq => TBinOp::PolyNe,
+            _ => unreachable!(),
+        };
+    }
+
+    // For other operators, use the type-specific variant
+    elaborate_binop(op, left_ty_resolved)
+}
+
 /// Convert AST binary operator to typed binary operator based on operand type
 fn elaborate_binop(op: BinOp, left_ty: &Type) -> TBinOp {
     match op {
@@ -998,11 +1017,13 @@ fn elaborate_binop(op: BinOp, left_ty: &Type) -> TBinOp {
         BinOp::Eq => match left_ty {
             Type::Float => TBinOp::FloatEq,
             Type::String => TBinOp::StringEq,
+            Type::Bool => TBinOp::BoolEq,
             _ => TBinOp::IntEq,
         },
         BinOp::Neq => match left_ty {
             Type::Float => TBinOp::FloatNe,
             Type::String => TBinOp::StringNe,
+            Type::Bool => TBinOp::BoolNe,
             _ => TBinOp::IntNe,
         },
         BinOp::Lt => match left_ty {
