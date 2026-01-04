@@ -283,6 +283,12 @@ typedef struct gn_fiber {
     /* For channel blocking */
     struct gn_channel* blocked_channel;
     gn_value send_value;           /* Value being sent (for blocked senders) */
+
+    /* Thread-per-fiber model (Phase 1) */
+    pthread_t thread;              /* Fiber's dedicated thread */
+    pthread_cond_t cond;           /* Condition variable for blocking */
+    bool thread_started;           /* Whether thread has been started */
+    gn_value resume_value;         /* Value to resume with after blocking */
 } gn_fiber;
 
 /* Growable run queue (FIFO) */
