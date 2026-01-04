@@ -1668,6 +1668,14 @@ gn_value gn_Dict_getOrDefault(gn_value default_val, gn_value key, gn_value dict)
 /* Global scheduler instance */
 static gn_scheduler g_scheduler = {0};
 
+/* Thread-local current fiber (each worker has its own) */
+static __thread gn_fiber* tls_current_fiber = NULL;
+
+/* Number of worker threads (configurable, default to single-threaded) */
+#ifndef GN_NUM_WORKERS
+#define GN_NUM_WORKERS 1
+#endif
+
 /* Initial capacities */
 #define INITIAL_FIBER_CAPACITY   16
 #define INITIAL_QUEUE_CAPACITY   16
@@ -1875,16 +1883,42 @@ void gn_sched_init(void) {
 
     run_queue_init(&g_scheduler.ready_queue);
 
-    g_scheduler.current = NULL;
     g_scheduler.main_fiber = NULL;
 
     g_scheduler.all_channels = NULL;
     g_scheduler.channel_count = 0;
     g_scheduler.channel_capacity = 0;
     g_scheduler.next_channel_id = 1;
+
+    /* Initialize threading primitives */
+    pthread_mutex_init(&g_scheduler.lock, NULL);
+    pthread_cond_init(&g_scheduler.work_available, NULL);
+    atomic_store(&g_scheduler.shutdown, false);
+    g_scheduler.workers = NULL;
+    g_scheduler.n_workers = 0;
 }
 
 void gn_sched_shutdown(void) {
+    /* Signal workers to shut down (if any) */
+    if (g_scheduler.n_workers > 0) {
+        pthread_mutex_lock(&g_scheduler.lock);
+        atomic_store(&g_scheduler.shutdown, true);
+        pthread_cond_broadcast(&g_scheduler.work_available);
+        pthread_mutex_unlock(&g_scheduler.lock);
+
+        /* Wait for all workers to finish */
+        for (size_t i = 0; i < g_scheduler.n_workers; i++) {
+            pthread_join(g_scheduler.workers[i], NULL);
+        }
+        free(g_scheduler.workers);
+        g_scheduler.workers = NULL;
+        g_scheduler.n_workers = 0;
+    }
+
+    /* Destroy threading primitives */
+    pthread_mutex_destroy(&g_scheduler.lock);
+    pthread_cond_destroy(&g_scheduler.work_available);
+
     /* Free all fibers */
     for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
         gn_fiber* f = g_scheduler.all_fibers[i];
@@ -1931,12 +1965,16 @@ void gn_sched_shutdown(void) {
  * ============================================================================ */
 
 gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value cont) {
-    gn_fiber* current = g_scheduler.current;
+    gn_fiber* current = tls_current_fiber;
+
+    /* Acquire scheduler lock for modifying shared state */
+    pthread_mutex_lock(&g_scheduler.lock);
 
     switch (op) {
         case ASYNC_OP_SPAWN: {
             /* spawn(thunk) -> FiberHandle */
             if (n_args < 1) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("spawn requires a thunk argument");
             }
             gn_value thunk = args[0];
@@ -1952,18 +1990,23 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
             current->saved_k = cont;
             gn_run_queue_push(&g_scheduler.ready_queue, current);
 
+            /* Signal that work is available */
+            pthread_cond_signal(&g_scheduler.work_available);
+            pthread_mutex_unlock(&g_scheduler.lock);
             return GN_UNIT;  /* Scheduler will pick next fiber */
         }
 
         case ASYNC_OP_JOIN: {
             /* join(handle) -> result */
             if (n_args < 1) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("join requires a fiber handle");
             }
             uint64_t id = gn_get_fiber_id(args[0]);
             gn_fiber* target = get_fiber_by_id(id);
 
             if (!target) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("join: fiber not found");
             }
 
@@ -1973,6 +2016,7 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
                 current->cont_value = target->result;
                 current->saved_k = cont;
                 gn_run_queue_push(&g_scheduler.ready_queue, current);
+                pthread_cond_signal(&g_scheduler.work_available);
             } else {
                 /* Block waiting for target */
                 current->state = FIBER_BLOCKED_JOIN;
@@ -1982,6 +2026,7 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
                 /* Don't enqueue - we're blocked */
             }
 
+            pthread_mutex_unlock(&g_scheduler.lock);
             return GN_UNIT;
         }
 
@@ -1993,6 +2038,8 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
             /* Re-enqueue at back of queue */
             gn_run_queue_push(&g_scheduler.ready_queue, current);
 
+            pthread_cond_signal(&g_scheduler.work_available);
+            pthread_mutex_unlock(&g_scheduler.lock);
             return GN_UNIT;
         }
 
@@ -2006,18 +2053,22 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
             current->saved_k = cont;
             gn_run_queue_push(&g_scheduler.ready_queue, current);
 
+            pthread_cond_signal(&g_scheduler.work_available);
+            pthread_mutex_unlock(&g_scheduler.lock);
             return GN_UNIT;
         }
 
         case ASYNC_OP_SEND: {
             /* send(channel, value) -> () */
             if (n_args < 2) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("send requires channel and value");
             }
             gn_channel* ch = gn_get_channel(args[0]);
             gn_value value = args[1];
 
             if (!ch) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("send: invalid channel");
             }
 
@@ -2040,10 +2091,16 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
                 current->cont_value = GN_UNIT;
                 current->saved_k = cont;
                 gn_run_queue_push(&g_scheduler.ready_queue, current);
+
+                /* Signal work available */
+                pthread_cond_broadcast(&g_scheduler.work_available);
             } else {
                 /* Block sender until receiver arrives */
                 gn_waiter* w = (gn_waiter*)malloc(sizeof(gn_waiter));
-                if (!w) gn_panic("out of memory");
+                if (!w) {
+                    pthread_mutex_unlock(&g_scheduler.lock);
+                    gn_panic("out of memory");
+                }
                 w->fiber = current;
                 w->value = value;
                 w->next = ch->waiting_senders;
@@ -2056,17 +2113,20 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
                 /* Don't enqueue - we're blocked */
             }
 
+            pthread_mutex_unlock(&g_scheduler.lock);
             return GN_UNIT;
         }
 
         case ASYNC_OP_RECV: {
             /* recv(channel) -> value */
             if (n_args < 1) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("recv requires a channel");
             }
             gn_channel* ch = gn_get_channel(args[0]);
 
             if (!ch) {
+                pthread_mutex_unlock(&g_scheduler.lock);
                 gn_panic("recv: invalid channel");
             }
 
@@ -2090,10 +2150,16 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
                 current->cont_value = value;
                 current->saved_k = cont;
                 gn_run_queue_push(&g_scheduler.ready_queue, current);
+
+                /* Signal work available */
+                pthread_cond_broadcast(&g_scheduler.work_available);
             } else {
                 /* Block receiver until sender arrives */
                 gn_waiter* w = (gn_waiter*)malloc(sizeof(gn_waiter));
-                if (!w) gn_panic("out of memory");
+                if (!w) {
+                    pthread_mutex_unlock(&g_scheduler.lock);
+                    gn_panic("out of memory");
+                }
                 w->fiber = current;
                 w->value = GN_UNIT;  /* Not used for receivers */
                 w->next = ch->waiting_receivers;
@@ -2105,10 +2171,12 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
                 /* Don't enqueue - we're blocked */
             }
 
+            pthread_mutex_unlock(&g_scheduler.lock);
             return GN_UNIT;
         }
 
         default:
+            pthread_mutex_unlock(&g_scheduler.lock);
             fprintf(stderr, "unknown async op: %u\n", op);
             gn_panic("unknown async operation");
             return GN_UNIT;
@@ -2120,9 +2188,7 @@ gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value 
  * ============================================================================ */
 
 static gn_value run_fiber_step(gn_fiber* f) {
-    g_scheduler.current = f;
-    f->state = FIBER_RUNNING;
-
+    /* Note: tls_current_fiber and state set by caller (run_one_fiber) */
     gn_value result;
 
     if (f->cont_kind == FIBER_CONT_START) {
@@ -2152,12 +2218,17 @@ gn_value gn_Fiber_spawn(gn_value thunk) {
      * The thunk is executed inline and its result stored.
      * Returns a fiber handle that can be joined.
      */
+    pthread_mutex_lock(&g_scheduler.lock);
     gn_fiber* f = gn_fiber_create(thunk);
+    pthread_mutex_unlock(&g_scheduler.lock);
 
     /* Run the thunk synchronously */
     gn_value result = gn_apply(thunk, GN_UNIT);
+
+    pthread_mutex_lock(&g_scheduler.lock);
     f->state = FIBER_COMPLETED;
     f->result = result;
+    pthread_mutex_unlock(&g_scheduler.lock);
 
     return gn_make_fiber_handle(f->id);
 }
@@ -2168,8 +2239,9 @@ gn_value gn_Fiber_join(gn_value handle) {
      * For synchronously-spawned fibers, the result is already available.
      */
     uint64_t id = gn_get_fiber_id(handle);
-    gn_fiber* f = NULL;
 
+    pthread_mutex_lock(&g_scheduler.lock);
+    gn_fiber* f = NULL;
     for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
         if (g_scheduler.all_fibers[i]->id == id) {
             f = g_scheduler.all_fibers[i];
@@ -2178,14 +2250,18 @@ gn_value gn_Fiber_join(gn_value handle) {
     }
 
     if (!f) {
+        pthread_mutex_unlock(&g_scheduler.lock);
         gn_panic("Fiber.join: fiber not found");
     }
 
     if (f->state != FIBER_COMPLETED) {
+        pthread_mutex_unlock(&g_scheduler.lock);
         gn_panic("Fiber.join: fiber not completed (deadlock in synchronous mode)");
     }
 
-    return f->result;
+    gn_value result = f->result;
+    pthread_mutex_unlock(&g_scheduler.lock);
+    return result;
 }
 
 gn_value gn_Fiber_yield(gn_value unit) {
@@ -2196,8 +2272,11 @@ gn_value gn_Fiber_yield(gn_value unit) {
 
 gn_value gn_Channel_new(gn_value unit) {
     (void)unit;
+    pthread_mutex_lock(&g_scheduler.lock);
     gn_channel* ch = gn_channel_create();
-    return gn_make_channel_handle(ch);
+    gn_value handle = gn_make_channel_handle(ch);
+    pthread_mutex_unlock(&g_scheduler.lock);
+    return handle;
 }
 
 gn_value gn_Channel_send(gn_value handle, gn_value value) {
@@ -2206,18 +2285,24 @@ gn_value gn_Channel_send(gn_value handle, gn_value value) {
      * Since we run fibers sequentially, this will deadlock if recv isn't ready.
      * For now, just store the value (assuming recv will be called on same channel).
      */
+    pthread_mutex_lock(&g_scheduler.lock);
     gn_channel* ch = gn_get_channel(handle);
     if (!ch) {
+        pthread_mutex_unlock(&g_scheduler.lock);
         gn_panic("Channel.send: invalid channel");
     }
 
     /* Create a waiter with the value */
     gn_waiter* w = (gn_waiter*)malloc(sizeof(gn_waiter));
-    if (!w) gn_panic("out of memory");
+    if (!w) {
+        pthread_mutex_unlock(&g_scheduler.lock);
+        gn_panic("out of memory");
+    }
     w->fiber = NULL;  /* No fiber in sync mode */
     w->value = value;
     w->next = ch->waiting_senders;
     ch->waiting_senders = w;
+    pthread_mutex_unlock(&g_scheduler.lock);
 
     return GN_UNIT;
 }
@@ -2226,12 +2311,15 @@ gn_value gn_Channel_recv(gn_value handle) {
     /*
      * Synchronous recv: get value from waiting sender.
      */
+    pthread_mutex_lock(&g_scheduler.lock);
     gn_channel* ch = gn_get_channel(handle);
     if (!ch) {
+        pthread_mutex_unlock(&g_scheduler.lock);
         gn_panic("Channel.recv: invalid channel");
     }
 
     if (!ch->waiting_senders) {
+        pthread_mutex_unlock(&g_scheduler.lock);
         gn_panic("Channel.recv: no sender (deadlock in synchronous mode)");
     }
 
@@ -2239,72 +2327,149 @@ gn_value gn_Channel_recv(gn_value handle) {
     ch->waiting_senders = w->next;
     gn_value value = w->value;
     free(w);
+    pthread_mutex_unlock(&g_scheduler.lock);
 
     return value;
 }
 
 /* ============================================================================
- * Main Scheduler Loop
+ * Main Scheduler Loop (Thread-Safe with Mutex)
  * ============================================================================ */
+
+/* Helper: Run a single fiber step with proper locking */
+static gn_value run_one_fiber(gn_fiber* f) {
+    /* Set thread-local current fiber */
+    tls_current_fiber = f;
+    f->state = FIBER_RUNNING;
+
+    /* Run fiber (unlocked - fiber execution doesn't need scheduler lock) */
+    gn_value result = run_fiber_step(f);
+
+    /* Re-acquire lock for state updates */
+    pthread_mutex_lock(&g_scheduler.lock);
+
+    /* Check if fiber completed (returned without suspending) */
+    if (f->state == FIBER_RUNNING) {
+        /* Fiber returned normally - it's done */
+        f->state = FIBER_COMPLETED;
+        f->result = result;
+
+        /* Wake any joiners */
+        for (size_t i = 0; i < f->joiner_count; i++) {
+            gn_fiber* joiner = f->joiners[i];
+            joiner->state = FIBER_READY;
+            joiner->cont_kind = FIBER_CONT_RESUME;
+            joiner->cont_value = result;
+            gn_run_queue_push(&g_scheduler.ready_queue, joiner);
+        }
+        f->joiner_count = 0;
+
+        /* Signal that work may be available */
+        pthread_cond_signal(&g_scheduler.work_available);
+    }
+
+    pthread_mutex_unlock(&g_scheduler.lock);
+    tls_current_fiber = NULL;
+
+    return result;
+}
+
+/* Worker thread loop (for multi-threaded mode) */
+static void* worker_loop(void* arg) {
+    (void)arg;
+
+    while (!atomic_load(&g_scheduler.shutdown)) {
+        pthread_mutex_lock(&g_scheduler.lock);
+
+        /* Wait for work or shutdown */
+        while (g_scheduler.ready_queue.count == 0 &&
+               !atomic_load(&g_scheduler.shutdown)) {
+            pthread_cond_wait(&g_scheduler.work_available, &g_scheduler.lock);
+        }
+
+        if (atomic_load(&g_scheduler.shutdown)) {
+            pthread_mutex_unlock(&g_scheduler.lock);
+            break;
+        }
+
+        /* Pop fiber from queue */
+        gn_fiber* f = gn_run_queue_pop(&g_scheduler.ready_queue);
+        pthread_mutex_unlock(&g_scheduler.lock);
+
+        if (f) {
+            run_one_fiber(f);
+        }
+    }
+
+    return NULL;
+}
 
 gn_value gn_sched_run(gn_value main_thunk) {
     /* Create main fiber */
+    pthread_mutex_lock(&g_scheduler.lock);
     gn_fiber* main_f = gn_fiber_create(main_thunk);
     g_scheduler.main_fiber = main_f;
     gn_run_queue_push(&g_scheduler.ready_queue, main_f);
+    pthread_mutex_unlock(&g_scheduler.lock);
 
-    /* Main scheduler loop */
+    /* For now, run single-threaded (GN_NUM_WORKERS == 1) */
+    /* Future: spawn worker threads here for multi-threaded mode */
+#if GN_NUM_WORKERS > 1
+    /* Spawn worker threads */
+    g_scheduler.n_workers = GN_NUM_WORKERS - 1;  /* main thread is worker 0 */
+    g_scheduler.workers = (pthread_t*)malloc(g_scheduler.n_workers * sizeof(pthread_t));
+    for (size_t i = 0; i < g_scheduler.n_workers; i++) {
+        pthread_create(&g_scheduler.workers[i], NULL, worker_loop, NULL);
+    }
+#endif
+
+    /* Main thread also acts as a worker */
     while (true) {
+        pthread_mutex_lock(&g_scheduler.lock);
+
+        /* Check if main fiber completed */
+        if (g_scheduler.main_fiber->state == FIBER_COMPLETED) {
+            gn_value result = g_scheduler.main_fiber->result;
+            pthread_mutex_unlock(&g_scheduler.lock);
+            return result;
+        }
+
+        /* Try to get work */
         gn_fiber* f = gn_run_queue_pop(&g_scheduler.ready_queue);
 
         if (!f) {
             /* No ready fibers - check for deadlock */
-            if (g_scheduler.main_fiber->state != FIBER_COMPLETED) {
-                /* Main fiber blocked but nothing to run = deadlock */
-                bool has_blocked = false;
-                for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
-                    gn_fiber_state st = g_scheduler.all_fibers[i]->state;
-                    if (st == FIBER_BLOCKED_JOIN ||
-                        st == FIBER_BLOCKED_SEND ||
-                        st == FIBER_BLOCKED_RECV) {
-                        has_blocked = true;
-                        break;
-                    }
-                }
-                if (has_blocked) {
-                    gn_panic("deadlock: all fibers blocked");
+            bool has_blocked = false;
+            for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
+                gn_fiber_state st = g_scheduler.all_fibers[i]->state;
+                if (st == FIBER_BLOCKED_JOIN ||
+                    st == FIBER_BLOCKED_SEND ||
+                    st == FIBER_BLOCKED_RECV) {
+                    has_blocked = true;
+                    break;
                 }
             }
+            pthread_mutex_unlock(&g_scheduler.lock);
+
+            if (has_blocked && g_scheduler.main_fiber->state != FIBER_COMPLETED) {
+                gn_panic("deadlock: all fibers blocked");
+            }
+
+            /* No work and no blocked fibers - main must be done */
             break;
         }
 
-        /* Run the fiber until it yields, blocks, or completes */
-        gn_value result = run_fiber_step(f);
+        pthread_mutex_unlock(&g_scheduler.lock);
 
-        /* Check if fiber completed (returned without suspending) */
-        if (f->state == FIBER_RUNNING) {
-            /* Fiber returned normally - it's done */
-            f->state = FIBER_COMPLETED;
-            f->result = result;
+        /* Run the fiber (this handles state updates with proper locking) */
+        gn_value result = run_one_fiber(f);
 
-            /* Wake any joiners */
-            for (size_t i = 0; i < f->joiner_count; i++) {
-                gn_fiber* joiner = f->joiners[i];
-                joiner->state = FIBER_READY;
-                joiner->cont_kind = FIBER_CONT_RESUME;
-                joiner->cont_value = result;
-                gn_run_queue_push(&g_scheduler.ready_queue, joiner);
-            }
-            f->joiner_count = 0;
-
-            /* If main fiber completed, we're done */
-            if (f == g_scheduler.main_fiber) {
-                return result;
-            }
+        /* Check if this was the main fiber completing */
+        if (f == g_scheduler.main_fiber && f->state == FIBER_COMPLETED) {
+            return result;
         }
-        /* Otherwise fiber suspended itself via EFFECT_ASYNC handlers */
     }
 
-    /* Main fiber completed (picked up above) */
+    /* Main fiber completed */
     return g_scheduler.main_fiber->result;
 }

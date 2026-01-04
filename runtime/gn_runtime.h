@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* ============================================================================
  * Value Representation
@@ -314,7 +316,6 @@ typedef struct gn_scheduler {
     uint64_t next_fiber_id;
 
     gn_run_queue ready_queue;
-    gn_fiber* current;             /* Currently executing fiber */
     gn_fiber* main_fiber;          /* Main fiber (for final result) */
 
     /* Channel tracking */
@@ -322,6 +323,16 @@ typedef struct gn_scheduler {
     size_t channel_count;
     size_t channel_capacity;
     uint64_t next_channel_id;
+
+    /* Threading support (Phase 2) */
+    pthread_mutex_t lock;          /* Protects all scheduler state */
+    pthread_cond_t work_available; /* Signals when work is available */
+    pthread_t* workers;            /* Worker thread handles */
+    size_t n_workers;              /* Number of worker threads */
+    atomic_bool shutdown;          /* Shutdown flag */
+
+    /* Per-thread current fiber (thread-local in implementation) */
+    /* Note: current fiber is now thread-local, not in scheduler */
 } gn_scheduler;
 
 /* Scheduler API */
