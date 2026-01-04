@@ -903,6 +903,14 @@ impl Interpreter {
                 Value::Builtin("int_to_string".into()),
             );
             env.define(
+                "safe_div".into(),
+                Value::Builtin("safe_div".into()),
+            );
+            env.define(
+                "safe_mod".into(),
+                Value::Builtin("safe_mod".into()),
+            );
+            env.define(
                 "string_length".into(),
                 Value::Builtin("string_length".into()),
             );
@@ -3349,6 +3357,68 @@ impl Interpreter {
                             )),
                         }
                     }
+                    // safe_div a b -> 2 args, returns Result String Int
+                    ("safe_div", 2) => {
+                        let b = args.pop().unwrap();
+                        let a = args.pop().unwrap();
+                        match (a, b) {
+                            (Value::Int(a), Value::Int(b)) => {
+                                if b == 0 {
+                                    // Return Err "division by zero"
+                                    StepResult::Continue(State::Apply {
+                                        value: Value::Constructor {
+                                            name: "Err".into(),
+                                            fields: vec![Value::String("division by zero".into())],
+                                        },
+                                        cont,
+                                    })
+                                } else {
+                                    // Return Ok (a / b)
+                                    StepResult::Continue(State::Apply {
+                                        value: Value::Constructor {
+                                            name: "Ok".into(),
+                                            fields: vec![Value::Int(a / b)],
+                                        },
+                                        cont,
+                                    })
+                                }
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "safe_div: expected (Int, Int)".into(),
+                            )),
+                        }
+                    }
+                    // safe_mod a b -> 2 args, returns Result String Int
+                    ("safe_mod", 2) => {
+                        let b = args.pop().unwrap();
+                        let a = args.pop().unwrap();
+                        match (a, b) {
+                            (Value::Int(a), Value::Int(b)) => {
+                                if b == 0 {
+                                    // Return Err "modulo by zero"
+                                    StepResult::Continue(State::Apply {
+                                        value: Value::Constructor {
+                                            name: "Err".into(),
+                                            fields: vec![Value::String("modulo by zero".into())],
+                                        },
+                                        cont,
+                                    })
+                                } else {
+                                    // Return Ok (a % b)
+                                    StepResult::Continue(State::Apply {
+                                        value: Value::Constructor {
+                                            name: "Ok".into(),
+                                            fields: vec![Value::Int(a % b)],
+                                        },
+                                        cont,
+                                    })
+                                }
+                            }
+                            _ => StepResult::Error(EvalError::TypeError(
+                                "safe_mod: expected (Int, Int)".into(),
+                            )),
+                        }
+                    }
                     // string_join sep list -> 2 args, returns String
                     ("string_join", 2) => {
                         let list = args.pop().unwrap();
@@ -3822,6 +3892,13 @@ impl Interpreter {
             // Multi-arg string builtins - return partial with first arg
             "string_index_of" | "string_substring" | "string_split" | "string_join"
             | "string_char_at" | "string_concat" | "string_repeat" => {
+                Ok(Value::BuiltinPartial {
+                    name: name.to_string(),
+                    args: vec![arg],
+                })
+            }
+            // Multi-arg math builtins - safe division/modulo
+            "safe_div" | "safe_mod" => {
                 Ok(Value::BuiltinPartial {
                     name: name.to_string(),
                     args: vec![arg],

@@ -811,3 +811,266 @@ let main _ =
 "#;
     expect_success_no_prelude(source);
 }
+
+// ============================================================================
+// Runtime Boundary Check Tests
+// ============================================================================
+
+#[test]
+fn boundary_normal_division() {
+    // Normal division should work as expected
+    let source = r#"
+let main _ = assert_eq (10 / 2) 5
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_normal_modulo() {
+    // Normal modulo should work as expected
+    let source = r#"
+let main _ = assert_eq (10 % 3) 1
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_div_success() {
+    // safe_div returns Ok for non-zero divisor
+    let source = r#"
+let main _ =
+    match safe_div 10 2 with
+    | Ok v -> assert_eq v 5
+    | Err _ -> panic "should be Ok"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_div_zero() {
+    // safe_div returns Err for zero divisor
+    let source = r#"
+let main _ =
+    match safe_div 10 0 with
+    | Ok _ -> panic "should be Err"
+    | Err msg -> assert_eq msg "division by zero"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_mod_success() {
+    // safe_mod returns Ok for non-zero divisor
+    let source = r#"
+let main _ =
+    match safe_mod 10 3 with
+    | Ok v -> assert_eq v 1
+    | Err _ -> panic "should be Ok"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_mod_zero() {
+    // safe_mod returns Err for zero divisor
+    let source = r#"
+let main _ =
+    match safe_mod 10 0 with
+    | Ok _ -> panic "should be Err"
+    | Err msg -> assert_eq msg "modulo by zero"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_head() {
+    // head returns Option - Some for non-empty list
+    let source = r#"
+let main _ =
+    match head [1, 2, 3] with
+    | Some x -> assert_eq x 1
+    | None -> panic "should be Some"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_head_empty() {
+    // head returns Option - None for empty list
+    let source = r#"
+let main _ =
+    match head [] with
+    | Some _ -> panic "should be None"
+    | None -> ()
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_tail() {
+    // tail returns Option - Some for non-empty list
+    let source = r#"
+let main _ =
+    match tail [1, 2, 3] with
+    | Some rest -> assert_eq (length rest) 2
+    | None -> panic "should be Some"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_safe_tail_empty() {
+    // tail returns Option - None for empty list
+    let source = r#"
+let main _ =
+    match tail [] with
+    | Some _ -> panic "should be None"
+    | None -> ()
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_head_unsafe_success() {
+    // head_unsafe works on non-empty list
+    let source = r#"
+let main _ = assert_eq (head_unsafe [1, 2, 3]) 1
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn boundary_tail_unsafe_success() {
+    // tail_unsafe works on non-empty list
+    let source = r#"
+let main _ = assert_eq (length (tail_unsafe [1, 2, 3])) 2
+"#;
+    expect_success(source);
+}
+
+// =============================================================================
+// Dictionary Tests
+// =============================================================================
+
+#[test]
+fn dict_new_and_insert() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let d = Dict.insert "key" 42 d in
+    let result = Dict.get "key" d in
+    match result with
+    | Some v -> assert_eq v 42
+    | None -> panic "Dict.get failed"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_contains() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let d = Dict.insert "foo" 1 d in
+    let _ = assert (Dict.contains "foo" d) in
+    assert (not (Dict.contains "bar" d))
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_size() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let _ = assert_eq (Dict.size d) 0 in
+    let d = Dict.insert "a" 1 d in
+    let _ = assert_eq (Dict.size d) 1 in
+    let d = Dict.insert "b" 2 d in
+    assert_eq (Dict.size d) 2
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_is_empty() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let _ = assert (Dict.isEmpty d) in
+    let d = Dict.insert "key" 1 d in
+    assert (not (Dict.isEmpty d))
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_remove() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let d = Dict.insert "a" 1 d in
+    let d = Dict.insert "b" 2 d in
+    let _ = assert_eq (Dict.size d) 2 in
+    let d = Dict.remove "a" d in
+    let _ = assert_eq (Dict.size d) 1 in
+    let _ = assert (not (Dict.contains "a" d)) in
+    assert (Dict.contains "b" d)
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_get_or_default() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let d = Dict.insert "exists" 42 d in
+    let _ = assert_eq (Dict.getOrDefault 0 "exists" d) 42 in
+    assert_eq (Dict.getOrDefault 99 "missing" d) 99
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_update_existing_key() {
+    let source = r#"
+let main _ =
+    let d = Dict.new () in
+    let d = Dict.insert "key" 1 d in
+    let d = Dict.insert "key" 2 d in
+    let _ = assert_eq (Dict.size d) 1 in
+    match Dict.get "key" d with
+    | Some v -> assert_eq v 2
+    | None -> panic "key should exist"
+    end
+"#;
+    expect_success(source);
+}
+
+#[test]
+fn dict_merge() {
+    let source = r#"
+let main _ =
+    let d1 = Dict.new () in
+    let d1 = Dict.insert "a" 1 d1 in
+    let d1 = Dict.insert "b" 2 d1 in
+    let d2 = Dict.new () in
+    let d2 = Dict.insert "b" 20 d2 in
+    let d2 = Dict.insert "c" 3 d2 in
+    let merged = Dict.merge d1 d2 in
+    let _ = assert_eq (Dict.getOrDefault 0 "a" merged) 1 in
+    let _ = assert_eq (Dict.getOrDefault 0 "b" merged) 20 in
+    assert_eq (Dict.getOrDefault 0 "c" merged) 3
+"#;
+    expect_success(source);
+}

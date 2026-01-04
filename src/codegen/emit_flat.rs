@@ -77,11 +77,16 @@ impl FlatEmitter {
 
         // Register builtins with their arities
         for (var_id, name) in &program.builtins {
-            let c_name = format!("gn_{}", name);
+            // Canonicalize concurrency builtin names to Fiber.* form
+            let canonical_name = match name.as_str() {
+                "spawn" => "Fiber.spawn",
+                _ => name.as_str(),
+            };
+            let c_name = format!("gn_{}", mangle_name(canonical_name));
             self.top_level_funcs.insert(*var_id, c_name.clone());
 
-            // Infer builtin arity from the name
-            let arity = get_builtin_arity(name);
+            // Infer builtin arity from the name (use canonical name)
+            let arity = get_builtin_arity(canonical_name);
             if arity > 0 {
                 self.func_arities.insert(*var_id, arity);
                 self.func_name_arities.insert(c_name, arity);
@@ -218,10 +223,20 @@ impl FlatEmitter {
             self.output.push_str("    return 0;\n");
             self.output.push_str("}\n");
         } else if has_fn_main {
+            // Generate a main thunk wrapper for the scheduler
+            self.output.push_str("// Main thunk wrapper for scheduler\n");
+            self.output.push_str("static gn_value _main_thunk(gn_value* env, gn_value unit) {\n");
+            self.output.push_str("    (void)env; (void)unit;\n");
+            self.output.push_str("    return fn_main(NULL, GN_UNIT);\n");
+            self.output.push_str("}\n\n");
+
             self.output.push_str("// Main entry point\n");
             self.output.push_str("int main(int argc, char** argv) {\n");
             self.output.push_str("    gn_init(argc, argv);\n");
-            self.output.push_str("    (void)fn_main(NULL, GN_UNIT);\n");
+            self.output.push_str("    gn_sched_init();\n");
+            self.output.push_str("    gn_value main_closure = gn_make_closure1((void*)_main_thunk);\n");
+            self.output.push_str("    (void)gn_sched_run(main_closure);\n");
+            self.output.push_str("    gn_sched_shutdown();\n");
             self.output.push_str("    gn_shutdown();\n");
             self.output.push_str("    return 0;\n");
             self.output.push_str("}\n");
@@ -378,13 +393,22 @@ impl FlatEmitter {
                 let fields_str: Vec<String> = fields.iter().map(|f| self.get_var_name(*f)).collect();
                 let name = ctor_name.as_deref().unwrap_or("anon");
 
-                if fields.is_empty() {
-                    format!("GN_CTOR({}, 0) /* {} */", tag, name)
-                } else {
-                    format!(
-                        "gn_alloc({}, {}, (gn_value[]){{{}}})",
-                        tag, fields.len(), fields_str.join(", ")
-                    )
+                // Handle special runtime operations (concurrency primitives)
+                match name {
+                    "__new_channel" => "gn_Channel_new(GN_UNIT)".to_string(),
+                    "__chan_send" => format!("gn_Channel_send({}, {})", fields_str[0], fields_str[1]),
+                    "__chan_recv" => format!("gn_Channel_recv({})", fields_str[0]),
+                    "__spawn" => format!("gn_Fiber_spawn({})", fields_str[0]),
+                    _ => {
+                        if fields.is_empty() {
+                            format!("GN_CTOR({}, 0) /* {} */", tag, name)
+                        } else {
+                            format!(
+                                "gn_alloc({}, {}, (gn_value[]){{{}}})",
+                                tag, fields.len(), fields_str.join(", ")
+                            )
+                        }
+                    }
                 }
             }
 
@@ -494,7 +518,19 @@ impl FlatEmitter {
                 let cont_name = self.get_var_name(*cont);
                 let args_str: Vec<String> = args.iter().map(|a| self.get_var_name(*a)).collect();
 
-                if func_name.starts_with("fn_") {
+                // Check for async builtins that need special handling
+                if let Some(async_op) = get_async_builtin_op(&func_name) {
+                    // Emit as gn_perform(EFFECT_ASYNC, op, n_args, args, cont)
+                    let n_args = args_str.len();
+                    if n_args == 0 {
+                        format!("gn_perform(0xFFFFFFFF, {}, 0, NULL, {})", async_op, cont_name)
+                    } else {
+                        format!(
+                            "gn_perform(0xFFFFFFFF, {}, {}, (gn_value[]){{{}}}, {})",
+                            async_op, n_args, args_str.join(", "), cont_name
+                        )
+                    }
+                } else if func_name.starts_with("fn_") {
                     let all_args = std::iter::once("NULL".to_string())
                         .chain(args_str)
                         .chain(std::iter::once(cont_name))
@@ -602,13 +638,23 @@ impl FlatEmitter {
             FlatAtom::Alloc { tag, ctor_name, fields, .. } => {
                 let fields_str: Vec<String> = fields.iter().map(|f| self.get_var_name(*f)).collect();
                 let name = ctor_name.as_deref().unwrap_or("anon");
-                if fields.is_empty() {
-                    format!("GN_CTOR({}, 0) /* {} */", tag, name)
-                } else {
-                    format!(
-                        "gn_alloc({}, {}, (gn_value[]){{{}}})",
-                        tag, fields.len(), fields_str.join(", ")
-                    )
+
+                // Handle special runtime operations (concurrency primitives)
+                match name {
+                    "__new_channel" => "gn_Channel_new(GN_UNIT)".to_string(),
+                    "__chan_send" => format!("gn_Channel_send({}, {})", fields_str[0], fields_str[1]),
+                    "__chan_recv" => format!("gn_Channel_recv({})", fields_str[0]),
+                    "__spawn" => format!("gn_Fiber_spawn({})", fields_str[0]),
+                    _ => {
+                        if fields.is_empty() {
+                            format!("GN_CTOR({}, 0) /* {} */", tag, name)
+                        } else {
+                            format!(
+                                "gn_alloc({}, {}, (gn_value[]){{{}}})",
+                                tag, fields.len(), fields_str.join(", ")
+                            )
+                        }
+                    }
                 }
             }
             FlatAtom::PrimOp { op, args } => emit_primop(op, args, &self.var_names),
@@ -849,8 +895,8 @@ fn emit_primop(op: &PrimOp, args: &[VarId], var_names: &HashMap<VarId, String>) 
         PrimOp::IntAdd => format!("GN_INT_ADD({}, {})", args_str[0], args_str[1]),
         PrimOp::IntSub => format!("GN_INT_SUB({}, {})", args_str[0], args_str[1]),
         PrimOp::IntMul => format!("GN_INT_MUL({}, {})", args_str[0], args_str[1]),
-        PrimOp::IntDiv => format!("GN_INT_DIV({}, {})", args_str[0], args_str[1]),
-        PrimOp::IntMod => format!("GN_INT_MOD({}, {})", args_str[0], args_str[1]),
+        PrimOp::IntDiv => format!("gn_int_div({}, {})", args_str[0], args_str[1]),
+        PrimOp::IntMod => format!("gn_int_mod({}, {})", args_str[0], args_str[1]),
         PrimOp::IntNeg => format!("GN_INT_NEG({})", args_str[0]),
         PrimOp::FloatAdd => format!("gn_float_add({}, {})", args_str[0], args_str[1]),
         PrimOp::FloatSub => format!("gn_float_sub({}, {})", args_str[0], args_str[1]),
@@ -898,6 +944,7 @@ fn mangle_name(name: &str) -> String {
             'a'..='z' | 'A'..='Z' | '0'..='9' => result.push(c),
             '_' => result.push('_'),
             '\'' => result.push_str("_prime"),
+            '.' => result.push('_'), // Dict.new -> Dict_new
             _ => result.push_str(&format!("_u{:04x}_", c as u32)),
         }
     }
@@ -937,13 +984,44 @@ fn get_builtin_arity(name: &str) -> usize {
         "float_neg" | "float_abs" | "float_sqrt" | "float_floor" | "float_ceil" => 1,
         "int_to_float" | "float_to_int" => 1,
         "float_to_string" => 1,
+        "safe_div" | "safe_mod" => 2,
 
         // List
         "list_cons" => 2,
         "list_head" | "list_tail" | "list_is_empty" => 1,
 
+        // Dict
+        "Dict.new" | "Dict.keys" | "Dict.values" | "Dict.size" | "Dict.isEmpty"
+        | "Dict.toList" | "Dict.fromList" => 1,
+        "Dict.get" | "Dict.remove" | "Dict.contains" | "Dict.merge" => 2,
+        "Dict.insert" | "Dict.getOrDefault" => 3,
+
+        // Fiber/Channel (async builtins)
+        // These take unit args where applicable (yield(), Channel.new())
+        "Fiber.spawn" => 1,
+        "Fiber.join" => 1,
+        "Fiber.yield" => 1,   // yield()
+        "Channel.new" => 1,   // Channel.new()
+        "Channel.send" => 2,
+        "Channel.recv" => 1,
+
         // Default - unknown builtin
         _ => 1,
+    }
+}
+
+/// Check if a function name is an async builtin and return its operation ID
+/// Operation IDs must match ASYNC_OP_* defines in gn_runtime.h
+fn get_async_builtin_op(name: &str) -> Option<u32> {
+    // Match against mangled names (gn_Fiber_spawn, etc.)
+    match name {
+        "gn_Fiber_spawn" => Some(0),    // ASYNC_OP_SPAWN
+        "gn_Fiber_join" => Some(1),     // ASYNC_OP_JOIN
+        "gn_Fiber_yield" => Some(2),    // ASYNC_OP_YIELD
+        "gn_Channel_new" => Some(3),    // ASYNC_OP_CHAN_NEW
+        "gn_Channel_send" => Some(4),   // ASYNC_OP_SEND
+        "gn_Channel_recv" => Some(5),   // ASYNC_OP_RECV
+        _ => None,
     }
 }
 

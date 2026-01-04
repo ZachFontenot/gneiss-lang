@@ -31,6 +31,9 @@
 #define TAG_ERR      20
 #define TAG_OK       21
 
+/* Dict tag (association list) */
+#define TAG_DICT     0xFFFF0005
+
 /* ============================================================================
  * Global State
  * ============================================================================ */
@@ -246,6 +249,62 @@ gn_value gn_assert(gn_value cond) {
         exit(1);
     }
     return GN_UNIT;
+}
+
+/* ============================================================================
+ * Result/Option Helpers
+ * ============================================================================ */
+
+gn_value gn_ok(gn_value v) {
+    return gn_alloc(TAG_OK, 1, &v);
+}
+
+gn_value gn_err(gn_value v) {
+    return gn_alloc(TAG_ERR, 1, &v);
+}
+
+gn_value gn_some(gn_value v) {
+    return gn_alloc(TAG_SOME, 1, &v);
+}
+
+gn_value gn_none(void) {
+    return gn_singleton(TAG_NONE);
+}
+
+/* ============================================================================
+ * Integer Division/Modulo (with zero check)
+ * ============================================================================ */
+
+gn_value gn_int_div(gn_value a, gn_value b) {
+    int64_t divisor = GN_UNINT(b);
+    if (divisor == 0) {
+        gn_panic("division by zero");
+    }
+    return GN_INT(GN_UNINT(a) / divisor);
+}
+
+gn_value gn_int_mod(gn_value a, gn_value b) {
+    int64_t divisor = GN_UNINT(b);
+    if (divisor == 0) {
+        gn_panic("modulo by zero");
+    }
+    return GN_INT(GN_UNINT(a) % divisor);
+}
+
+gn_value gn_safe_div(gn_value a, gn_value b) {
+    int64_t divisor = GN_UNINT(b);
+    if (divisor == 0) {
+        return gn_err(gn_string("division by zero"));
+    }
+    return gn_ok(GN_INT(GN_UNINT(a) / divisor));
+}
+
+gn_value gn_safe_mod(gn_value a, gn_value b) {
+    int64_t divisor = GN_UNINT(b);
+    if (divisor == 0) {
+        return gn_err(gn_string("modulo by zero"));
+    }
+    return gn_ok(GN_INT(GN_UNINT(a) % divisor));
 }
 
 /* ============================================================================
@@ -1331,6 +1390,11 @@ gn_value gn_perform(gn_effect_id effect, gn_op_id op,
      * - Not call k at all to abort/short-circuit
      */
 
+    /* Built-in async effect - dispatch to scheduler */
+    if (effect == EFFECT_ASYNC) {
+        return gn_handle_async(op, n_args, args, current_k);
+    }
+
     /* Find handler for this effect */
     gn_handler* h = gn_find_handler(effect);
     if (!h) {
@@ -1387,4 +1451,860 @@ gn_value gn_perform(gn_effect_id effect, gn_op_id op,
     result = gn_apply(result, outer_k);
 
     return result;
+}
+
+/* ============================================================================
+ * Dictionary Operations (Association List Implementation)
+ *
+ * Dict is represented as TAG_DICT object with field[0] = list of (key, value) pairs.
+ * Each pair is a 2-field object: fields[0] = key (String), fields[1] = value.
+ * ============================================================================ */
+
+/* Helper: make a key-value pair tuple */
+static gn_value make_pair(gn_value key, gn_value value) {
+    gn_value fields[2] = {key, value};
+    return gn_alloc(0, 2, fields);  /* tag 0 for tuple */
+}
+
+/* Helper: compare two strings for equality */
+static bool string_equals(gn_value a, gn_value b) {
+    gn_object* oa = GN_OBJ(a);
+    gn_object* ob = GN_OBJ(b);
+    char* sa = (char*)oa->fields[0];
+    char* sb = (char*)ob->fields[0];
+    size_t la = (size_t)oa->fields[1];
+    size_t lb = (size_t)ob->fields[1];
+    if (la != lb) return false;
+    return memcmp(sa, sb, la) == 0;
+}
+
+/* Dict.new : () -> Dict a */
+gn_value gn_Dict_new(gn_value unit) {
+    (void)unit;
+    gn_value empty_list = gn_singleton(TAG_NIL);
+    return gn_alloc(TAG_DICT, 1, &empty_list);
+}
+
+/* Dict.insert : String -> a -> Dict a -> Dict a */
+gn_value gn_Dict_insert(gn_value key, gn_value value, gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    /* First, remove existing key if present (to update) */
+    gn_value new_pairs = gn_singleton(TAG_NIL);
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value pair_key = GN_OBJ(pair)->fields[0];
+        if (!string_equals(pair_key, key)) {
+            /* Keep this pair */
+            new_pairs = gn_list_cons(pair, new_pairs);
+        }
+        curr = GN_OBJ(curr)->fields[1];
+    }
+
+    /* Add the new key-value pair at the front */
+    gn_value new_pair = make_pair(key, value);
+    new_pairs = gn_list_cons(new_pair, new_pairs);
+
+    return gn_alloc(TAG_DICT, 1, &new_pairs);
+}
+
+/* Dict.get : String -> Dict a -> Option a */
+gn_value gn_Dict_get(gn_value key, gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value pair_key = GN_OBJ(pair)->fields[0];
+        if (string_equals(pair_key, key)) {
+            gn_value pair_value = GN_OBJ(pair)->fields[1];
+            return gn_some(pair_value);
+        }
+        curr = GN_OBJ(curr)->fields[1];
+    }
+    return gn_none();
+}
+
+/* Dict.remove : String -> Dict a -> Dict a */
+gn_value gn_Dict_remove(gn_value key, gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    gn_value new_pairs = gn_singleton(TAG_NIL);
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value pair_key = GN_OBJ(pair)->fields[0];
+        if (!string_equals(pair_key, key)) {
+            new_pairs = gn_list_cons(pair, new_pairs);
+        }
+        curr = GN_OBJ(curr)->fields[1];
+    }
+
+    return gn_alloc(TAG_DICT, 1, &new_pairs);
+}
+
+/* Dict.contains : String -> Dict a -> Bool */
+gn_value gn_Dict_contains(gn_value key, gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value pair_key = GN_OBJ(pair)->fields[0];
+        if (string_equals(pair_key, key)) {
+            return GN_TRUE;
+        }
+        curr = GN_OBJ(curr)->fields[1];
+    }
+    return GN_FALSE;
+}
+
+/* Dict.keys : Dict a -> [String] */
+gn_value gn_Dict_keys(gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    gn_value keys = gn_singleton(TAG_NIL);
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value pair_key = GN_OBJ(pair)->fields[0];
+        keys = gn_list_cons(pair_key, keys);
+        curr = GN_OBJ(curr)->fields[1];
+    }
+    return keys;
+}
+
+/* Dict.values : Dict a -> [a] */
+gn_value gn_Dict_values(gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    gn_value values = gn_singleton(TAG_NIL);
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value pair_value = GN_OBJ(pair)->fields[1];
+        values = gn_list_cons(pair_value, values);
+        curr = GN_OBJ(curr)->fields[1];
+    }
+    return values;
+}
+
+/* Dict.size : Dict a -> Int */
+gn_value gn_Dict_size(gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+
+    int64_t count = 0;
+    gn_value curr = pairs;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        count++;
+        curr = GN_OBJ(curr)->fields[1];
+    }
+    return GN_INT(count);
+}
+
+/* Dict.isEmpty : Dict a -> Bool */
+gn_value gn_Dict_isEmpty(gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    gn_value pairs = obj->fields[0];
+    return (GN_IS_INT(pairs) || GN_OBJ(pairs)->tag == TAG_NIL) ? GN_TRUE : GN_FALSE;
+}
+
+/* Dict.toList : Dict a -> [(String, a)] */
+gn_value gn_Dict_toList(gn_value dict) {
+    gn_object* obj = GN_OBJ(dict);
+    return obj->fields[0];  /* The internal representation is already a list of pairs */
+}
+
+/* Dict.fromList : [(String, a)] -> Dict a */
+gn_value gn_Dict_fromList(gn_value list) {
+    /* Just wrap the list in a Dict object */
+    /* Note: this assumes list contains valid (String, a) pairs */
+    return gn_alloc(TAG_DICT, 1, &list);
+}
+
+/* Dict.merge : Dict a -> Dict a -> Dict a (d2 values override d1) */
+gn_value gn_Dict_merge(gn_value d1, gn_value d2) {
+    gn_object* obj2 = GN_OBJ(d2);
+    gn_value pairs2 = obj2->fields[0];
+
+    /* Start with d1, then insert all pairs from d2 (which will overwrite) */
+    gn_value result = d1;
+    gn_value curr = pairs2;
+    while (!GN_IS_INT(curr) && GN_OBJ(curr)->tag == TAG_CONS) {
+        gn_value pair = GN_OBJ(curr)->fields[0];
+        gn_value key = GN_OBJ(pair)->fields[0];
+        gn_value value = GN_OBJ(pair)->fields[1];
+        result = gn_Dict_insert(key, value, result);
+        curr = GN_OBJ(curr)->fields[1];
+    }
+    return result;
+}
+
+/* Dict.getOrDefault : a -> String -> Dict a -> a */
+gn_value gn_Dict_getOrDefault(gn_value default_val, gn_value key, gn_value dict) {
+    gn_value result = gn_Dict_get(key, dict);
+    gn_object* obj = GN_OBJ(result);
+    if (obj->tag == TAG_SOME) {
+        return obj->fields[0];
+    }
+    return default_val;
+}
+
+/* ============================================================================
+ * Fiber Scheduler (Phase 1: Single-threaded Cooperative)
+ *
+ * Implements lightweight fibers with spawn/join/yield semantics.
+ * Fibers communicate via rendezvous channels.
+ * ============================================================================ */
+
+/* Global scheduler instance */
+static gn_scheduler g_scheduler = {0};
+
+/* Initial capacities */
+#define INITIAL_FIBER_CAPACITY   16
+#define INITIAL_QUEUE_CAPACITY   16
+#define INITIAL_CHANNEL_CAPACITY 8
+#define INITIAL_JOINER_CAPACITY  4
+
+/* ============================================================================
+ * Run Queue Operations (FIFO with growable circular buffer)
+ * ============================================================================ */
+
+static void run_queue_init(gn_run_queue* q) {
+    q->data = (gn_fiber**)malloc(INITIAL_QUEUE_CAPACITY * sizeof(gn_fiber*));
+    if (!q->data) {
+        gn_panic("out of memory initializing run queue");
+    }
+    q->head = 0;
+    q->count = 0;
+    q->capacity = INITIAL_QUEUE_CAPACITY;
+}
+
+static void run_queue_free(gn_run_queue* q) {
+    if (q->data) {
+        free(q->data);
+        q->data = NULL;
+    }
+    q->head = 0;
+    q->count = 0;
+    q->capacity = 0;
+}
+
+void gn_run_queue_push(gn_run_queue* q, gn_fiber* f) {
+    /* Grow if needed */
+    if (q->count == q->capacity) {
+        size_t new_capacity = q->capacity * 2;
+        gn_fiber** new_data = (gn_fiber**)malloc(new_capacity * sizeof(gn_fiber*));
+        if (!new_data) {
+            gn_panic("out of memory growing run queue");
+        }
+        /* Copy elements in order (unwrap circular buffer) */
+        for (size_t i = 0; i < q->count; i++) {
+            new_data[i] = q->data[(q->head + i) % q->capacity];
+        }
+        free(q->data);
+        q->data = new_data;
+        q->head = 0;
+        q->capacity = new_capacity;
+    }
+
+    /* Insert at tail */
+    size_t tail = (q->head + q->count) % q->capacity;
+    q->data[tail] = f;
+    q->count++;
+}
+
+gn_fiber* gn_run_queue_pop(gn_run_queue* q) {
+    if (q->count == 0) {
+        return NULL;
+    }
+    gn_fiber* f = q->data[q->head];
+    q->head = (q->head + 1) % q->capacity;
+    q->count--;
+    return f;
+}
+
+/* ============================================================================
+ * Fiber Operations
+ * ============================================================================ */
+
+gn_fiber* gn_fiber_create(gn_value thunk) {
+    gn_fiber* f = (gn_fiber*)malloc(sizeof(gn_fiber));
+    if (!f) {
+        gn_panic("out of memory creating fiber");
+    }
+
+    f->id = g_scheduler.next_fiber_id++;
+    f->state = FIBER_READY;
+    f->cont_kind = FIBER_CONT_START;
+    f->cont_value = thunk;
+    f->saved_k = GN_UNIT;
+    f->result = GN_UNIT;
+    f->join_target = NULL;
+    f->joiners = NULL;
+    f->joiner_count = 0;
+    f->joiner_capacity = 0;
+    f->blocked_channel = NULL;
+    f->send_value = GN_UNIT;
+
+    /* Track in scheduler's fiber array */
+    if (g_scheduler.fiber_count >= g_scheduler.fiber_capacity) {
+        size_t new_cap = g_scheduler.fiber_capacity * 2;
+        if (new_cap == 0) new_cap = INITIAL_FIBER_CAPACITY;
+        gn_fiber** new_arr = (gn_fiber**)realloc(
+            g_scheduler.all_fibers, new_cap * sizeof(gn_fiber*));
+        if (!new_arr) {
+            free(f);
+            gn_panic("out of memory growing fiber array");
+        }
+        g_scheduler.all_fibers = new_arr;
+        g_scheduler.fiber_capacity = new_cap;
+    }
+    g_scheduler.all_fibers[g_scheduler.fiber_count++] = f;
+
+    return f;
+}
+
+void gn_fiber_add_joiner(gn_fiber* target, gn_fiber* joiner) {
+    if (target->joiner_count >= target->joiner_capacity) {
+        size_t new_cap = target->joiner_capacity * 2;
+        if (new_cap == 0) new_cap = INITIAL_JOINER_CAPACITY;
+        gn_fiber** new_arr = (gn_fiber**)realloc(
+            target->joiners, new_cap * sizeof(gn_fiber*));
+        if (!new_arr) {
+            gn_panic("out of memory adding joiner");
+        }
+        target->joiners = new_arr;
+        target->joiner_capacity = new_cap;
+    }
+    target->joiners[target->joiner_count++] = joiner;
+}
+
+gn_value gn_make_fiber_handle(uint64_t id) {
+    gn_value fields[1] = { (gn_value)id };
+    return gn_alloc(TAG_FIBER_HANDLE, 1, fields);
+}
+
+uint64_t gn_get_fiber_id(gn_value handle) {
+    gn_object* obj = GN_OBJ(handle);
+    if (obj->tag != TAG_FIBER_HANDLE) {
+        gn_panic("get_fiber_id: not a fiber handle");
+    }
+    return (uint64_t)obj->fields[0];
+}
+
+static gn_fiber* get_fiber_by_id(uint64_t id) {
+    for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
+        if (g_scheduler.all_fibers[i]->id == id) {
+            return g_scheduler.all_fibers[i];
+        }
+    }
+    return NULL;
+}
+
+/* ============================================================================
+ * Channel Operations
+ * ============================================================================ */
+
+gn_channel* gn_channel_create(void) {
+    gn_channel* ch = (gn_channel*)malloc(sizeof(gn_channel));
+    if (!ch) {
+        gn_panic("out of memory creating channel");
+    }
+
+    ch->id = g_scheduler.next_channel_id++;
+    ch->waiting_senders = NULL;
+    ch->waiting_receivers = NULL;
+    ch->closed = false;
+
+    /* Track in scheduler */
+    if (g_scheduler.channel_count >= g_scheduler.channel_capacity) {
+        size_t new_cap = g_scheduler.channel_capacity * 2;
+        if (new_cap == 0) new_cap = INITIAL_CHANNEL_CAPACITY;
+        gn_channel** new_arr = (gn_channel**)realloc(
+            g_scheduler.all_channels, new_cap * sizeof(gn_channel*));
+        if (!new_arr) {
+            free(ch);
+            gn_panic("out of memory growing channel array");
+        }
+        g_scheduler.all_channels = new_arr;
+        g_scheduler.channel_capacity = new_cap;
+    }
+    g_scheduler.all_channels[g_scheduler.channel_count++] = ch;
+
+    return ch;
+}
+
+gn_channel* gn_get_channel(gn_value v) {
+    gn_object* obj = GN_OBJ(v);
+    if (obj->tag != TAG_CHANNEL) {
+        gn_panic("get_channel: not a channel handle");
+    }
+    uint64_t id = (uint64_t)obj->fields[0];
+
+    for (size_t i = 0; i < g_scheduler.channel_count; i++) {
+        if (g_scheduler.all_channels[i]->id == id) {
+            return g_scheduler.all_channels[i];
+        }
+    }
+    return NULL;
+}
+
+gn_value gn_make_channel_handle(gn_channel* ch) {
+    gn_value fields[1] = { (gn_value)ch->id };
+    return gn_alloc(TAG_CHANNEL, 1, fields);
+}
+
+/* ============================================================================
+ * Scheduler Initialization and Shutdown
+ * ============================================================================ */
+
+void gn_sched_init(void) {
+    g_scheduler.all_fibers = NULL;
+    g_scheduler.fiber_count = 0;
+    g_scheduler.fiber_capacity = 0;
+    g_scheduler.next_fiber_id = 1;
+
+    run_queue_init(&g_scheduler.ready_queue);
+
+    g_scheduler.current = NULL;
+    g_scheduler.main_fiber = NULL;
+
+    g_scheduler.all_channels = NULL;
+    g_scheduler.channel_count = 0;
+    g_scheduler.channel_capacity = 0;
+    g_scheduler.next_channel_id = 1;
+}
+
+void gn_sched_shutdown(void) {
+    /* Free all fibers */
+    for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
+        gn_fiber* f = g_scheduler.all_fibers[i];
+        if (f->joiners) {
+            free(f->joiners);
+        }
+        free(f);
+    }
+    if (g_scheduler.all_fibers) {
+        free(g_scheduler.all_fibers);
+    }
+
+    /* Free all channels and their waiter lists */
+    for (size_t i = 0; i < g_scheduler.channel_count; i++) {
+        gn_channel* ch = g_scheduler.all_channels[i];
+        gn_waiter* w = ch->waiting_senders;
+        while (w) {
+            gn_waiter* next = w->next;
+            free(w);
+            w = next;
+        }
+        w = ch->waiting_receivers;
+        while (w) {
+            gn_waiter* next = w->next;
+            free(w);
+            w = next;
+        }
+        free(ch);
+    }
+    if (g_scheduler.all_channels) {
+        free(g_scheduler.all_channels);
+    }
+
+    run_queue_free(&g_scheduler.ready_queue);
+
+    /* Zero out scheduler state */
+    memset(&g_scheduler, 0, sizeof(g_scheduler));
+}
+
+/* ============================================================================
+ * Async Effect Handler
+ *
+ * Handles built-in async operations: spawn, join, yield, chan_new, send, recv
+ * ============================================================================ */
+
+gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value cont) {
+    gn_fiber* current = g_scheduler.current;
+
+    switch (op) {
+        case ASYNC_OP_SPAWN: {
+            /* spawn(thunk) -> FiberHandle */
+            if (n_args < 1) {
+                gn_panic("spawn requires a thunk argument");
+            }
+            gn_value thunk = args[0];
+
+            gn_fiber* child = gn_fiber_create(thunk);
+            gn_run_queue_push(&g_scheduler.ready_queue, child);
+
+            gn_value handle = gn_make_fiber_handle(child->id);
+
+            /* Resume caller with the handle */
+            current->cont_kind = FIBER_CONT_RESUME;
+            current->cont_value = handle;
+            current->saved_k = cont;
+            gn_run_queue_push(&g_scheduler.ready_queue, current);
+
+            return GN_UNIT;  /* Scheduler will pick next fiber */
+        }
+
+        case ASYNC_OP_JOIN: {
+            /* join(handle) -> result */
+            if (n_args < 1) {
+                gn_panic("join requires a fiber handle");
+            }
+            uint64_t id = gn_get_fiber_id(args[0]);
+            gn_fiber* target = get_fiber_by_id(id);
+
+            if (!target) {
+                gn_panic("join: fiber not found");
+            }
+
+            if (target->state == FIBER_COMPLETED) {
+                /* Already done - resume with result */
+                current->cont_kind = FIBER_CONT_RESUME;
+                current->cont_value = target->result;
+                current->saved_k = cont;
+                gn_run_queue_push(&g_scheduler.ready_queue, current);
+            } else {
+                /* Block waiting for target */
+                current->state = FIBER_BLOCKED_JOIN;
+                current->join_target = target;
+                current->saved_k = cont;
+                gn_fiber_add_joiner(target, current);
+                /* Don't enqueue - we're blocked */
+            }
+
+            return GN_UNIT;
+        }
+
+        case ASYNC_OP_YIELD: {
+            /* yield() -> () - voluntarily give up the CPU */
+            current->cont_kind = FIBER_CONT_RESUME;
+            current->cont_value = GN_UNIT;
+            current->saved_k = cont;
+            /* Re-enqueue at back of queue */
+            gn_run_queue_push(&g_scheduler.ready_queue, current);
+
+            return GN_UNIT;
+        }
+
+        case ASYNC_OP_CHAN_NEW: {
+            /* Channel.new() -> Channel */
+            gn_channel* ch = gn_channel_create();
+            gn_value handle = gn_make_channel_handle(ch);
+
+            current->cont_kind = FIBER_CONT_RESUME;
+            current->cont_value = handle;
+            current->saved_k = cont;
+            gn_run_queue_push(&g_scheduler.ready_queue, current);
+
+            return GN_UNIT;
+        }
+
+        case ASYNC_OP_SEND: {
+            /* send(channel, value) -> () */
+            if (n_args < 2) {
+                gn_panic("send requires channel and value");
+            }
+            gn_channel* ch = gn_get_channel(args[0]);
+            gn_value value = args[1];
+
+            if (!ch) {
+                gn_panic("send: invalid channel");
+            }
+
+            /* Check for waiting receiver (rendezvous) */
+            if (ch->waiting_receivers) {
+                gn_waiter* recv = ch->waiting_receivers;
+                ch->waiting_receivers = recv->next;
+
+                gn_fiber* receiver = recv->fiber;
+                free(recv);
+
+                /* Wake receiver with value */
+                receiver->state = FIBER_READY;
+                receiver->cont_kind = FIBER_CONT_RESUME;
+                receiver->cont_value = value;
+                gn_run_queue_push(&g_scheduler.ready_queue, receiver);
+
+                /* Sender continues with unit */
+                current->cont_kind = FIBER_CONT_RESUME;
+                current->cont_value = GN_UNIT;
+                current->saved_k = cont;
+                gn_run_queue_push(&g_scheduler.ready_queue, current);
+            } else {
+                /* Block sender until receiver arrives */
+                gn_waiter* w = (gn_waiter*)malloc(sizeof(gn_waiter));
+                if (!w) gn_panic("out of memory");
+                w->fiber = current;
+                w->value = value;
+                w->next = ch->waiting_senders;
+                ch->waiting_senders = w;
+
+                current->state = FIBER_BLOCKED_SEND;
+                current->blocked_channel = ch;
+                current->send_value = value;
+                current->saved_k = cont;
+                /* Don't enqueue - we're blocked */
+            }
+
+            return GN_UNIT;
+        }
+
+        case ASYNC_OP_RECV: {
+            /* recv(channel) -> value */
+            if (n_args < 1) {
+                gn_panic("recv requires a channel");
+            }
+            gn_channel* ch = gn_get_channel(args[0]);
+
+            if (!ch) {
+                gn_panic("recv: invalid channel");
+            }
+
+            /* Check for waiting sender (rendezvous) */
+            if (ch->waiting_senders) {
+                gn_waiter* send = ch->waiting_senders;
+                ch->waiting_senders = send->next;
+
+                gn_fiber* sender = send->fiber;
+                gn_value value = send->value;
+                free(send);
+
+                /* Wake sender with unit (send completed) */
+                sender->state = FIBER_READY;
+                sender->cont_kind = FIBER_CONT_RESUME;
+                sender->cont_value = GN_UNIT;
+                gn_run_queue_push(&g_scheduler.ready_queue, sender);
+
+                /* Receiver continues with value */
+                current->cont_kind = FIBER_CONT_RESUME;
+                current->cont_value = value;
+                current->saved_k = cont;
+                gn_run_queue_push(&g_scheduler.ready_queue, current);
+            } else {
+                /* Block receiver until sender arrives */
+                gn_waiter* w = (gn_waiter*)malloc(sizeof(gn_waiter));
+                if (!w) gn_panic("out of memory");
+                w->fiber = current;
+                w->value = GN_UNIT;  /* Not used for receivers */
+                w->next = ch->waiting_receivers;
+                ch->waiting_receivers = w;
+
+                current->state = FIBER_BLOCKED_RECV;
+                current->blocked_channel = ch;
+                current->saved_k = cont;
+                /* Don't enqueue - we're blocked */
+            }
+
+            return GN_UNIT;
+        }
+
+        default:
+            fprintf(stderr, "unknown async op: %u\n", op);
+            gn_panic("unknown async operation");
+            return GN_UNIT;
+    }
+}
+
+/* ============================================================================
+ * Main Scheduler Loop
+ * ============================================================================ */
+
+static gn_value run_fiber_step(gn_fiber* f) {
+    g_scheduler.current = f;
+    f->state = FIBER_RUNNING;
+
+    gn_value result;
+
+    if (f->cont_kind == FIBER_CONT_START) {
+        /* Initial spawn - call thunk with unit argument */
+        gn_value thunk = f->cont_value;
+        result = gn_apply(thunk, GN_UNIT);
+    } else {
+        /* Resume with value */
+        gn_value k = f->saved_k;
+        gn_value val = f->cont_value;
+        result = gn_resume_multi(k, val);
+    }
+
+    return result;
+}
+
+/* ============================================================================
+ * Fiber/Channel Wrapper Functions (Non-CPS path)
+ *
+ * These wrappers allow Fiber/Channel to be used from non-CPS code.
+ * They run fibers synchronously (no interleaving) - useful for simple cases.
+ * ============================================================================ */
+
+gn_value gn_Fiber_spawn(gn_value thunk) {
+    /*
+     * Synchronous spawn: create fiber and run it immediately.
+     * The thunk is executed inline and its result stored.
+     * Returns a fiber handle that can be joined.
+     */
+    gn_fiber* f = gn_fiber_create(thunk);
+
+    /* Run the thunk synchronously */
+    gn_value result = gn_apply(thunk, GN_UNIT);
+    f->state = FIBER_COMPLETED;
+    f->result = result;
+
+    return gn_make_fiber_handle(f->id);
+}
+
+gn_value gn_Fiber_join(gn_value handle) {
+    /*
+     * Synchronous join: get the result of a fiber.
+     * For synchronously-spawned fibers, the result is already available.
+     */
+    uint64_t id = gn_get_fiber_id(handle);
+    gn_fiber* f = NULL;
+
+    for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
+        if (g_scheduler.all_fibers[i]->id == id) {
+            f = g_scheduler.all_fibers[i];
+            break;
+        }
+    }
+
+    if (!f) {
+        gn_panic("Fiber.join: fiber not found");
+    }
+
+    if (f->state != FIBER_COMPLETED) {
+        gn_panic("Fiber.join: fiber not completed (deadlock in synchronous mode)");
+    }
+
+    return f->result;
+}
+
+gn_value gn_Fiber_yield(gn_value unit) {
+    /* In synchronous mode, yield is a no-op */
+    (void)unit;
+    return GN_UNIT;
+}
+
+gn_value gn_Channel_new(gn_value unit) {
+    (void)unit;
+    gn_channel* ch = gn_channel_create();
+    return gn_make_channel_handle(ch);
+}
+
+gn_value gn_Channel_send(gn_value handle, gn_value value) {
+    /*
+     * Synchronous send: in non-CPS mode, send blocks until recv.
+     * Since we run fibers sequentially, this will deadlock if recv isn't ready.
+     * For now, just store the value (assuming recv will be called on same channel).
+     */
+    gn_channel* ch = gn_get_channel(handle);
+    if (!ch) {
+        gn_panic("Channel.send: invalid channel");
+    }
+
+    /* Create a waiter with the value */
+    gn_waiter* w = (gn_waiter*)malloc(sizeof(gn_waiter));
+    if (!w) gn_panic("out of memory");
+    w->fiber = NULL;  /* No fiber in sync mode */
+    w->value = value;
+    w->next = ch->waiting_senders;
+    ch->waiting_senders = w;
+
+    return GN_UNIT;
+}
+
+gn_value gn_Channel_recv(gn_value handle) {
+    /*
+     * Synchronous recv: get value from waiting sender.
+     */
+    gn_channel* ch = gn_get_channel(handle);
+    if (!ch) {
+        gn_panic("Channel.recv: invalid channel");
+    }
+
+    if (!ch->waiting_senders) {
+        gn_panic("Channel.recv: no sender (deadlock in synchronous mode)");
+    }
+
+    gn_waiter* w = ch->waiting_senders;
+    ch->waiting_senders = w->next;
+    gn_value value = w->value;
+    free(w);
+
+    return value;
+}
+
+/* ============================================================================
+ * Main Scheduler Loop
+ * ============================================================================ */
+
+gn_value gn_sched_run(gn_value main_thunk) {
+    /* Create main fiber */
+    gn_fiber* main_f = gn_fiber_create(main_thunk);
+    g_scheduler.main_fiber = main_f;
+    gn_run_queue_push(&g_scheduler.ready_queue, main_f);
+
+    /* Main scheduler loop */
+    while (true) {
+        gn_fiber* f = gn_run_queue_pop(&g_scheduler.ready_queue);
+
+        if (!f) {
+            /* No ready fibers - check for deadlock */
+            if (g_scheduler.main_fiber->state != FIBER_COMPLETED) {
+                /* Main fiber blocked but nothing to run = deadlock */
+                bool has_blocked = false;
+                for (size_t i = 0; i < g_scheduler.fiber_count; i++) {
+                    gn_fiber_state st = g_scheduler.all_fibers[i]->state;
+                    if (st == FIBER_BLOCKED_JOIN ||
+                        st == FIBER_BLOCKED_SEND ||
+                        st == FIBER_BLOCKED_RECV) {
+                        has_blocked = true;
+                        break;
+                    }
+                }
+                if (has_blocked) {
+                    gn_panic("deadlock: all fibers blocked");
+                }
+            }
+            break;
+        }
+
+        /* Run the fiber until it yields, blocks, or completes */
+        gn_value result = run_fiber_step(f);
+
+        /* Check if fiber completed (returned without suspending) */
+        if (f->state == FIBER_RUNNING) {
+            /* Fiber returned normally - it's done */
+            f->state = FIBER_COMPLETED;
+            f->result = result;
+
+            /* Wake any joiners */
+            for (size_t i = 0; i < f->joiner_count; i++) {
+                gn_fiber* joiner = f->joiners[i];
+                joiner->state = FIBER_READY;
+                joiner->cont_kind = FIBER_CONT_RESUME;
+                joiner->cont_value = result;
+                gn_run_queue_push(&g_scheduler.ready_queue, joiner);
+            }
+            f->joiner_count = 0;
+
+            /* If main fiber completed, we're done */
+            if (f == g_scheduler.main_fiber) {
+                return result;
+            }
+        }
+        /* Otherwise fiber suspended itself via EFFECT_ASYNC handlers */
+    }
+
+    /* Main fiber completed (picked up above) */
+    return g_scheduler.main_fiber->result;
 }

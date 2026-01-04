@@ -407,7 +407,7 @@ impl CEmitter {
 
         // Register builtin function mappings from the program
         for (var_id, name) in &program.builtins {
-            let c_name = format!("gn_{}", name);
+            let c_name = format!("gn_{}", mangle_name(name));
             self.top_level_funcs.insert(*var_id, c_name);
             // Builtins generally have at least 1 arg, so don't mark as 0-arity
         }
@@ -1758,8 +1758,8 @@ impl CEmitter {
             PrimOp::IntAdd => format!("GN_INT_ADD({}, {})", args_str[0], args_str[1]),
             PrimOp::IntSub => format!("GN_INT_SUB({}, {})", args_str[0], args_str[1]),
             PrimOp::IntMul => format!("GN_INT_MUL({}, {})", args_str[0], args_str[1]),
-            PrimOp::IntDiv => format!("GN_INT_DIV({}, {})", args_str[0], args_str[1]),
-            PrimOp::IntMod => format!("GN_INT_MOD({}, {})", args_str[0], args_str[1]),
+            PrimOp::IntDiv => format!("gn_int_div({}, {})", args_str[0], args_str[1]),
+            PrimOp::IntMod => format!("gn_int_mod({}, {})", args_str[0], args_str[1]),
             PrimOp::IntNeg => format!("GN_INT_NEG({})", args_str[0]),
 
             // Arithmetic (Float)
@@ -2122,6 +2122,7 @@ fn mangle_name(name: &str) -> String {
             'a'..='z' | 'A'..='Z' | '0'..='9' => result.push(c),
             '_' => result.push('_'),
             '\'' => result.push_str("_prime"),
+            '.' => result.push('_'), // Dict.new -> Dict_new
             _ => result.push_str(&format!("_u{:04x}_", c as u32)),
         }
     }

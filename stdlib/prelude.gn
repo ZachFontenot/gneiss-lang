@@ -461,6 +461,19 @@ let is_err res = match res with | Err _ -> true | Ok _ -> false end
 -- Exit the program with an error message. Never returns.
 let panic msg = panic_str msg
 
+-- Unsafe list operations that panic on empty list (for when list is known non-empty)
+let head_unsafe xs =
+    match xs with
+    | [] -> panic "head of empty list"
+    | x :: _ -> x
+    end
+
+let tail_unsafe xs =
+    match xs with
+    | [] -> panic "tail of empty list"
+    | _ :: rest -> rest
+    end
+
 -- assert_eq : a -> a -> () where a : Eq, Show
 -- Assert that two values are equal. Panics with a message showing both values if not.
 let assert_eq x y =

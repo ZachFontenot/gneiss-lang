@@ -71,9 +71,21 @@ typedef struct gn_object {
 #define GN_INT_ADD(a, b)  GN_INT(GN_UNINT(a) + GN_UNINT(b))
 #define GN_INT_SUB(a, b)  GN_INT(GN_UNINT(a) - GN_UNINT(b))
 #define GN_INT_MUL(a, b)  GN_INT(GN_UNINT(a) * GN_UNINT(b))
-#define GN_INT_DIV(a, b)  GN_INT(GN_UNINT(a) / GN_UNINT(b))
-#define GN_INT_MOD(a, b)  GN_INT(GN_UNINT(a) % GN_UNINT(b))
 #define GN_INT_NEG(a)     GN_INT(-GN_UNINT(a))
+
+/* Division and modulo - panic with clear message on zero divisor */
+gn_value gn_int_div(gn_value a, gn_value b);
+gn_value gn_int_mod(gn_value a, gn_value b);
+
+/* Safe division/modulo - return Result Int String */
+gn_value gn_safe_div(gn_value a, gn_value b);
+gn_value gn_safe_mod(gn_value a, gn_value b);
+
+/* Helper to create Result types */
+gn_value gn_ok(gn_value v);
+gn_value gn_err(gn_value v);
+gn_value gn_some(gn_value v);
+gn_value gn_none(void);
 
 /* ============================================================================
  * Integer Comparison
@@ -190,6 +202,159 @@ gn_value gn_make_closure(void* fn, uint32_t arity, uint32_t n_captures, gn_value
 gn_value gn_apply(gn_value closure, gn_value arg);
 gn_value gn_apply2(gn_value closure, gn_value arg1, gn_value arg2);
 
+/* Dictionary operations (association list) */
+gn_value gn_Dict_new(gn_value unit);
+gn_value gn_Dict_insert(gn_value key, gn_value value, gn_value dict);
+gn_value gn_Dict_get(gn_value key, gn_value dict);
+gn_value gn_Dict_remove(gn_value key, gn_value dict);
+gn_value gn_Dict_contains(gn_value key, gn_value dict);
+gn_value gn_Dict_keys(gn_value dict);
+gn_value gn_Dict_values(gn_value dict);
+gn_value gn_Dict_size(gn_value dict);
+gn_value gn_Dict_isEmpty(gn_value dict);
+gn_value gn_Dict_toList(gn_value dict);
+gn_value gn_Dict_fromList(gn_value list);
+gn_value gn_Dict_merge(gn_value d1, gn_value d2);
+gn_value gn_Dict_getOrDefault(gn_value default_val, gn_value key, gn_value dict);
+
+/* ============================================================================
+ * Fiber Scheduler (Cooperative Concurrency)
+ *
+ * Single-threaded cooperative scheduler for fibers (lightweight processes).
+ * Fibers communicate via rendezvous channels and effects.
+ * ============================================================================ */
+
+/* Forward declaration for effect types (defined below) */
+typedef uint32_t gn_op_id;
+
+/* Tags for fiber-related values */
+#define TAG_FIBER_HANDLE 0xFFFF0010
+#define TAG_CHANNEL      0xFFFF0011
+
+/* Special effect ID for built-in async operations */
+#define EFFECT_ASYNC     0xFFFFFFFF
+
+/* Async operation IDs */
+#define ASYNC_OP_SPAWN   0
+#define ASYNC_OP_JOIN    1
+#define ASYNC_OP_YIELD   2
+#define ASYNC_OP_CHAN_NEW 3
+#define ASYNC_OP_SEND    4
+#define ASYNC_OP_RECV    5
+
+/* Fiber states */
+typedef enum {
+    FIBER_READY,           /* In run queue, ready to execute */
+    FIBER_RUNNING,         /* Currently executing */
+    FIBER_BLOCKED_JOIN,    /* Waiting for another fiber to complete */
+    FIBER_BLOCKED_SEND,    /* Waiting to send on channel */
+    FIBER_BLOCKED_RECV,    /* Waiting to receive on channel */
+    FIBER_COMPLETED,       /* Done, has result */
+    FIBER_ABORTED          /* Failed */
+} gn_fiber_state;
+
+/* How to resume a fiber */
+typedef enum {
+    FIBER_CONT_START,      /* Initial spawn, run thunk */
+    FIBER_CONT_RESUME      /* Resume with value */
+} gn_fiber_cont_kind;
+
+/* Forward declarations */
+struct gn_fiber;
+struct gn_channel;
+
+/* Fiber structure */
+typedef struct gn_fiber {
+    uint64_t id;
+    gn_fiber_state state;
+    gn_fiber_cont_kind cont_kind;
+    gn_value cont_value;           /* Thunk (START) or resume value (RESUME) */
+    gn_value saved_k;              /* CPS continuation with handler context */
+    gn_value result;               /* Result when COMPLETED */
+
+    /* For join semantics */
+    struct gn_fiber* join_target;  /* Fiber we're waiting to join */
+    struct gn_fiber** joiners;     /* Fibers waiting for us to complete */
+    size_t joiner_count;
+    size_t joiner_capacity;
+
+    /* For channel blocking */
+    struct gn_channel* blocked_channel;
+    gn_value send_value;           /* Value being sent (for blocked senders) */
+} gn_fiber;
+
+/* Growable run queue (FIFO) */
+typedef struct gn_run_queue {
+    gn_fiber** data;
+    size_t head;                   /* Index of first element */
+    size_t count;                  /* Number of elements */
+    size_t capacity;               /* Allocated size (doubles when full) */
+} gn_run_queue;
+
+/* Channel waiter (for blocking send/recv) */
+typedef struct gn_waiter {
+    gn_fiber* fiber;
+    gn_value value;                /* For senders: value to send */
+    struct gn_waiter* next;
+} gn_waiter;
+
+/* Channel (rendezvous - no buffer) */
+typedef struct gn_channel {
+    uint64_t id;
+    gn_waiter* waiting_senders;
+    gn_waiter* waiting_receivers;
+    bool closed;
+} gn_channel;
+
+/* Scheduler state */
+typedef struct gn_scheduler {
+    gn_fiber** all_fibers;         /* Array of all fibers by ID */
+    size_t fiber_count;
+    size_t fiber_capacity;
+    uint64_t next_fiber_id;
+
+    gn_run_queue ready_queue;
+    gn_fiber* current;             /* Currently executing fiber */
+    gn_fiber* main_fiber;          /* Main fiber (for final result) */
+
+    /* Channel tracking */
+    gn_channel** all_channels;
+    size_t channel_count;
+    size_t channel_capacity;
+    uint64_t next_channel_id;
+} gn_scheduler;
+
+/* Scheduler API */
+void gn_sched_init(void);
+void gn_sched_shutdown(void);
+gn_value gn_sched_run(gn_value main_thunk);
+
+/* Fiber operations */
+gn_fiber* gn_fiber_create(gn_value thunk);
+void gn_fiber_add_joiner(gn_fiber* target, gn_fiber* joiner);
+gn_value gn_make_fiber_handle(uint64_t id);
+uint64_t gn_get_fiber_id(gn_value handle);
+
+/* Run queue operations */
+void gn_run_queue_push(gn_run_queue* q, gn_fiber* f);
+gn_fiber* gn_run_queue_pop(gn_run_queue* q);
+
+/* Channel operations */
+gn_channel* gn_channel_create(void);
+gn_channel* gn_get_channel(gn_value v);
+gn_value gn_make_channel_handle(gn_channel* ch);
+
+/* Async effect handler (called by gn_perform for EFFECT_ASYNC) */
+gn_value gn_handle_async(gn_op_id op, uint32_t n_args, gn_value* args, gn_value cont);
+
+/* Fiber/Channel wrapper functions (non-CPS synchronous mode) */
+gn_value gn_Fiber_spawn(gn_value thunk);
+gn_value gn_Fiber_join(gn_value handle);
+gn_value gn_Fiber_yield(gn_value unit);
+gn_value gn_Channel_new(gn_value unit);
+gn_value gn_Channel_send(gn_value handle, gn_value value);
+gn_value gn_Channel_recv(gn_value handle);
+
 /* ============================================================================
  * Algebraic Effects Runtime Support
  *
@@ -199,7 +364,7 @@ gn_value gn_apply2(gn_value closure, gn_value arg1, gn_value arg2);
 
 /* Effect and operation identifiers */
 typedef uint32_t gn_effect_id;
-typedef uint32_t gn_op_id;
+/* gn_op_id is forward-declared in scheduler section above */
 
 /* Handler structure - installed when entering a 'handle' block */
 typedef struct gn_handler {

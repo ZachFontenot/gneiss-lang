@@ -260,6 +260,8 @@ fn register_builtins(ctx: &mut LowerMonoCtx) {
         "io_read_line",
         // Integers
         "int_to_string",
+        "safe_div",
+        "safe_mod",
         // Strings
         "string_length",
         "string_concat",

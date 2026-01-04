@@ -3459,6 +3459,30 @@ impl Inferencer {
             Scheme::mono(Type::arrow(Type::Int, Type::String)),
         );
 
+        // safe_div : Int -> Int -> Result String Int
+        // Returns Err "division by zero" on zero divisor
+        let result_string_int = Type::Constructor {
+            name: "Result".to_string(),
+            args: vec![Type::String, Type::Int],
+        };
+        env.insert(
+            "safe_div".into(),
+            Scheme::mono(Type::arrow(
+                Type::Int,
+                Type::arrow(Type::Int, result_string_int.clone()),
+            )),
+        );
+
+        // safe_mod : Int -> Int -> Result String Int
+        // Returns Err "modulo by zero" on zero divisor
+        env.insert(
+            "safe_mod".into(),
+            Scheme::mono(Type::arrow(
+                Type::Int,
+                Type::arrow(Type::Int, result_string_int),
+            )),
+        );
+
         // string_to_int : String -> Int (parses decimal string)
         env.insert(
             "string_to_int".into(),
@@ -3829,6 +3853,46 @@ impl Inferencer {
             },
         };
         env.insert("Fiber.yield".into(), fiber_yield_scheme);
+
+        // Channel.new : forall a. () -> Channel a
+        let channel_new_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Unit),
+                ret: Rc::new(Type::Channel(Rc::new(Type::new_generic(0)))),
+                effects: Row::Empty, // TODO: should have Async effect
+            },
+        };
+        env.insert("Channel.new".into(), channel_new_scheme);
+
+        // Channel.send : forall a. Channel a -> a -> ()
+        let channel_send_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Channel(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::Arrow {
+                    arg: Rc::new(Type::new_generic(0)),
+                    ret: Rc::new(Type::Unit),
+                    effects: Row::Empty,
+                }),
+                effects: Row::Empty, // TODO: should have Async effect
+            },
+        };
+        env.insert("Channel.send".into(), channel_send_scheme);
+
+        // Channel.recv : forall a. Channel a -> a
+        let channel_recv_scheme = Scheme {
+            num_generics: 1,
+            predicates: vec![],
+            ty: Type::Arrow {
+                arg: Rc::new(Type::Channel(Rc::new(Type::new_generic(0)))),
+                ret: Rc::new(Type::new_generic(0)),
+                effects: Row::Empty, // TODO: should have Async effect
+            },
+        };
+        env.insert("Channel.recv".into(), channel_recv_scheme);
 
         // Dict.new : forall a. () -> Dict a
         let dict_new_scheme = Scheme {
