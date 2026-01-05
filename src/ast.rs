@@ -5,7 +5,7 @@ use std::rc::Rc;
 pub type Ident = String;
 
 /// Source location for error reporting
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod blocking_pool;
+pub mod elaborate;
 pub mod errors;
 pub mod eval;
 pub mod infer;
@@ -13,6 +14,7 @@ pub mod parser;
 pub mod prelude;
 pub mod runtime;
 pub mod test_support;
+pub mod typed_ast;
 pub mod types;
 
 pub use ast::{LocatedSpan, Position, Program, SourceMap, Span};

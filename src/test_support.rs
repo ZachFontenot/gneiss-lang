@@ -79,6 +79,42 @@ pub fn typecheck_program(input: &str) -> Result<(Program, TypeEnv), String> {
 }
 
 // ============================================================================
+// Typed AST Elaboration
+// ============================================================================
+
+use crate::typed_ast::{TExpr, TProgram};
+
+/// Parse, type-check, and elaborate a program into a typed AST.
+/// Returns the typed AST, type environment, and inferencer for inspection.
+pub fn elaborate_program(input: &str) -> Result<(TProgram, TypeEnv, Inferencer), String> {
+    let program = parse_program(input)?;
+    let mut inferencer = Inferencer::new();
+    let env = inferencer
+        .infer_program(&program)
+        .map_err(|e| format!("Type error: {:?}", e))?;
+    let tprogram = inferencer.elaborate_program(&program, &env);
+    Ok((tprogram, env, inferencer))
+}
+
+/// Parse, type-check, and elaborate an expression into a typed expression.
+/// Returns the typed expression and the inferred type.
+pub fn elaborate_expr(input: &str) -> Result<(TExpr, Type), String> {
+    let expr = parse_expr(input)?;
+    let mut inferencer = Inferencer::new();
+    let env = TypeEnv::new();
+    let ty = inferencer
+        .infer_expr(&env, &expr)
+        .map_err(|e| format!("Type error: {:?}", e))?;
+    let texpr = inferencer.elaborate_expr(&expr, &env);
+    Ok((texpr, ty))
+}
+
+/// Get the type recorded for a specific span in an expression
+pub fn get_expr_type_at_span<'a>(inferencer: &'a Inferencer, span: &crate::ast::Span) -> Option<&'a Type> {
+    inferencer.get_expr_type(span)
+}
+
+// ============================================================================
 // Evaluation Tracing
 // ============================================================================
 

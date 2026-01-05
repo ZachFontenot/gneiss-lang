@@ -392,3 +392,30 @@ let main () =
         run_program_ok(program);
     }
 }
+
+// ============================================================================
+// Inspection: show_test.gn structure
+// ============================================================================
+
+#[test]
+fn inspect_show_test_structure() {
+    let program = r#"
+let main _ =
+    let f x = show x in
+        print (f "string");
+        print (f 42);
+        print (1 == 1);
+        print ( "string" == "string" )
+"#;
+
+    let result = typecheck_program(program);
+    assert!(result.is_ok(), "should typecheck: {:?}", result);
+    
+    // The key question: does `f` have the right polymorphic type?
+    // f should be: forall a. Show a => a -> String
+    // When called with "string", it should instantiate a = String
+    // When called with 42, it should instantiate a = Int
+    
+    // If this runs correctly, both calls work
+    run_program_ok(program);
+}

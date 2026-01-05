@@ -283,6 +283,13 @@ pub struct Inferencer {
     used_module_aliases: HashSet<String>,
     /// Accumulated type errors (for multi-error reporting)
     errors: Vec<TypeError>,
+    /// Types inferred for each expression, keyed by span
+    /// This enables building a typed AST after inference
+    pub(crate) expr_types: HashMap<Span, Type>,
+    /// Schemes assigned to let bindings, keyed by span
+    pub(crate) binding_schemes: HashMap<Span, Scheme>,
+    /// Predicates generated when instantiating variables
+    pub(crate) var_preds: HashMap<Span, Vec<Pred>>,
 }
 
 impl Inferencer {
@@ -301,6 +308,9 @@ impl Inferencer {
             used_imports: HashSet::new(),
             used_module_aliases: HashSet::new(),
             errors: Vec::new(),
+            expr_types: HashMap::new(),
+            binding_schemes: HashMap::new(),
+            var_preds: HashMap::new(),
         }
     }
 
@@ -842,6 +852,16 @@ impl Inferencer {
     ///
     /// The resulting row contains all effects from both inputs.
     /// Row variables are preserved with fresh tails for polymorphism.
+    /// Check if an effect (by name) is already present in a row
+    fn row_contains_effect(&self, row: &Row, effect_name: &str) -> bool {
+        match row {
+            Row::Empty | Row::Var(_) | Row::Generic(_) => false,
+            Row::Extend { effect, rest } => {
+                effect.name == effect_name || self.row_contains_effect(rest, effect_name)
+            }
+        }
+    }
+
     pub fn union_rows(&mut self, r1: &Row, r2: &Row) -> Row {
         let r1 = r1.resolve(&self.row_uf);
         let r2 = r2.resolve(&self.row_uf);
@@ -851,11 +871,19 @@ impl Inferencer {
             (Row::Empty, _) => r2.clone(),
             (_, Row::Empty) => r1.clone(),
 
-            // Extend: prepend effect and recurse
-            (Row::Extend { effect, rest }, other) => Row::Extend {
-                effect: effect.clone(),
-                rest: Rc::new(self.union_rows(rest, other)),
-            },
+            // Extend: prepend effect only if not already present, then recurse
+            (Row::Extend { effect, rest }, other) => {
+                // Check if this effect is already in 'other' to avoid duplicates
+                if self.row_contains_effect(other, &effect.name) {
+                    // Effect already present, just recurse without adding
+                    self.union_rows(rest, other)
+                } else {
+                    Row::Extend {
+                        effect: effect.clone(),
+                        rest: Rc::new(self.union_rows(rest, other)),
+                    }
+                }
+            }
 
             // Two row variables: create a fresh var that represents their union
             // The actual constraints will be resolved during later unification
@@ -1047,14 +1075,22 @@ impl Inferencer {
         self.wanted_preds = remaining;
 
         // Convert captured predicates to use Generic type vars
-        let preds = captured
+        let preds: Vec<_> = captured
             .into_iter()
             .map(|pred| Self::apply_generic_subst_to_pred_static(&pred, &generics, self.level, &self.type_uf, &self.row_uf))
             .collect();
 
+        // Deduplicate predicates (e.g., Show a appearing twice should become one)
+        let mut deduped_preds = Vec::with_capacity(preds.len());
+        for pred in preds {
+            if !deduped_preds.contains(&pred) {
+                deduped_preds.push(pred);
+            }
+        }
+
         Scheme {
             num_generics: generics.len() as u32,
-            predicates: preds,
+            predicates: deduped_preds,
             ty: generalized,
         }
     }
@@ -1409,11 +1445,35 @@ impl Inferencer {
         Ok(result.ty.resolve(&self.type_uf))
     }
 
+    /// Infer an expression and record its type for later elaboration.
+    /// This is the main entry point that should be used when building typed AST.
+    fn infer_expr_recording(
+        &mut self,
+        env: &TypeEnv,
+        expr: &Expr,
+    ) -> Result<InferResult, TypeError> {
+        let result = self.infer_expr_full_impl(env, expr)?;
+        // Record the resolved type for elaboration
+        let resolved_ty = result.ty.resolve(&self.type_uf);
+        self.expr_types.insert(expr.span.clone(), resolved_ty);
+        Ok(result)
+    }
+
     /// Infer a single expression with full effect tracking.
     /// Returns InferResult with ty and effects row.
     /// Pure expressions have an empty effect row (Row::Empty).
     /// Effectful expressions accumulate effects in the row.
     pub fn infer_expr_full(
+        &mut self,
+        env: &TypeEnv,
+        expr: &Expr,
+    ) -> Result<InferResult, TypeError> {
+        // Delegate to recording version so types are captured
+        self.infer_expr_recording(env, expr)
+    }
+
+    /// Internal implementation of expression inference.
+    fn infer_expr_full_impl(
         &mut self,
         env: &TypeEnv,
         expr: &Expr,
@@ -1617,6 +1677,9 @@ impl Inferencer {
                     }
                 };
 
+                // Record the scheme for elaboration (inner let bindings need this)
+                self.binding_schemes.insert(pattern.span.clone(), scheme.clone());
+
                 // Bind the pattern
                 let mut new_env = env.clone();
                 self.bind_pattern_scheme(&mut new_env, pattern, scheme)?;
@@ -1719,6 +1782,8 @@ impl Inferencer {
                 let mut new_env = env.clone();
                 for (i, binding) in bindings.iter().enumerate() {
                     let scheme = self.generalize(&preliminary_types[i]);
+                    // Record the scheme for elaboration
+                    self.binding_schemes.insert(binding.name.span.clone(), scheme.clone());
                     new_env.insert(binding.name.node.clone(), scheme);
                 }
 
