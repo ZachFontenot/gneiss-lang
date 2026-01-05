@@ -1,0 +1,69 @@
+-- Request Module
+-- HTTP request helpers
+
+import Http
+
+-- ============================================================================
+-- Request Helpers
+-- ============================================================================
+
+-- Split string on first occurrence of delimiter (internal helper)
+let split_first delim s =
+    match string_index_of delim s with
+    | None -> None
+    | Some idx ->
+        let before = string_substring 0 idx s in
+        let after = string_substring (idx + string_length delim) (string_length s) s in
+        Some (before, after)
+    end
+
+-- Get a header value by name (case-sensitive for now)
+val getHeader : String -> HttpRequest -> Option String
+let getHeader name request =
+    let rec find headers =
+        (match headers with
+        | [] -> None
+        | (key, value) :: rest ->
+            if key == name then Some value else find rest
+        end)
+    in
+    find request.headers
+
+-- Check if request is a specific method
+val isGet : HttpRequest -> Bool
+let isGet request =
+    match request.method with | GET -> true | _ -> false end
+
+val isPost : HttpRequest -> Bool
+let isPost request =
+    match request.method with | POST -> true | _ -> false end
+
+val isPut : HttpRequest -> Bool
+let isPut request =
+    match request.method with | PUT -> true | _ -> false end
+
+val isDelete : HttpRequest -> Bool
+let isDelete request =
+    match request.method with | DELETE -> true | _ -> false end
+
+-- Parse query string from path
+let parseQuery path =
+    match split_first "?" path with
+    | None -> []
+    | Some (_, query_str) ->
+        let pairs = string_split "&" query_str in
+        let parse_pair p =
+            (match split_first "=" p with
+            | None -> (p, "")
+            | Some (k, v) -> (k, v)
+            end)
+        in
+        map parse_pair pairs
+    end
+
+-- Get path without query string
+let pathWithoutQuery path =
+    match split_first "?" path with
+    | None -> path
+    | Some (p, _) -> p
+    end

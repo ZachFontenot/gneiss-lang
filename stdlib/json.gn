@@ -268,7 +268,7 @@ and parse_json_object input =
     end
 
 -- Main parse function: returns Option Json
-let Json.parse input =
+let parse input =
     match parse_json input with
     | ParseOk json rest ->
         let rest2 = skip_ws rest in
@@ -280,23 +280,23 @@ let Json.parse input =
 -- JSON Encoder
 -- ============================================================================
 
-let rec Json.encode json =
+let rec encode json =
     match json with
     | JsonNull -> "null"
     | JsonBool b -> if b then "true" else "false"
     | JsonInt n -> int_to_string n
     | JsonString s -> "\"" ++ json_escape_string s ++ "\""
     | JsonArray items ->
-        "[" ++ string_join "," (map Json.encode items) ++ "]"
+        "[" ++ string_join "," (map encode items) ++ "]"
     | JsonObject pairs ->
         let encode_pair (key, value) =
-            "\"" ++ json_escape_string key ++ "\":" ++ Json.encode value
+            "\"" ++ json_escape_string key ++ "\":" ++ encode value
         in
         "{" ++ string_join "," (map encode_pair pairs) ++ "}"
     end
 
 -- Pretty print with indentation
-let rec Json.pretty_encode indent json =
+let rec pretty_encode indent json =
     let spaces = string_repeat indent "  " in
     let next_indent = indent + 1 in
     match json with
@@ -307,13 +307,13 @@ let rec Json.pretty_encode indent json =
     | JsonArray [] -> "[]"
     | JsonArray items ->
         let inner_spaces = string_repeat next_indent "  " in
-        let encoded = map (fun item -> inner_spaces ++ Json.pretty_encode next_indent item) items in
+        let encoded = map (fun item -> inner_spaces ++ pretty_encode next_indent item) items in
         "[\n" ++ string_join ",\n" encoded ++ "\n" ++ spaces ++ "]"
     | JsonObject [] -> "{}"
     | JsonObject pairs ->
         let inner_spaces = string_repeat next_indent "  " in
         let encode_pair (key, value) =
-            inner_spaces ++ "\"" ++ json_escape_string key ++ "\": " ++ Json.pretty_encode next_indent value
+            inner_spaces ++ "\"" ++ json_escape_string key ++ "\": " ++ pretty_encode next_indent value
         in
         "{\n" ++ string_join ",\n" (map encode_pair pairs) ++ "\n" ++ spaces ++ "}"
     end
@@ -323,7 +323,7 @@ let rec Json.pretty_encode indent json =
 -- ============================================================================
 
 -- Get a value from an object by key
-let Json.get key json =
+let get key json =
     match json with
     | JsonObject pairs ->
         let rec find ps =
@@ -337,35 +337,35 @@ let Json.get key json =
     end
 
 -- Get as int
-let Json.getInt json =
+let getInt json =
     match json with
     | JsonInt n -> Some n
     | _ -> None
     end
 
 -- Get as string
-let Json.getString json =
+let getString json =
     match json with
     | JsonString s -> Some s
     | _ -> None
     end
 
 -- Get as bool
-let Json.getBool json =
+let getBool json =
     match json with
     | JsonBool b -> Some b
     | _ -> None
     end
 
 -- Get as array
-let Json.getArray json =
+let getArray json =
     match json with
     | JsonArray items -> Some items
     | _ -> None
     end
 
 -- Get as object (list of pairs)
-let Json.getObject json =
+let getObject json =
     match json with
     | JsonObject pairs -> Some pairs
     | _ -> None
@@ -375,9 +375,9 @@ let Json.getObject json =
 -- JSON Builders
 -- ============================================================================
 
-let Json.null = JsonNull
-let Json.bool b = JsonBool b
-let Json.int n = JsonInt n
-let Json.string s = JsonString s
-let Json.array items = JsonArray items
-let Json.object pairs = JsonObject pairs
+let null = JsonNull
+let bool b = JsonBool b
+let int n = JsonInt n
+let string s = JsonString s
+let array items = JsonArray items
+let object pairs = JsonObject pairs

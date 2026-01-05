@@ -1,0 +1,74 @@
+-- Response Module
+-- HTTP response builders
+
+import Http
+
+-- ============================================================================
+-- Response Builders
+-- ============================================================================
+
+-- Create a basic response
+let new status reason body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = reason,
+        headers = [("Content-Length", int_to_string (string_length body))],
+        body = body
+    }
+
+-- Text response
+let text status body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = "OK",
+        headers = [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Length", int_to_string (string_length body))
+        ],
+        body = body
+    }
+
+-- HTML response
+let html status body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = "OK",
+        headers = [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Length", int_to_string (string_length body))
+        ],
+        body = body
+    }
+
+-- JSON response
+let json status body =
+    HttpResponse {
+        version = Http11,
+        status = status,
+        reason = "OK",
+        headers = [
+            ("Content-Type", "application/json"),
+            ("Content-Length", int_to_string (string_length body))
+        ],
+        body = body
+    }
+
+-- Common responses
+let ok body = text 200 body
+let notFound = text 404 "Not Found"
+let badRequest msg = text 400 msg
+let internalError msg = text 500 msg
+
+-- Add header to response
+val withHeader : String -> String -> HttpResponse -> HttpResponse
+let withHeader name value response =
+    HttpResponse {
+        version = response.version,
+        status = response.status,
+        reason = response.reason,
+        headers = (name, value) :: response.headers,
+        body = response.body
+    }

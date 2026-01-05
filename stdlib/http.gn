@@ -99,7 +99,7 @@ let rec parse_headers lines =
     end
 
 -- Parse HTTP request from raw string
-let Http.parseRequest raw =
+let parseRequest raw =
     -- Split into lines
     let lines = string_split "\r\n" raw in
     (match lines with
@@ -172,8 +172,8 @@ let format_headers headers =
     string_join "\r\n" (map format_header headers)
 
 -- Format HTTP response as string
-val Http.formatResponse : HttpResponse -> String
-let Http.formatResponse response =
+val formatResponse : HttpResponse -> String
+let formatResponse response =
     let status_line = format_version response.version ++ " "
         ++ int_to_string response.status ++ " "
         ++ response.reason in
@@ -181,135 +181,10 @@ let Http.formatResponse response =
     status_line ++ "\r\n" ++ headers_str ++ "\r\n\r\n" ++ response.body
 
 -- Format HTTP request as string
-val Http.formatRequest : HttpRequest -> String
-let Http.formatRequest request =
+val formatRequest : HttpRequest -> String
+let formatRequest request =
     let request_line = format_method request.method ++ " "
         ++ request.path ++ " "
         ++ format_version request.version in
     let headers_str = format_headers request.headers in
     request_line ++ "\r\n" ++ headers_str ++ "\r\n\r\n" ++ request.body
-
--- ============================================================================
--- Response Builders
--- ============================================================================
-
--- Create a basic response
-let Response.new status reason body =
-    HttpResponse {
-        version = Http11,
-        status = status,
-        reason = reason,
-        headers = [("Content-Length", int_to_string (string_length body))],
-        body = body
-    }
-
--- Text response
-let Response.text status body =
-    HttpResponse {
-        version = Http11,
-        status = status,
-        reason = "OK",
-        headers = [
-            ("Content-Type", "text/plain; charset=utf-8"),
-            ("Content-Length", int_to_string (string_length body))
-        ],
-        body = body
-    }
-
--- HTML response
-let Response.html status body =
-    HttpResponse {
-        version = Http11,
-        status = status,
-        reason = "OK",
-        headers = [
-            ("Content-Type", "text/html; charset=utf-8"),
-            ("Content-Length", int_to_string (string_length body))
-        ],
-        body = body
-    }
-
--- JSON response
-let Response.json status body =
-    HttpResponse {
-        version = Http11,
-        status = status,
-        reason = "OK",
-        headers = [
-            ("Content-Type", "application/json"),
-            ("Content-Length", int_to_string (string_length body))
-        ],
-        body = body
-    }
-
--- Common responses
-let Response.ok body = Response.text 200 body
-let Response.notFound = Response.text 404 "Not Found"
-let Response.badRequest msg = Response.text 400 msg
-let Response.internalError msg = Response.text 500 msg
-
--- Add header to response
-val Response.withHeader : String -> String -> HttpResponse -> HttpResponse
-let Response.withHeader name value response =
-    HttpResponse {
-        version = response.version,
-        status = response.status,
-        reason = response.reason,
-        headers = (name, value) :: response.headers,
-        body = response.body
-    }
-
--- ============================================================================
--- Request Helpers
--- ============================================================================
-
--- Get a header value by name (case-sensitive for now)
-val Request.getHeader : String -> HttpRequest -> Option String
-let Request.getHeader name request =
-    let rec find headers =
-        (match headers with
-        | [] -> None
-        | (key, value) :: rest ->
-            if key == name then Some value else find rest
-        end)
-    in
-    find request.headers
-
--- Check if request is a specific method
-val Request.isGet : HttpRequest -> Bool
-let Request.isGet request =
-    match request.method with | GET -> true | _ -> false end
-
-val Request.isPost : HttpRequest -> Bool
-let Request.isPost request =
-    match request.method with | POST -> true | _ -> false end
-
-val Request.isPut : HttpRequest -> Bool
-let Request.isPut request =
-    match request.method with | PUT -> true | _ -> false end
-
-val Request.isDelete : HttpRequest -> Bool
-let Request.isDelete request =
-    match request.method with | DELETE -> true | _ -> false end
-
--- Parse query string from path
-let Request.parseQuery path =
-    match split_first "?" path with
-    | None -> []
-    | Some (_, query_str) ->
-        let pairs = string_split "&" query_str in
-        let parse_pair p =
-            (match split_first "=" p with
-            | None -> (p, "")
-            | Some (k, v) -> (k, v)
-            end)
-        in
-        map parse_pair pairs
-    end
-
--- Get path without query string
-let Request.pathWithoutQuery path =
-    match split_first "?" path with
-    | None -> path
-    | Some (p, _) -> p
-    end

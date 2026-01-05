@@ -1,0 +1,116 @@
+-- Router Module
+-- HTTP request routing
+
+import Http
+import Response
+
+-- ============================================================================
+-- Types
+-- ============================================================================
+
+-- Route definition
+type Route = {
+    method : Option HttpMethod,
+    path : String,
+    handler : HttpRequest -> HttpResponse
+}
+
+-- Router: collection of routes
+type Router = {
+    routes : List Route
+}
+
+-- ============================================================================
+-- Router
+-- ============================================================================
+
+-- Create empty router
+let new () = Router { routes = [] }
+
+-- Check if method matches (None = any method)
+let method_matches route_method request_method =
+    match route_method with
+    | None -> true
+    | Some m ->
+        match (m, request_method) with
+        | (GET, GET) -> true
+        | (POST, POST) -> true
+        | (PUT, PUT) -> true
+        | (DELETE, DELETE) -> true
+        | (PATCH, PATCH) -> true
+        | (HEAD, HEAD) -> true
+        | (OPTIONS, OPTIONS) -> true
+        | _ -> false
+        end
+    end
+
+-- Strip query string from path
+let strip_query path =
+    match string_index_of "?" path with
+    | None -> path
+    | Some idx -> string_substring 0 idx path
+    end
+
+-- Check if path matches (exact match, ignoring query string)
+let path_matches pattern request_path =
+    let clean = strip_query request_path in
+    pattern == clean
+
+-- Find first matching route
+let rec find_route request routes =
+    match request with
+    | HttpRequest { method = req_method, path = req_path, version = _, headers = _, body = _ } ->
+        (match routes with
+        | [] -> None
+        | route :: rest ->
+            match route with
+            | Route { method, path, handler } ->
+                if method_matches method req_method && path_matches path req_path
+                then Some handler
+                else find_route request rest
+            end
+        end)
+    end
+
+-- Find matching handler for a request
+let find request router =
+    match (request, router) with
+    | (HttpRequest { method = _, path = _, version = _, headers = _, body = _ }, Router { routes }) ->
+        find_route request routes
+    end
+
+-- Add a route with specific method
+let add_route method path handler router =
+    match router with
+    | Router { routes } ->
+        Router {
+            routes = routes ++ [Route {
+                method = method,
+                path = path,
+                handler = handler
+            }]
+        }
+    end
+
+-- Route builders
+let get path handler router =
+    add_route (Some GET) path handler router
+
+let post path handler router =
+    add_route (Some POST) path handler router
+
+let put path handler router =
+    add_route (Some PUT) path handler router
+
+let delete path handler router =
+    add_route (Some DELETE) path handler router
+
+let route path handler router =
+    add_route None path handler router
+
+-- Handle request with router, return 404 if no match
+let handle router request =
+    match find request router with
+    | Some handler -> handler request
+    | None -> Response.notFound
+    end

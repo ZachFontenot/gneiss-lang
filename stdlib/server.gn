@@ -1,7 +1,9 @@
 -- Server Module
--- Simple web server built on TCP primitives and HTTP module
+-- Simple web server built on TCP primitives
 
 import Http
+import Response
+import Router
 
 -- ============================================================================
 -- Types
@@ -13,121 +15,14 @@ type ServerConfig = {
     port : Int
 }
 
--- Route definition
-type Route = {
-    method : Option HttpMethod,
-    path : String,
-    handler : HttpRequest -> HttpResponse
-}
-
--- Router: collection of routes
-type Router = {
-    routes : List Route
-}
-
 -- ============================================================================
 -- Server Configuration
 -- ============================================================================
 
-let Server.defaultConfig = ServerConfig {
+let defaultConfig = ServerConfig {
     host = "0.0.0.0",
     port = 8080
 }
-
--- ============================================================================
--- Router
--- ============================================================================
-
--- Create empty router
-let Router.new () = Router { routes = [] }
-
--- Check if method matches (None = any method)
-let method_matches route_method request_method =
-    match route_method with
-    | None -> true
-    | Some m ->
-        match (m, request_method) with
-        | (GET, GET) -> true
-        | (POST, POST) -> true
-        | (PUT, PUT) -> true
-        | (DELETE, DELETE) -> true
-        | (PATCH, PATCH) -> true
-        | (HEAD, HEAD) -> true
-        | (OPTIONS, OPTIONS) -> true
-        | _ -> false
-        end
-    end
-
--- Strip query string from path
-let strip_query path =
-    match string_index_of "?" path with
-    | None -> path
-    | Some idx -> string_substring 0 idx path
-    end
-
--- Check if path matches (exact match, ignoring query string)
-let path_matches pattern request_path =
-    let clean = strip_query request_path in
-    pattern == clean
-
--- Find first matching route
-let rec find_route request routes =
-    match request with
-    | HttpRequest { method = req_method, path = req_path, version = _, headers = _, body = _ } ->
-        (match routes with
-        | [] -> None
-        | route :: rest ->
-            match route with
-            | Route { method, path, handler } ->
-                if method_matches method req_method && path_matches path req_path
-                then Some handler
-                else find_route request rest
-            end
-        end)
-    end
-
--- Find matching handler for a request
-let Router.find request router =
-    match (request, router) with
-    | (HttpRequest { method = _, path = _, version = _, headers = _, body = _ }, Router { routes }) ->
-        find_route request routes
-    end
-
--- Add a route with specific method
-let add_route method path handler router =
-    match router with
-    | Router { routes } ->
-        Router {
-            routes = routes ++ [Route {
-                method = method,
-                path = path,
-                handler = handler
-            }]
-        }
-    end
-
--- Route builders
-let Router.get path handler router =
-    add_route (Some GET) path handler router
-
-let Router.post path handler router =
-    add_route (Some POST) path handler router
-
-let Router.put path handler router =
-    add_route (Some PUT) path handler router
-
-let Router.delete path handler router =
-    add_route (Some DELETE) path handler router
-
-let Router.route path handler router =
-    add_route None path handler router
-
--- Handle request with router, return 404 if no match
-let Router.handle router request =
-    match Router.find request router with
-    | Some handler -> handler request
-    | None -> Response.notFound
-    end
 
 -- ============================================================================
 -- Connection Handling
@@ -171,7 +66,7 @@ let rec accept_loop listener handler =
 -- ============================================================================
 
 -- Start server on port with handler function
-let Server.run port handler =
+let run port handler =
     match tcp_listen "0.0.0.0" port with
     | Err _ ->
         print "Failed to start server (is the port already in use?)"
@@ -181,7 +76,7 @@ let Server.run port handler =
     end
 
 -- Start server with config
-let Server.runWith config handler =
+let runWith config handler =
     match config with
     | ServerConfig { host, port } ->
         match tcp_listen host port with
@@ -194,6 +89,6 @@ let Server.runWith config handler =
     end
 
 -- Start server with router
-let Server.serve config router =
+let serve config router =
     let handler = Router.handle router in
-    Server.runWith config handler
+    runWith config handler
