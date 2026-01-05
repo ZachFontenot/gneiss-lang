@@ -77,3 +77,31 @@ type Option a = | Some a | None
 - `print : a -> ()` - Print any value
 - `int_to_string : Int -> String`
 - `string_length : String -> Int`
+
+## Testing Philosophy
+
+**All code changes MUST follow the testing philosophy in `docs/TESTING.md`.**
+
+Key principles:
+1. **Test the process, not just the output** - Verify AST structure and inferred types at each compilation stage
+2. **Layered testing** - Parser tests -> Rejection tests -> Type tests -> Runtime tests -> Output tests
+3. **Rejection tests are mandatory** - Every feature needs tests for invalid usage
+4. **Use test_support.rs** - Prefer `parse_expr()`, `typecheck_expr()`, `assert_type()` over `run_program_ok()`
+
+Quick reference:
+```rust
+// Good: Verify AST structure
+let expr = parse_expr("let x = 1").unwrap();
+assert!(matches!(&expr.node, ExprKind::Let { .. }));
+
+// Good: Verify type inference
+assert_type("fun x -> x + 1", "Int -> Int");
+
+// Good: Verify rejection
+assert_type_error("1 + true");
+
+// Acceptable only after semantic tests exist:
+assert_eval_int("1 + 2", 3);
+```
+
+See `docs/TESTING.md` for complete guidelines including the testing pyramid, required coverage matrix, and anti-patterns to avoid.
