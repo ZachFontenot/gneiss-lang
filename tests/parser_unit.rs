@@ -36,15 +36,19 @@ mod let_bindings {
     fn simple_let() {
         let prog = parse("let x = 42");
         assert_eq!(prog.items.len(), 1);
-        assert!(matches!(&prog.items[0], Item::Decl(Decl::Let { name, .. }) if name == "x"));
+        if let Item::Decl(Decl::Let { pattern, .. }) = &prog.items[0] {
+            assert!(matches!(&pattern.node, PatternKind::Var(name) if name == "x"));
+        } else {
+            panic!("expected let declaration");
+        }
     }
 
     #[test]
     fn let_function() {
         let prog = parse("let add x y = x + y");
         assert_eq!(prog.items.len(), 1);
-        if let Item::Decl(Decl::Let { name, params, .. }) = &prog.items[0] {
-            assert_eq!(name, "add");
+        if let Item::Decl(Decl::Let { pattern, params, .. }) = &prog.items[0] {
+            assert!(matches!(&pattern.node, PatternKind::Var(name) if name == "add"));
             assert_eq!(params.len(), 2);
         } else {
             panic!("expected let declaration");
@@ -91,17 +95,6 @@ mod let_bindings {
             assert_eq!(bindings[1].name.node, "odd");
         } else {
             panic!("expected let rec declaration");
-        }
-    }
-
-    #[test]
-    fn qualified_name() {
-        let prog = parse("let Html.text s = s");
-        assert_eq!(prog.items.len(), 1);
-        if let Item::Decl(Decl::Let { name, .. }) = &prog.items[0] {
-            assert_eq!(name, "Html.text");
-        } else {
-            panic!("expected let declaration");
         }
     }
 }
@@ -725,16 +718,6 @@ mod val_decls {
         let prog = parse("val map : (a -> b) -> List a -> List b");
         if let Item::Decl(Decl::Val { name, .. }) = &prog.items[0] {
             assert_eq!(name, "map");
-        } else {
-            panic!("expected val declaration");
-        }
-    }
-
-    #[test]
-    fn val_qualified() {
-        let prog = parse("val Http.get : String -> Response");
-        if let Item::Decl(Decl::Val { name, .. }) = &prog.items[0] {
-            assert_eq!(name, "Http.get");
         } else {
             panic!("expected val declaration");
         }

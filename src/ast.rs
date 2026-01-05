@@ -642,10 +642,10 @@ pub struct ImportSpec {
 
 #[derive(Debug, Clone)]
 pub enum Decl {
-    // let x = e  or  let f a b = e
+    // let x = e  or  let f a b = e  or  let (a, b) = e
     Let {
         visibility: Visibility,
-        name: Ident,
+        pattern: Pattern,
         type_ann: Option<TypeExpr>,
         params: Vec<Pattern>,
         body: Expr,

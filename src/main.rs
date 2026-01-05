@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use gneiss::ast::{ImportSpec, Item, Program};
+use gneiss::ast::{ImportSpec, Item, Pattern, PatternKind, Program};
 use gneiss::errors::{format_header, format_snippet, format_suggestions, Colors};
 use gneiss::infer::TypeError;
 use gneiss::lexer::LexError;
@@ -14,6 +14,41 @@ use gneiss::module::{ModuleError, ModuleResolver};
 use gneiss::parser::ParseError;
 use gneiss::prelude::parse_prelude;
 use gneiss::{Inferencer, Interpreter, Lexer, Parser, SourceMap, TypeEnv};
+
+/// Collect all variable names bound by a pattern
+fn collect_pattern_names(pattern: &Pattern) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_pattern_names_inner(pattern, &mut names);
+    names
+}
+
+fn collect_pattern_names_inner(pattern: &Pattern, names: &mut Vec<String>) {
+    match &pattern.node {
+        PatternKind::Var(name) => names.push(name.clone()),
+        PatternKind::Wildcard | PatternKind::Lit(_) => {}
+        PatternKind::Tuple(pats) | PatternKind::List(pats) => {
+            for p in pats {
+                collect_pattern_names_inner(p, names);
+            }
+        }
+        PatternKind::Cons { head, tail } => {
+            collect_pattern_names_inner(head, names);
+            collect_pattern_names_inner(tail, names);
+        }
+        PatternKind::Constructor { args, .. } => {
+            for p in args {
+                collect_pattern_names_inner(p, names);
+            }
+        }
+        PatternKind::Record { fields, .. } => {
+            for (_, opt_pat) in fields {
+                if let Some(p) = opt_pat {
+                    collect_pattern_names_inner(p, names);
+                }
+            }
+        }
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -121,9 +156,11 @@ fn run_file(path: &str, program_args: Vec<String>) {
     let entry_module = resolver.graph.get(entry_id).unwrap();
     println!("=== Types ===");
     for item in &entry_module.program.items {
-        if let Item::Decl(gneiss::ast::Decl::Let { name, .. }) = item {
-            if let Some(scheme) = type_env.get(name) {
-                println!("  {} : {}", name, scheme);
+        if let Item::Decl(gneiss::ast::Decl::Let { pattern, .. }) = item {
+            for name in collect_pattern_names(pattern) {
+                if let Some(scheme) = type_env.get(&name) {
+                    println!("  {} : {}", name, scheme);
+                }
             }
         }
     }
@@ -381,19 +418,20 @@ fn repl() {
                 let decl_names: Vec<String> = program
                     .items
                     .iter()
-                    .filter_map(|item| {
+                    .flat_map(|item| {
                         if let gneiss::ast::Item::Decl(decl) = item {
                             match decl {
-                                gneiss::ast::Decl::Let { name, .. } => Some(name.clone()),
-                                gneiss::ast::Decl::LetRec { bindings, .. } => {
-                                    // Return first binding name (could show all)
-                                    bindings.first().map(|b| b.name.node.clone())
+                                gneiss::ast::Decl::Let { pattern, .. } => {
+                                    collect_pattern_names(pattern)
                                 }
-                                gneiss::ast::Decl::OperatorDef { op, .. } => Some(op.clone()),
-                                _ => None, // Type decls don't need value display
+                                gneiss::ast::Decl::LetRec { bindings, .. } => {
+                                    bindings.iter().map(|b| b.name.node.clone()).collect()
+                                }
+                                gneiss::ast::Decl::OperatorDef { op, .. } => vec![op.clone()],
+                                _ => vec![], // Type decls don't need value display
                             }
                         } else {
-                            None
+                            vec![]
                         }
                     })
                     .collect();

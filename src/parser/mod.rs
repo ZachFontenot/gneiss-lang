@@ -365,35 +365,43 @@ impl Parser {
             return self.parse_let_rec(start);
         }
 
+        // Check for operator definition: let (+) a b = ...
         if self.check(&Token::LParen) {
             if let Some(op) = self.peek_operator_in_parens() {
                 return self.parse_operator_def(start, op, None);
             }
         }
 
+        // Parse the LHS as a pattern (supports tuples, constructors, etc.)
         let first_span = self.current_span();
-        let first_name = self.parse_possibly_qualified_name()?;
+        let first_pattern = self.parse_simple_pattern()?;
 
-        if let Some(op) = self.try_peek_operator() {
-            return self.parse_operator_def(start, op, Some((first_name, first_span)));
+        // Check for operator definition: let a + b = ...
+        if let PatternKind::Var(ref name) = first_pattern.node {
+            if let Some(op) = self.try_peek_operator() {
+                return self.parse_operator_def(start, op, Some((name.clone(), first_span)));
+            }
         }
 
+        // Collect function params if pattern is a Var (function definition case)
         let mut params = Vec::new();
-        while self.is_pattern_start() && !self.check(&Token::Eq) {
-            params.push(self.parse_simple_pattern()?);
+        if matches!(first_pattern.node, PatternKind::Var(_)) {
+            while self.is_pattern_start() && !self.check(&Token::Eq) {
+                params.push(self.parse_simple_pattern()?);
+            }
         }
 
         self.consume(Token::Eq)?;
         let value_expr = self.parse_expr()?;
 
         if self.check(&Token::In) {
+            // Let expression: let pattern = value in body
             self.advance();
             let body = self.parse_expr()?;
             let span = start.merge(&body.span);
 
             let (pattern, value) = if params.is_empty() {
-                let name_pattern = Spanned::new(PatternKind::Var(first_name), start.clone());
-                (name_pattern, value_expr)
+                (first_pattern, value_expr)
             } else {
                 let lambda_span = value_expr.span.clone();
                 let lambda = Spanned::new(
@@ -403,8 +411,7 @@ impl Parser {
                     },
                     lambda_span,
                 );
-                let name_pattern = Spanned::new(PatternKind::Var(first_name), start.clone());
-                (name_pattern, lambda)
+                (first_pattern, lambda)
             };
 
             let expr = Spanned::new(
@@ -418,10 +425,11 @@ impl Parser {
             self.match_token(&Token::DoubleSemi);
             Ok(Item::Expr(expr))
         } else {
+            // Top-level declaration: let pattern = value
             self.match_token(&Token::DoubleSemi);
             Ok(Item::Decl(Decl::Let {
                 visibility: Visibility::Private,
-                name: first_name,
+                pattern: first_pattern,
                 type_ann: None,
                 params,
                 body: value_expr,
@@ -497,7 +505,7 @@ impl Parser {
 
     fn parse_rec_binding(&mut self) -> ParseResult<RecBinding> {
         let name_start = self.current_span();
-        let name = self.parse_possibly_qualified_name()?;
+        let name = self.parse_ident()?;
 
         let mut params = Vec::new();
         while self.is_pattern_start() && !self.check(&Token::Eq) {
@@ -591,7 +599,7 @@ impl Parser {
 
     fn parse_decl(&mut self) -> ParseResult<Decl> {
         match self.peek() {
-            Token::Let => self.parse_let_decl(),
+            // Note: Let is handled by parse_let_item at the item level
             Token::Type => self.parse_type_decl(),
             Token::Trait => self.parse_trait_decl(),
             Token::Impl => self.parse_instance_decl(),
@@ -603,7 +611,7 @@ impl Parser {
 
     fn parse_val_decl(&mut self) -> ParseResult<Decl> {
         self.consume(Token::Val)?;
-        let name = self.parse_possibly_qualified_name()?;
+        let name = self.parse_ident()?;
         self.consume(Token::Colon)?;
         let type_sig = self.parse_type_expr()?;
 
@@ -615,28 +623,6 @@ impl Parser {
         };
 
         Ok(Decl::Val { name, type_sig, constraints })
-    }
-
-    fn parse_let_decl(&mut self) -> ParseResult<Decl> {
-        self.consume(Token::Let)?;
-
-        let name = self.parse_possibly_qualified_name()?;
-
-        let mut params = Vec::new();
-        while self.is_pattern_start() && !self.check(&Token::Eq) {
-            params.push(self.parse_simple_pattern()?);
-        }
-
-        self.consume(Token::Eq)?;
-        let body = self.parse_expr()?;
-
-        Ok(Decl::Let {
-            visibility: Visibility::Private,
-            name,
-            type_ann: None,
-            params,
-            body,
-        })
     }
 
     fn parse_type_decl(&mut self) -> ParseResult<Decl> {
@@ -2191,35 +2177,6 @@ impl Parser {
                 Ok(name)
             }
             _ => Err(self.unexpected_token("constructor")),
-        }
-    }
-
-    /// Parse a name that may be module-qualified: `name` or `Module.name`
-    ///
-    /// Used for let bindings and other declaration contexts where we need
-    /// to allow both local names and qualified references.
-    fn parse_possibly_qualified_name(&mut self) -> ParseResult<Ident> {
-        match self.peek().clone() {
-            Token::UpperIdent(module_name) => {
-                // Look ahead for Module.name pattern
-                if matches!(self.cursor.peek_nth(1), Token::Dot) {
-                    self.advance(); // consume UpperIdent
-                    self.advance(); // consume Dot
-                    let func_name = self.parse_ident()?;
-                    Ok(format!("{}.{}", module_name, func_name))
-                } else {
-                    Err(self.unexpected_token("identifier"))
-                }
-            }
-            Token::Ident(name) => {
-                self.advance();
-                Ok(name)
-            }
-            Token::Underscore => {
-                self.advance();
-                Ok("_".to_string())
-            }
-            _ => Err(self.unexpected_token("identifier")),
         }
     }
 }

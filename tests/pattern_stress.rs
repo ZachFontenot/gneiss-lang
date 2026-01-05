@@ -248,6 +248,58 @@ let main () =
 }
 
 // ============================================================================
+// Top-level Pattern Bindings
+// ============================================================================
+
+#[test]
+fn toplevel_tuple_destructuring() {
+    let program = r#"
+let (a, b) = (1, 2)
+
+let main () = a + b
+"#;
+    run_program_ok(program);
+}
+
+#[test]
+fn toplevel_nested_tuple_destructuring() {
+    let program = r#"
+let ((x, y), z) = ((10, 20), 30)
+
+let main () = x + y + z
+"#;
+    run_program_ok(program);
+}
+
+#[test]
+fn toplevel_tuple_with_functions() {
+    // Tests that functions in tuple destructuring get proper types
+    let program = r#"
+let (f, g) = ((fun x -> x + 1), (fun y -> y ++ " thing"))
+
+let main () =
+    let n = f 5 in
+    let s = g "some" in
+    print n;
+    print s
+"#;
+    run_program_ok(program);
+}
+
+#[test]
+fn toplevel_tuple_functions_applied() {
+    let program = r#"
+let (inc, dec) = ((fun x -> x + 1), (fun x -> x - 1))
+
+let main () =
+    let a = inc 10 in
+    let b = dec 10 in
+    a + b
+"#;
+    run_program_ok(program);
+}
+
+// ============================================================================
 // Pattern in Function Parameters
 // ============================================================================
 

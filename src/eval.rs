@@ -1236,22 +1236,34 @@ impl Interpreter {
     fn eval_decl(&mut self, decl: &Decl) -> Result<(), EvalError> {
         match decl {
             Decl::Let {
-                name, params, body, ..
+                pattern, params, body, ..
             } => {
-                if params.is_empty() {
-                    let env = self.global_env.clone();
-                    let value = self.eval_expr(&env, body)?;
-                    self.global_env.borrow_mut().define(name.clone(), value);
+                // Evaluate the body
+                let env = self.global_env.clone();
+                let value = if params.is_empty() {
+                    self.eval_expr(&env, body)?
                 } else {
                     // For functions, create a closure that captures the global env
                     // This allows recursion since the function will look up itself
-                    let closure = Value::Closure {
+                    Value::Closure {
                         params: params.clone(),
                         body: Rc::new(body.clone()),
                         env: self.global_env.clone(),
-                    };
-                    // Add to global env first (enables recursion)
-                    self.global_env.borrow_mut().define(name.clone(), closure);
+                    }
+                };
+
+                // For recursive functions (Var pattern with params), define first to enable self-reference
+                if let PatternKind::Var(name) = &pattern.node {
+                    if !params.is_empty() {
+                        // Add to global env first (enables recursion)
+                        self.global_env.borrow_mut().define(name.clone(), value);
+                        return Ok(());
+                    }
+                }
+
+                // Bind the pattern to the global environment
+                if !self.try_bind_pattern(&self.global_env, pattern, &value) {
+                    return Err(EvalError::MatchFailed);
                 }
                 Ok(())
             }

@@ -4048,10 +4048,16 @@ impl Inferencer {
         for item in &all_items {
             match item {
                 Item::Decl(Decl::Let {
-                    name, params, body, ..
+                    pattern, params, body, ..
                 }) => {
+                    // Extract name if pattern is a simple variable (for function defs and val lookups)
+                    let maybe_name = match &pattern.node {
+                        PatternKind::Var(name) => Some(name.clone()),
+                        _ => None,
+                    };
+
                     // Use closure to allow early return on errors while continuing the loop
-                    let result: Result<Scheme, TypeError> = (|| {
+                    let result: Result<(), TypeError> = (|| {
                         self.level += 1;
 
                         // Clear wanted predicates for this binding
@@ -4061,22 +4067,26 @@ impl Inferencer {
                         let mut param_types = Vec::new();
 
                         // Check if there's a val declaration - if so, use its parameter types
-                        let declared_param_types: Option<Vec<Type>> = env.get(name).map(|scheme| {
-                            let ty = self.instantiate(scheme);
-                            // Extract parameter types from the arrow chain
-                            let mut types = Vec::new();
-                            let mut current = ty;
-                            for _ in 0..params.len() {
-                                match current {
-                                    Type::Arrow { arg, ret, .. } => {
-                                        types.push((*arg).clone());
-                                        current = (*ret).clone();
+                        // (only applies to named bindings)
+                        let declared_param_types: Option<Vec<Type>> = maybe_name
+                            .as_ref()
+                            .and_then(|name| env.get(name))
+                            .map(|scheme| {
+                                let ty = self.instantiate(scheme);
+                                // Extract parameter types from the arrow chain
+                                let mut types = Vec::new();
+                                let mut current = ty;
+                                for _ in 0..params.len() {
+                                    match current {
+                                        Type::Arrow { arg, ret, .. } => {
+                                            types.push((*arg).clone());
+                                            current = (*ret).clone();
+                                        }
+                                        _ => break,
                                     }
-                                    _ => break,
                                 }
-                            }
-                            types
-                        });
+                                types
+                            });
 
                         for (i, param) in params.iter().enumerate() {
                             let param_ty = if let Some(ref decl_types) = declared_param_types {
@@ -4094,12 +4104,14 @@ impl Inferencer {
 
                         // For recursive functions, add the function to its own scope with a fresh type
                         let ret_ty = self.fresh_var();
-                        let preliminary_func_ty = if param_types.is_empty() {
-                            ret_ty.clone()
-                        } else {
-                            Type::arrows(param_types.clone(), ret_ty.clone())
-                        };
-                        local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
+                        if let Some(ref name) = maybe_name {
+                            let preliminary_func_ty = if param_types.is_empty() {
+                                ret_ty.clone()
+                            } else {
+                                Type::arrows(param_types.clone(), ret_ty.clone())
+                            };
+                            local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
+                        }
 
                         // Use infer_expr_full to get answer type information
                         let body_result = self.infer_expr_full(&local_env, body)?;
@@ -4130,33 +4142,33 @@ impl Inferencer {
                             result
                         };
 
-                        // TODO: In Phase 5, we'll discharge predicates here and check for unsatisfied constraints
-                        // For now, predicates are collected but not checked
-
                         // Check against declared type signature if one exists (from `val` declaration)
                         // IMPORTANT: Do this BEFORE decrementing level, so instantiated types
                         // are at level > 0 and can be generalized properly
-                        if let Some(declared_scheme) = env.get(name) {
-                            let declared_ty = self.instantiate(declared_scheme);
-                            self.unify_at(&func_ty, &declared_ty, &body.span)?;
+                        if let Some(ref name) = maybe_name {
+                            if let Some(declared_scheme) = env.get(name) {
+                                let declared_ty = self.instantiate(declared_scheme);
+                                self.unify_at(&func_ty, &declared_ty, &body.span)?;
+                            }
                         }
 
                         self.level -= 1;
 
-                        Ok(self.generalize(&func_ty))
+                        let scheme = self.generalize(&func_ty);
+
+                        // Bind the pattern to the environment
+                        self.bind_pattern_scheme(&mut env, pattern, scheme)?;
+                        Ok(())
                     })();
 
-                    match result {
-                        Ok(scheme) => {
-                            env.insert(name.clone(), scheme);
-                        }
-                        Err(e) => {
-                            self.record_error(e);
-                            // Add error recovery type to prevent cascade errors
+                    if let Err(e) = result {
+                        self.record_error(e);
+                        // Add error recovery type to prevent cascade errors
+                        if let Some(ref name) = maybe_name {
                             env.insert(name.clone(), Scheme::mono(self.fresh_var()));
-                            // Ensure level is reset even on error
-                            self.level = self.level.saturating_sub(1);
                         }
+                        // Ensure level is reset even on error
+                        self.level = self.level.saturating_sub(1);
                     }
                 }
                 Item::Decl(Decl::Type { .. } | Decl::TypeAlias { .. } | Decl::Record { .. }) => {

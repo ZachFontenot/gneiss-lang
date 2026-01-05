@@ -400,6 +400,38 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
+/// Collect all variable names bound by a pattern
+fn collect_pattern_vars(pattern: &crate::ast::Pattern, vars: &mut HashSet<String>) {
+    use crate::ast::PatternKind;
+    match &pattern.node {
+        PatternKind::Var(name) => {
+            vars.insert(name.clone());
+        }
+        PatternKind::Wildcard | PatternKind::Lit(_) => {}
+        PatternKind::Tuple(pats) | PatternKind::List(pats) => {
+            for p in pats {
+                collect_pattern_vars(p, vars);
+            }
+        }
+        PatternKind::Cons { head, tail } => {
+            collect_pattern_vars(head, vars);
+            collect_pattern_vars(tail, vars);
+        }
+        PatternKind::Constructor { args, .. } => {
+            for p in args {
+                collect_pattern_vars(p, vars);
+            }
+        }
+        PatternKind::Record { fields, .. } => {
+            for (_, opt_pat) in fields {
+                if let Some(p) = opt_pat {
+                    collect_pattern_vars(p, vars);
+                }
+            }
+        }
+    }
+}
+
 /// Extract imports and exports from a parsed program
 /// If no explicit export list, all declarations are public.
 /// If explicit export list, only those items are public.
@@ -445,8 +477,9 @@ fn extract_module_info(program: &Program) -> (Vec<ImportSpec>, HashSet<String>) 
                 if !has_explicit_exports {
                     use crate::ast::Decl;
                     match decl {
-                        Decl::Let { name, .. } => {
-                            exports.insert(name.clone());
+                        Decl::Let { pattern, .. } => {
+                            // Export all variables bound by the pattern
+                            collect_pattern_vars(pattern, &mut exports);
                         }
                         Decl::LetRec { bindings, .. } => {
                             for binding in bindings {
