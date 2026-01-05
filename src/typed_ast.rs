@@ -422,3 +422,234 @@ impl TExpr {
         }
     }
 }
+
+// ============================================================================
+// Validation: Check that all types are fully resolved
+// ============================================================================
+
+impl TProgram {
+    /// Validate that the typed AST has no unresolved type or row variables.
+    /// Returns a list of issues found, or empty vec if fully valid.
+    pub fn validation_issues(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        for item in &self.items {
+            item.collect_validation_issues(&mut issues);
+        }
+        issues
+    }
+
+    /// Returns true if the typed AST is fully resolved.
+    pub fn is_valid(&self) -> bool {
+        self.validation_issues().is_empty()
+    }
+}
+
+impl TItem {
+    fn collect_validation_issues(&self, issues: &mut Vec<String>) {
+        match self {
+            TItem::Decl(decl) => decl.collect_validation_issues(issues),
+            TItem::TypeDecl { constructors, .. } => {
+                for (_, arg_types) in constructors {
+                    for ty in arg_types {
+                        issues.extend(ty.validation_issues());
+                    }
+                }
+            }
+            TItem::TraitDecl { methods, .. } => {
+                for (_, scheme) in methods {
+                    issues.extend(scheme.ty.validation_issues());
+                }
+            }
+            TItem::InstanceDecl { methods, .. } => {
+                for (_, texpr) in methods {
+                    texpr.collect_validation_issues(issues);
+                }
+            }
+            TItem::EffectDecl { operations, .. } => {
+                for (_, ty) in operations {
+                    issues.extend(ty.validation_issues());
+                }
+            }
+            TItem::Module { items, .. } => {
+                for item in items {
+                    item.collect_validation_issues(issues);
+                }
+            }
+        }
+    }
+}
+
+impl TDecl {
+    fn collect_validation_issues(&self, issues: &mut Vec<String>) {
+        match self {
+            TDecl::Let { pattern, scheme, value } => {
+                pattern.collect_validation_issues(issues);
+                issues.extend(scheme.ty.validation_issues());
+                value.collect_validation_issues(issues);
+            }
+            TDecl::LetRec { bindings } => {
+                for binding in bindings {
+                    issues.extend(binding.scheme.ty.validation_issues());
+                    for param in &binding.params {
+                        param.collect_validation_issues(issues);
+                    }
+                    binding.body.collect_validation_issues(issues);
+                }
+            }
+        }
+    }
+}
+
+impl TExpr {
+    /// Validate this expression and all sub-expressions.
+    pub fn collect_validation_issues(&self, issues: &mut Vec<String>) {
+        // Check this expression's type
+        issues.extend(self.ty.validation_issues());
+
+        // Recursively check sub-expressions
+        match &self.kind {
+            TExprKind::Lit(_) | TExprKind::Hole | TExprKind::NewChannel => {}
+            TExprKind::Var { .. } => {}
+            TExprKind::Lambda { params, body } => {
+                for p in params {
+                    p.collect_validation_issues(issues);
+                }
+                body.collect_validation_issues(issues);
+            }
+            TExprKind::App { func, arg } => {
+                func.collect_validation_issues(issues);
+                arg.collect_validation_issues(issues);
+            }
+            TExprKind::Let { pattern, scheme, value, body } => {
+                pattern.collect_validation_issues(issues);
+                issues.extend(scheme.ty.validation_issues());
+                value.collect_validation_issues(issues);
+                if let Some(b) = body {
+                    b.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::LetRec { bindings, body } => {
+                for b in bindings {
+                    issues.extend(b.scheme.ty.validation_issues());
+                    for p in &b.params {
+                        p.collect_validation_issues(issues);
+                    }
+                    b.body.collect_validation_issues(issues);
+                }
+                if let Some(b) = body {
+                    b.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::If { cond, then_branch, else_branch } => {
+                cond.collect_validation_issues(issues);
+                then_branch.collect_validation_issues(issues);
+                else_branch.collect_validation_issues(issues);
+            }
+            TExprKind::Match { scrutinee, arms } => {
+                scrutinee.collect_validation_issues(issues);
+                for arm in arms {
+                    arm.pattern.collect_validation_issues(issues);
+                    if let Some(g) = &arm.guard {
+                        g.collect_validation_issues(issues);
+                    }
+                    arm.body.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::Tuple(exprs) | TExprKind::List(exprs) => {
+                for e in exprs {
+                    e.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::Constructor { args, .. } => {
+                for a in args {
+                    a.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::BinOp { left, right, .. } => {
+                left.collect_validation_issues(issues);
+                right.collect_validation_issues(issues);
+            }
+            TExprKind::UnaryOp { operand, .. } => {
+                operand.collect_validation_issues(issues);
+            }
+            TExprKind::Seq { first, second } => {
+                first.collect_validation_issues(issues);
+                second.collect_validation_issues(issues);
+            }
+            TExprKind::Spawn(e) | TExprKind::ChanRecv(e) => {
+                e.collect_validation_issues(issues);
+            }
+            TExprKind::ChanSend { channel, value } => {
+                channel.collect_validation_issues(issues);
+                value.collect_validation_issues(issues);
+            }
+            TExprKind::Select { arms } => {
+                for arm in arms {
+                    arm.channel.collect_validation_issues(issues);
+                    arm.pattern.collect_validation_issues(issues);
+                    arm.body.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::Perform { args, .. } => {
+                for a in args {
+                    a.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::Handle { body, return_clause, handlers } => {
+                body.collect_validation_issues(issues);
+                return_clause.pattern.collect_validation_issues(issues);
+                return_clause.body.collect_validation_issues(issues);
+                for h in handlers {
+                    for p in &h.params {
+                        p.collect_validation_issues(issues);
+                    }
+                    h.body.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::Record { fields, .. } => {
+                for (_, e) in fields {
+                    e.collect_validation_issues(issues);
+                }
+            }
+            TExprKind::FieldAccess { record, .. } => {
+                record.collect_validation_issues(issues);
+            }
+            TExprKind::RecordUpdate { base, updates } => {
+                base.collect_validation_issues(issues);
+                for (_, e) in updates {
+                    e.collect_validation_issues(issues);
+                }
+            }
+        }
+    }
+}
+
+impl TPattern {
+    fn collect_validation_issues(&self, issues: &mut Vec<String>) {
+        issues.extend(self.ty.validation_issues());
+        match &self.kind {
+            TPatternKind::Var(_) | TPatternKind::Wildcard | TPatternKind::Lit(_) => {}
+            TPatternKind::Constructor { args, .. } => {
+                for a in args {
+                    a.collect_validation_issues(issues);
+                }
+            }
+            TPatternKind::Tuple(pats) | TPatternKind::List(pats) => {
+                for p in pats {
+                    p.collect_validation_issues(issues);
+                }
+            }
+            TPatternKind::Cons { head, tail } => {
+                head.collect_validation_issues(issues);
+                tail.collect_validation_issues(issues);
+            }
+            TPatternKind::Record { fields, .. } => {
+                for (_, opt_pat) in fields {
+                    if let Some(p) = opt_pat {
+                        p.collect_validation_issues(issues);
+                    }
+                }
+            }
+        }
+    }
+}

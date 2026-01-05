@@ -468,6 +468,26 @@ impl Row {
         matches!(self.resolve(row_uf), Row::Empty)
     }
 
+    /// Collect validation issues for this effect row.
+    pub fn collect_validation_issues(&self, issues: &mut Vec<String>) {
+        match self {
+            Row::Empty => {}
+            Row::Generic(_) => {
+                // Generic is OK - it's a resolved polymorphic row variable
+            }
+            Row::Var(id) => {
+                issues.push(format!("Unresolved row variable: r{}", id));
+            }
+            Row::Extend { effect, rest } => {
+                // Check type params in the effect
+                for param in &effect.params {
+                    param.collect_validation_issues(issues);
+                }
+                rest.collect_validation_issues(issues);
+            }
+        }
+    }
+
     /// Check if this row contains a specific effect
     pub fn contains_effect(&self, effect_name: &str, row_uf: &RowUnionFind) -> bool {
         match self.resolve(row_uf) {
@@ -627,6 +647,7 @@ impl Type {
 
     /// Follow all links to get the actual type.
     /// Uses the UnionFind for bindings with path compression.
+    /// NOTE: This does NOT resolve effect rows in Arrow types. Use resolve_full for that.
     pub fn resolve(&self, uf: &UnionFind) -> Type {
         match self {
             Type::Var(id) => {
@@ -653,6 +674,76 @@ impl Type {
             Type::Dict(inner) => Type::Dict(Rc::new(inner.resolve(uf))),
             // Primitives are already resolved
             _ => self.clone(),
+        }
+    }
+
+    /// Fully resolve a type, including effect rows inside Arrow types.
+    /// This should be used when storing types for elaboration/codegen.
+    pub fn resolve_full(&self, type_uf: &UnionFind, row_uf: &RowUnionFind) -> Type {
+        match self {
+            Type::Var(id) => {
+                match type_uf.get_binding(*id) {
+                    Some(ty) => ty.resolve_full(type_uf, row_uf),
+                    None => Type::Var(type_uf.find(*id)),
+                }
+            }
+            Type::Generic(id) => Type::Generic(*id),
+            Type::Arrow { arg, ret, effects } => Type::Arrow {
+                arg: Rc::new(arg.resolve_full(type_uf, row_uf)),
+                ret: Rc::new(ret.resolve_full(type_uf, row_uf)),
+                effects: effects.resolve(row_uf), // Resolve effect rows!
+            },
+            Type::Tuple(ts) => Type::Tuple(
+                ts.iter().map(|t| t.resolve_full(type_uf, row_uf)).collect()
+            ),
+            Type::Constructor { name, args } => Type::Constructor {
+                name: name.clone(),
+                args: args.iter().map(|t| t.resolve_full(type_uf, row_uf)).collect(),
+            },
+            Type::Channel(inner) => Type::Channel(Rc::new(inner.resolve_full(type_uf, row_uf))),
+            Type::Fiber(inner) => Type::Fiber(Rc::new(inner.resolve_full(type_uf, row_uf))),
+            Type::Dict(inner) => Type::Dict(Rc::new(inner.resolve_full(type_uf, row_uf))),
+            // Primitives are already resolved
+            _ => self.clone(),
+        }
+    }
+
+    /// Check if this type is fully resolved (no unbound type variables, resolved effect rows).
+    /// Returns a list of issues found, empty if fully resolved.
+    pub fn validation_issues(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        self.collect_validation_issues(&mut issues);
+        issues
+    }
+
+    fn collect_validation_issues(&self, issues: &mut Vec<String>) {
+        match self {
+            Type::Var(id) => {
+                issues.push(format!("Unresolved type variable: t{}", id));
+            }
+            Type::Generic(_) => {
+                // Generic is OK - it's a resolved polymorphic type variable
+            }
+            Type::Arrow { arg, ret, effects } => {
+                arg.collect_validation_issues(issues);
+                ret.collect_validation_issues(issues);
+                effects.collect_validation_issues(issues);
+            }
+            Type::Tuple(ts) => {
+                for t in ts {
+                    t.collect_validation_issues(issues);
+                }
+            }
+            Type::Constructor { args, .. } => {
+                for t in args {
+                    t.collect_validation_issues(issues);
+                }
+            }
+            Type::Channel(inner) | Type::Fiber(inner) | Type::Dict(inner) => {
+                inner.collect_validation_issues(issues);
+            }
+            // Primitives are always resolved
+            _ => {}
         }
     }
 

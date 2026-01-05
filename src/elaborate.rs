@@ -412,12 +412,13 @@ impl Inferencer {
                 let thandlers = handlers
                     .iter()
                     .map(|h| {
-                        // For handler params, we'd need to look up effect operation types
-                        // For now, use Unit as placeholder
+                        // Look up effect operation parameter types from EffectEnv
+                        let param_types = self.effect_operation_param_types(&h.operation, h.params.len());
                         let tparams: Vec<_> = h
                             .params
                             .iter()
-                            .map(|p| self.elaborate_pattern(p, &Type::Unit))
+                            .zip(param_types.iter())
+                            .map(|(p, pty)| self.elaborate_pattern(p, pty))
                             .collect();
                         THandlerArm {
                             operation: h.operation.clone(),
@@ -474,8 +475,8 @@ impl Inferencer {
             PatternKind::Wildcard => TPatternKind::Wildcard,
             PatternKind::Lit(lit) => TPatternKind::Lit(lit.clone()),
             PatternKind::Constructor { name, args } => {
-                // For constructor patterns, we need to get arg types from the constructor
-                let arg_types = self.constructor_arg_types(ty, args.len());
+                // For constructor patterns, look up arg types from TypeContext
+                let arg_types = self.constructor_arg_types(ty, name, args.len());
                 let targs = args
                     .iter()
                     .zip(arg_types.iter())
@@ -511,11 +512,12 @@ impl Inferencer {
                 }
             }
             PatternKind::Record { name, fields } => {
-                // For record patterns, elaborate each field's pattern
+                // For record patterns, look up field types from TypeContext
                 let tfields = fields
                     .iter()
                     .map(|(field_name, opt_pat)| {
-                        let tpat = opt_pat.as_ref().map(|p| self.elaborate_pattern(p, &Type::Unit));
+                        let field_ty = self.record_field_type(name, field_name);
+                        let tpat = opt_pat.as_ref().map(|p| self.elaborate_pattern(p, &field_ty));
                         (field_name.clone(), tpat)
                     })
                     .collect();
@@ -583,9 +585,42 @@ impl Inferencer {
         }
     }
 
-    fn constructor_arg_types(&self, _ty: &Type, count: usize) -> Vec<Type> {
-        // In a full implementation, we'd look up the constructor in type_ctx
-        // For now, return Unit placeholders
+    /// Get the argument types for a constructor pattern.
+    /// Uses TypeContext to look up the constructor's field types.
+    fn constructor_arg_types(&self, _ty: &Type, name: &str, count: usize) -> Vec<Type> {
+        // Look up the constructor in type_ctx
+        if let Some(info) = self.type_ctx.get_constructor(name) {
+            // If the constructor is generic, we need to instantiate it
+            // For now, just return the field types directly
+            // TODO: Apply type substitution for generic constructors
+            if info.field_types.len() == count {
+                return info.field_types.clone();
+            }
+        }
+        // Fallback to Unit placeholders if not found
+        vec![Type::Unit; count]
+    }
+
+    /// Get the field types for a record pattern.
+    /// Uses TypeContext to look up the record's field types.
+    fn record_field_type(&self, record_name: &str, field_name: &str) -> Type {
+        if let Some(info) = self.type_ctx.get_record(record_name) {
+            if let Some(field_ty) = info.field_types.get(field_name) {
+                return field_ty.clone();
+            }
+        }
+        Type::Unit
+    }
+
+    /// Get the parameter types for an effect operation.
+    /// Uses EffectEnv to look up the operation's parameter types.
+    fn effect_operation_param_types(&self, operation_name: &str, count: usize) -> Vec<Type> {
+        if let Some((_, op_info)) = self.effect_env.operations.get(operation_name) {
+            if op_info.param_types.len() == count {
+                return op_info.param_types.clone();
+            }
+        }
+        // Fallback to Unit placeholders if not found
         vec![Type::Unit; count]
     }
 }

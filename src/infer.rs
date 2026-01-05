@@ -263,12 +263,12 @@ pub struct Inferencer {
     row_uf: RowUnionFind,
     /// Current let-nesting level (for polymorphism)
     level: u32,
-    /// Type context for constructors
-    type_ctx: TypeContext,
+    /// Type context for constructors (accessible for elaboration)
+    pub(crate) type_ctx: TypeContext,
     /// Class environment for typeclasses
     class_env: ClassEnv,
-    /// Effect environment for algebraic effects
-    effect_env: EffectEnv,
+    /// Effect environment for algebraic effects (accessible for elaboration)
+    pub(crate) effect_env: EffectEnv,
     /// Wanted predicates (constraints collected during inference)
     wanted_preds: Vec<Pred>,
     /// Module environments: module name -> TypeEnv of exports
@@ -1453,8 +1453,8 @@ impl Inferencer {
         expr: &Expr,
     ) -> Result<InferResult, TypeError> {
         let result = self.infer_expr_full_impl(env, expr)?;
-        // Record the resolved type for elaboration
-        let resolved_ty = result.ty.resolve(&self.type_uf);
+        // Record the fully resolved type for elaboration (includes effect rows)
+        let resolved_ty = result.ty.resolve_full(&self.type_uf, &self.row_uf);
         self.expr_types.insert(expr.span.clone(), resolved_ty);
         Ok(result)
     }
@@ -1669,11 +1669,11 @@ impl Inferencer {
                 let scheme = if Self::is_syntactic_value(value) && is_pure {
                     self.generalize(&value_result.ty)
                 } else {
-                    // Don't generalize - keep the monomorphic type
+                    // Don't generalize - keep the monomorphic type (but fully resolve it)
                     Scheme {
                         num_generics: 0,
                         predicates: vec![],
-                        ty: value_result.ty.clone(),
+                        ty: value_result.ty.resolve_full(&self.type_uf, &self.row_uf),
                     }
                 };
 
