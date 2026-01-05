@@ -379,7 +379,46 @@ fn feature_works() {
 
 This tells us nothing about HOW it works.
 
-### 2. Testing Multiple Things
+### 2. ONLY Testing Features in Isolation
+
+**Bad:**
+```rust
+// Only testing == on literals
+#[test]
+fn eq_works() {
+    assert_eval_bool("1 == 1", true);
+    assert_eval_bool("\"a\" == \"a\"", true);
+}
+// Never testing == through polymorphic functions!
+```
+
+**Why this is dangerous:** A real bug occurred where `==` worked on concrete types
+but failed when used in a polymorphic function like `assert_eq x y = if x == y ...`.
+The elaborator dispatched to `IntEq` instead of the Eq trait dictionary when the
+type was a type variable.
+
+**Good - Test both isolation AND composition:**
+```rust
+#[test]
+fn eq_on_literals() {
+    assert_eval_bool("1 == 1", true);
+}
+
+#[test]
+fn eq_through_polymorphic_function() {
+    // This catches bugs where trait dispatch fails on type variables
+    let program = r#"
+        let assert_eq x y = x == y
+        let main () = assert_eq "hello" "hello"
+    "#;
+    // Verify it type-checks with proper constraint
+    let (_, env) = typecheck_program(program).unwrap();
+    // Then verify runtime behavior
+    run_program_ok(program);
+}
+```
+
+### 3. Untraceable Failures
 
 **Bad:**
 ```rust
@@ -396,13 +435,78 @@ fn everything_works() {
 
 When this fails, you don't know which feature broke.
 
-### 3. No Negative Tests
+**Better - Compositional tests WITH unit test coverage:**
+When you have unit tests for feature1, feature2, feature3 individually,
+a failing integration test tells you the *interaction* is broken, not
+the individual features. This is valuable information.
+
+### 4. No Negative Tests
 
 **Bad:** Having `feature_works()` without `feature_rejects_invalid_usage()`.
 
-### 4. Skipping Semantic Layers
+### 5. Skipping Semantic Layers
 
 **Bad:** Writing output tests without corresponding parser and type tests.
+
+---
+
+## Compositional Testing
+
+**Unit tests are necessary but not sufficient.** Bugs often hide in how features
+compose. The testing pyramid should be supplemented with integration tests that
+verify features work together.
+
+### Why Compositional Tests Matter
+
+Real bugs encountered:
+1. **Polymorphic dispatch failure**: `==` worked on concrete types but fell
+   through to `IntEq` when used in polymorphic functions with type variables
+2. **Type inference in nested contexts**: Types weren't being inferred correctly
+   inside certain expression bodies (match arms, let bodies, lambda bodies)
+3. **Elaboration losing constraints**: Trait constraints present during inference
+   were dropped during elaboration to typed IR
+
+These bugs pass isolated tests but fail in realistic programs.
+
+### Integration Test Structure
+
+```rust
+#[test]
+fn polymorphic_function_preserves_trait_dispatch() {
+    // This is an INTEGRATION test - it tests that:
+    // 1. Polymorphic functions type-check with constraints
+    // 2. Constraints survive through elaboration
+    // 3. Runtime dispatch goes through trait dictionaries
+    let program = r#"
+        trait Stringify a =
+            stringify : a -> String
+        end
+
+        impl Stringify Int =
+            let stringify x = int_to_string x
+        end
+
+        let show_twice x = stringify x ++ stringify x
+
+        let main () = show_twice 42
+    "#;
+
+    // Verify type inference assigns correct constrained type
+    let (_, env) = typecheck_program(program).unwrap();
+
+    // Verify runtime uses trait dispatch, not hardcoded behavior
+    run_program_ok(program);
+}
+```
+
+### When to Write Compositional Tests
+
+1. **After fixing a bug** - The fix should include a test that uses the feature
+   in a realistic context, not just the minimal reproduction
+2. **For polymorphic code** - Polymorphism + traits + type inference interact
+   in subtle ways
+3. **For nested constructs** - Match inside let inside lambda inside handler
+4. **For the scheduler** - Multiple fibers + channels + effects together
 
 ---
 

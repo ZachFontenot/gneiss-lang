@@ -247,7 +247,8 @@ end
 
     #[test]
     fn match_arms_different_types() {
-        let result = typecheck_program(
+        // Without annotation, y could be String, so this might succeed
+        let _untyped = typecheck_program(
             r#"
 type Option a = | Some a | None
 
@@ -257,8 +258,8 @@ let f x = match x with
 end
 "#,
         );
-        // If y is Int, then arms have different types
-        let result2 = typecheck_program(
+        // With explicit Int annotation, arms have different types - must reject
+        let result = typecheck_program(
             r#"
 type Option a = | Some a | None
 
@@ -269,7 +270,7 @@ end
 "#,
         );
         assert!(
-            result2.is_err(),
+            result.is_err(),
             "Match arms with different types must be rejected"
         );
     }
