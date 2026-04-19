@@ -4,6 +4,7 @@ pub mod ast;
 pub mod blocking_pool;
 pub mod elaborate;
 pub mod errors;
+pub mod exhaustiveness;
 pub mod eval;
 pub mod infer;
 pub mod io_reactor;

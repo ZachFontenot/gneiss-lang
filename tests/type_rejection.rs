@@ -649,3 +649,304 @@ end
         );
     }
 }
+
+// ============================================================================
+// Pattern Matching Exhaustiveness  (gneiss-lang-bt75)
+// ============================================================================
+//
+// Non-exhaustive matches are a soundness bug: they typecheck but blow up at
+// runtime as `MatchFailed`.  These tests pin down the new
+// `NonExhaustivePatterns` error.
+
+mod exhaustiveness {
+    use super::*;
+
+    fn err_contains_non_exhaustive(result: &Result<impl std::fmt::Debug, String>) -> bool {
+        match result {
+            Err(msg) => msg.contains("NonExhaustivePatterns")
+                || msg.contains("non-exhaustive"),
+            Ok(_) => false,
+        }
+    }
+
+    // -------- ADT (sum-type) coverage --------
+
+    #[test]
+    fn non_exhaustive_adt_missing_constructor() {
+        let result = typecheck_program(
+            r#"
+type Color = | Red | Green | Blue
+
+let f c = match c with
+    | Red -> 1
+    | Green -> 2
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Missing Blue must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn exhaustive_adt_all_constructors() {
+        let result = typecheck_program(
+            r#"
+type Color = | Red | Green | Blue
+
+let f c = match c with
+    | Red -> 1
+    | Green -> 2
+    | Blue -> 3
+    end
+"#,
+        );
+        assert!(result.is_ok(), "All ctors must typecheck: {:?}", result);
+    }
+
+    #[test]
+    fn exhaustive_adt_with_wildcard() {
+        let result = typecheck_program(
+            r#"
+type Color = | Red | Green | Blue
+
+let f c = match c with
+    | Red -> 1
+    | _ -> 0
+    end
+"#,
+        );
+        assert!(result.is_ok(), "Wildcard catch-all is exhaustive: {:?}", result);
+    }
+
+    #[test]
+    fn non_exhaustive_option_missing_none() {
+        // Option is in the prelude.
+        let result = typecheck_program(
+            r#"
+let f opt = match opt with
+    | Some x -> x
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Match on Option missing None must be rejected: {:?}",
+            result
+        );
+    }
+
+    // -------- List coverage --------
+
+    #[test]
+    fn non_exhaustive_list_only_nil() {
+        let result = typecheck_program(
+            r#"
+let f xs = match xs with
+    | [] -> 0
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "List match with only [] must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn non_exhaustive_list_only_cons() {
+        let result = typecheck_program(
+            r#"
+let f xs = match xs with
+    | x :: _ -> x
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "List match with only Cons must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn exhaustive_list_nil_and_cons() {
+        let result = typecheck_program(
+            r#"
+let f xs = match xs with
+    | [] -> 0
+    | x :: _ -> x
+    end
+"#,
+        );
+        assert!(result.is_ok(), "[] and _::_ must be exhaustive: {:?}", result);
+    }
+
+    #[test]
+    fn exhaustive_list_with_literal_singleton_and_default() {
+        let result = typecheck_program(
+            r#"
+let f xs = match xs with
+    | [] -> 0
+    | [x] -> x
+    | _ -> 1
+    end
+"#,
+        );
+        assert!(result.is_ok(), "Literal-list arms with default work: {:?}", result);
+    }
+
+    // -------- Bool coverage --------
+
+    #[test]
+    fn non_exhaustive_bool_only_true() {
+        let result = typecheck_program(
+            r#"
+let f b = match b with
+    | true -> 1
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Bool match with only `true` must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn non_exhaustive_bool_only_false() {
+        let result = typecheck_program(
+            r#"
+let f b = match b with
+    | false -> 0
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Bool match with only `false` must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn exhaustive_bool_both_branches() {
+        let result = typecheck_program(
+            r#"
+let f b = match b with
+    | true -> 1
+    | false -> 0
+    end
+"#,
+        );
+        assert!(result.is_ok(), "Both bool branches are exhaustive: {:?}", result);
+    }
+
+    // -------- Nested-pattern combos --------
+
+    #[test]
+    fn non_exhaustive_nested_constructor() {
+        // (Option, Option) — covering Some/Some and None/None misses
+        // Some/None and None/Some.
+        let result = typecheck_program(
+            r#"
+let f p = match p with
+    | (Some _, Some _) -> 1
+    | (None, None) -> 0
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Nested (Some, None) and (None, Some) missing — must reject: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn exhaustive_nested_constructor_with_wildcards() {
+        let result = typecheck_program(
+            r#"
+let f p = match p with
+    | (Some _, Some _) -> 1
+    | (Some _, None) -> 2
+    | (None, Some _) -> 3
+    | (None, None) -> 0
+    end
+"#,
+        );
+        assert!(result.is_ok(), "All four combinations cover the type: {:?}", result);
+    }
+
+    // -------- Guards do not contribute --------
+
+    #[test]
+    fn guarded_arm_does_not_count_for_exhaustiveness() {
+        // The guard might fail, so even a guarded `| _` is not enough.
+        let result = typecheck_program(
+            r#"
+let f n = match n with
+    | x if x > 0 -> 1
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Sole guarded arm must not count as exhaustive: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn guarded_then_default_is_exhaustive() {
+        let result = typecheck_program(
+            r#"
+let f n = match n with
+    | x if x > 0 -> 1
+    | _ -> 0
+    end
+"#,
+        );
+        assert!(
+            result.is_ok(),
+            "Guarded arm followed by default is exhaustive: {:?}",
+            result
+        );
+    }
+
+    // -------- Open types (Int/String/Char) --------
+
+    #[test]
+    fn non_exhaustive_int_literals() {
+        let result = typecheck_program(
+            r#"
+let f n = match n with
+    | 0 -> 1
+    | 1 -> 2
+    end
+"#,
+        );
+        assert!(
+            err_contains_non_exhaustive(&result),
+            "Int literal match without default must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn exhaustive_int_with_wildcard() {
+        let result = typecheck_program(
+            r#"
+let f n = match n with
+    | 0 -> 1
+    | _ -> 0
+    end
+"#,
+        );
+        assert!(result.is_ok(), "Int + wildcard is exhaustive: {:?}", result);
+    }
+}

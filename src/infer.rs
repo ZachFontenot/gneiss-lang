@@ -11,6 +11,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use thiserror::Error;
 
+/// Public re-export of `substitute_generics` for the exhaustiveness checker.
+pub fn substitute_generics_pub(ty: &Type, args: &[Type]) -> Type {
+    substitute_generics(ty, args)
+}
+
 /// Substitute Generic type variables with concrete types.
 /// Generic(0) is replaced with args[0], Generic(1) with args[1], etc.
 /// Note: This operates on unresolved types since Generic vars don't have bindings.
@@ -1307,6 +1312,24 @@ impl Inferencer {
                         &arm.body.span,
                         UnifyContext::MatchArms,
                     )?;
+                }
+
+                // Exhaustiveness check (gneiss-lang-bt75). Skipped if there
+                // are zero arms (the type checker has nothing to work with —
+                // such a match is impossible to type anyway).
+                if !arms.is_empty()
+                    && !crate::exhaustiveness::is_exhaustive(
+                        arms,
+                        &scrutinee_result.ty,
+                        &self.type_ctx,
+                        &self.type_uf,
+                    )
+                {
+                    let span = arms
+                        .last()
+                        .map(|a| a.body.span.clone())
+                        .unwrap_or_else(|| expr.span.clone());
+                    return Err(TypeError::NonExhaustivePatterns { span });
                 }
 
                 Ok(InferResult::new(result_ty))

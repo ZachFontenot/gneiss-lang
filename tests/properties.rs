@@ -611,12 +611,14 @@ fn test_char_comparison_operators() {
 
 #[test]
 fn test_sequence_in_match_arm() {
-    // Sequences (semicolons) should be allowed in match arm bodies
+    // Sequences (semicolons) should be allowed in match arm bodies.
+    // Int matches need a wildcard to be exhaustive.
     let source = r#"
 fun x ->
     match x with
     | 1 -> (); 100
     | 2 -> 200
+    | _ -> 0
     end
 "#;
     let result = infer_source(source);
@@ -629,7 +631,8 @@ fun x ->
 
 #[test]
 fn test_nested_match_with_sequences() {
-    // Nested matches with sequences should parse correctly
+    // Nested matches with sequences should parse correctly.
+    // Int matches need a wildcard to be exhaustive.
     let source = r#"
 fun x y ->
     match x with
@@ -637,8 +640,10 @@ fun x y ->
         match y with
         | 10 -> (); 1
         | 20 -> (); 2
+        | _ -> 0
         end
     | 2 -> 0
+    | _ -> 0
     end
 "#;
     let result = infer_source(source);

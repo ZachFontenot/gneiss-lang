@@ -44,6 +44,8 @@ let main () =
 
 #[test]
 fn nested_list_pattern() {
+    // Wildcard arm needed for >3-element lists once exhaustiveness checking
+    // is on (gneiss-lang-bt75).
     let program = r#"
 type List a = | Nil | Cons a (List a)
 
@@ -54,6 +56,7 @@ let main () =
     | Cons a (Cons b Nil) -> a + b
     | Cons a Nil -> a
     | Nil -> 0
+    | _ -> 0
     end
 "#;
     run_program_ok(program);

@@ -545,14 +545,16 @@ display (Some 42)
 
     #[test]
     fn test_three_constructors() {
-        // Result type with Ok, Err, and a third constructor
-        // Test with Pending (last expression)
+        // Three-constructor sum type. Renamed away from `Result` so that the
+        // user-defined constructors (Ok/Err) don't shadow the prelude's
+        // 2-constructor `Result e a` and break `Show for Result` after the
+        // exhaustiveness check landed (gneiss-lang-bt75).
         let source = r#"
 trait Display a =
     val display : a -> String
 end
 
-type Result a b c = | Ok a | Err b | Pending c
+type Outcome a b c = | OkO a | ErrO b | Pending c
 
 impl Display for Int =
     let display n = int_to_string n
@@ -566,10 +568,10 @@ impl Display for Bool =
     let display b = if b then "true" else "false"
 end
 
-impl Display for (Result a b c) where a : Display, b : Display, c : Display =
+impl Display for (Outcome a b c) where a : Display, b : Display, c : Display =
     let display r = match r with
-        | Ok x -> "Ok"
-        | Err e -> "Err"
+        | OkO x -> "Ok"
+        | ErrO e -> "Err"
         | Pending p -> "Pending"
         end
 end
