@@ -230,6 +230,26 @@ fn format_type_error_for_test(
             Some(span),
             suggestions.clone(),
         ),
+        TypeError::ConstructorArityMismatch {
+            name,
+            expected,
+            found,
+            span,
+        } => (
+            "ARITY ERROR",
+            format!(
+                "Constructor `{}` expects {} argument(s) but got {}.",
+                name, expected, found
+            ),
+            Some(span),
+            vec![],
+        ),
+        TypeError::MissingValImplementation { name, span } => (
+            "MISSING IMPLEMENTATION",
+            format!("The `val` declaration for `{}` has no matching `let`.", name),
+            Some(span),
+            vec![],
+        ),
         TypeError::PatternMismatch { span } => (
             "PATTERN ERROR",
             "I found a pattern that doesn't make sense here.".to_string(),

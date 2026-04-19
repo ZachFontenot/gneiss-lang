@@ -161,6 +161,18 @@ pub enum TypeError {
         span: Span,
         suggestions: Vec<String>,
     },
+    #[error("constructor `{name}` expects {expected} argument(s), got {found}")]
+    ConstructorArityMismatch {
+        name: String,
+        expected: usize,
+        found: usize,
+        span: Span,
+    },
+    #[error("val declaration `{name}` has no matching let")]
+    MissingValImplementation {
+        name: String,
+        span: Span,
+    },
     #[error("pattern type mismatch")]
     PatternMismatch { span: Span },
     #[error("non-exhaustive patterns")]
@@ -1362,11 +1374,11 @@ impl Inferencer {
 
                     // Check field types against provided arguments
                     if args.len() != info.field_types.len() {
-                        return Err(TypeError::TypeMismatch {
-                            expected: result_ty,
-                            found: Type::Unit,
-                            span: Some(expr.span.clone()),
-                            context: None,
+                        return Err(TypeError::ConstructorArityMismatch {
+                            name: name.clone(),
+                            expected: info.field_types.len(),
+                            found: args.len(),
+                            span: expr.span.clone(),
                         });
                     }
 
@@ -1870,6 +1882,15 @@ impl Inferencer {
                     let mut subst: HashMap<TypeVarId, Type> = HashMap::new();
                     for (i, ty) in type_args.iter().enumerate() {
                         subst.insert(i as TypeVarId, ty.clone());
+                    }
+
+                    if args.len() != info.field_types.len() {
+                        return Err(TypeError::ConstructorArityMismatch {
+                            name: name.clone(),
+                            expected: info.field_types.len(),
+                            found: args.len(),
+                            span: pattern.span.clone(),
+                        });
                     }
 
                     for (pat, field_ty) in args.iter().zip(&info.field_types) {
@@ -3582,6 +3603,37 @@ impl Inferencer {
                         self.record_error(e);
                     }
                 }
+            }
+        }
+
+        // Verify each `val` declaration has a matching let / let rec / operator def.
+        // A val without an implementation promises a value that doesn't exist at runtime.
+        let mut val_decls: Vec<(String, Span)> = Vec::new();
+        let mut implemented: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in &all_items {
+            match item {
+                Item::Decl(Decl::Val { name, type_sig, .. }) => {
+                    val_decls.push((name.clone(), type_sig.span.clone()));
+                }
+                Item::Decl(Decl::Let { pattern, .. }) => {
+                    if let PatternKind::Var(name) = &pattern.node {
+                        implemented.insert(name.clone());
+                    }
+                }
+                Item::Decl(Decl::LetRec { bindings, .. }) => {
+                    for binding in bindings {
+                        implemented.insert(binding.name.node.clone());
+                    }
+                }
+                Item::Decl(Decl::OperatorDef { op, .. }) => {
+                    implemented.insert(op.clone());
+                }
+                _ => {}
+            }
+        }
+        for (name, span) in val_decls {
+            if !implemented.contains(&name) {
+                self.record_error(TypeError::MissingValImplementation { name, span });
             }
         }
 

@@ -148,6 +148,84 @@ let f x =
 }
 
 // ============================================================================
+// Constructor Arity Checking (gneiss-lang-rs5t)
+// ============================================================================
+
+mod constructor_arity {
+    use super::*;
+
+    #[test]
+    fn pattern_with_too_few_args_rejected() {
+        // MkPair takes 2 args; pattern provides 1.
+        let result = typecheck_program(
+            r#"
+type Pair a = | MkPair a a
+let f p = match p with | MkPair x -> x end
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "Pattern with wrong constructor arity must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn pattern_with_too_many_args_rejected() {
+        let result = typecheck_program(
+            r#"
+type Pair a = | MkPair a a
+let f p = match p with | MkPair x y z -> x end
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "Pattern with extra arguments must be rejected: {:?}",
+            result
+        );
+    }
+}
+
+// ============================================================================
+// val without let (gneiss-lang-709d)
+// ============================================================================
+
+mod val_without_let {
+    use super::*;
+
+    #[test]
+    fn val_without_implementation_rejected() {
+        let result = typecheck_program(
+            r#"
+val ch_int : Channel Int
+let main () = let v = Channel.recv ch_int in print v
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "val without matching let must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn val_with_let_works() {
+        let result = typecheck_program(
+            r#"
+val double : Int -> Int
+let double x = x + x
+let main () = print (double 21)
+"#,
+        );
+        assert!(
+            result.is_ok(),
+            "val + let pair should typecheck: {:?}",
+            result
+        );
+    }
+}
+
+// ============================================================================
 // Predicate Discharge (typeclass constraints at top level)
 // ============================================================================
 // Predicates collected during binding inference must be discharged before the
