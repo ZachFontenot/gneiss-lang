@@ -3218,15 +3218,16 @@ impl Inferencer {
                             param_types.push(param_ty);
                         }
 
-                        // For recursive functions, add the function to its own scope with a fresh type
+                        // For recursive functions, add the function to its own scope with a fresh type.
+                        // Only function definitions (with parameters) get this — value lets must use
+                        // `let rec` to be self-referential.
                         let ret_ty = self.fresh_var();
-                        if let Some(ref name) = maybe_name {
-                            let preliminary_func_ty = if param_types.is_empty() {
-                                ret_ty.clone()
-                            } else {
-                                Type::arrows(param_types.clone(), ret_ty.clone())
-                            };
-                            local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
+                        if !params.is_empty() {
+                            if let Some(ref name) = maybe_name {
+                                let preliminary_func_ty =
+                                    Type::arrows(param_types.clone(), ret_ty.clone());
+                                local_env.insert(name.clone(), Scheme::mono(preliminary_func_ty));
+                            }
                         }
 
                         // Use infer_expr_full to get answer type information
@@ -3268,7 +3269,22 @@ impl Inferencer {
 
                         self.level -= 1;
 
-                        let scheme = self.generalize(&func_ty);
+                        // Value restriction: only generalize syntactic values.
+                        // For function defs (params non-empty), the lambda is itself a value.
+                        // For value lets, check the body.
+                        let scheme = if params.is_empty() && !Self::is_syntactic_value(body) {
+                            // Lower any free type vars to the outer level so subsequent
+                            // generalize() calls don't pick them up.
+                            let resolved = func_ty.resolve(&self.type_uf);
+                            self.update_levels(&resolved, self.level);
+                            Scheme {
+                                num_generics: 0,
+                                predicates: vec![],
+                                ty: resolved,
+                            }
+                        } else {
+                            self.generalize(&func_ty)
+                        };
 
                         // Bind the pattern to the environment
                         self.bind_pattern_scheme(&mut env, pattern, scheme)?;
@@ -3494,9 +3510,24 @@ impl Inferencer {
 
                         self.level -= 1;
 
-                        // Generalize and return schemes
+                        // Generalize and return schemes.
+                        // Value restriction: parameter-less bindings only generalize if the body
+                        // is a syntactic value.
                         Ok(bindings.iter().enumerate().map(|(i, binding)| {
-                            (binding.name.node.clone(), self.generalize(&preliminary_types[i]))
+                            let scheme = if binding.params.is_empty()
+                                && !Self::is_syntactic_value(&binding.body)
+                            {
+                                let resolved = preliminary_types[i].resolve(&self.type_uf);
+                                self.update_levels(&resolved, self.level);
+                                Scheme {
+                                    num_generics: 0,
+                                    predicates: vec![],
+                                    ty: resolved,
+                                }
+                            } else {
+                                self.generalize(&preliminary_types[i])
+                            };
+                            (binding.name.node.clone(), scheme)
                         }).collect())
                     })();
 

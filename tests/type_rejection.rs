@@ -75,6 +75,57 @@ let main () =
     }
 
     #[test]
+    fn top_level_value_restriction_channel() {
+        // Top-level `let ch = Channel.new` must not generalize to forall a. Channel a.
+        // Otherwise unrelated functions can use ch at incompatible types. (gneiss-lang-f4fl)
+        let result = typecheck_program(
+            r#"
+let ch = Channel.new
+val recv_str : () -> String
+let recv_str () = Channel.recv ch
+let main () =
+    Fiber.spawn (fun () -> print (recv_str ()));
+    Channel.send ch 42
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "Top-level Channel.new must obey value restriction: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn top_level_letrec_value_restriction_channel() {
+        // Same bug via let rec. (gneiss-lang-f4fl)
+        let result = typecheck_program(
+            r#"
+let rec ch_thing = Channel.new
+and dummy () = ()
+let main () =
+    Fiber.spawn (fun () -> let s : String = Channel.recv ch_thing in print s);
+    Channel.send ch_thing 42
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "Top-level let rec value must obey value restriction: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn top_level_self_referential_value_let_rejected() {
+        // `let x = x + 1` at top level must not typecheck. (gneiss-lang-dbix)
+        let result = typecheck_program("let x = x + 1");
+        assert!(
+            result.is_err(),
+            "Self-referential top-level value let must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
     fn escaping_type_variable_not_generalized() {
         // Type variable from outer scope should not be generalized in inner let
         // This tests the value restriction / level tracking
