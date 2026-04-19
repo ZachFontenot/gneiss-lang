@@ -190,80 +190,10 @@ pub enum Frame {
         env: Env,
     },
 
-    // === Algebraic effect frames ===
-    /// Handler scope delimiter for algebraic effects
-    HandleScope {
-        /// Effect name this handler handles
-        effect_name: String,
-        /// Handlers for each operation: operation_name -> RuntimeHandler
-        handlers: Vec<RuntimeHandler>,
-        /// Return clause: pattern and body
-        return_pattern: Pattern,
-        return_body: Rc<Expr>,
-        /// Environment for handlers
-        env: Env,
-    },
-
-    /// Runtime effect scope - handles Async operations at fiber boundary.
-    /// Unlike HandleScope, RuntimeScope stays on stack after capture (persistent delimiter).
-    /// Unlike user handlers, it produces RuntimeEffect values for scheduler.
-    RuntimeScope {
-        /// Maps operation names to their runtime handler kinds
-        handlers: RuntimeHandlerSet,
-    },
-}
-
-/// Runtime representation of an effect handler arm
-#[derive(Debug, Clone)]
-pub struct RuntimeHandler {
-    /// Operation name (e.g., "get", "put")
-    pub operation: String,
-    /// Parameter patterns for the operation
-    pub params: Vec<Pattern>,
-    /// Continuation parameter name
-    pub continuation: String,
-    /// Handler body
-    pub body: Rc<Expr>,
-}
-
-/// Set of runtime handlers for Async effect operations
-#[derive(Debug, Clone)]
-pub struct RuntimeHandlerSet {
-    handlers: HashMap<String, RuntimeHandlerKind>,
-}
-
-impl RuntimeHandlerSet {
-    /// Create handler set for all Async operations
-    pub fn async_handlers() -> Self {
-        let mut handlers = HashMap::new();
-        handlers.insert("fork".to_string(), RuntimeHandlerKind::Fork);
-        handlers.insert("yield_".to_string(), RuntimeHandlerKind::Yield);
-        handlers.insert("chan_new".to_string(), RuntimeHandlerKind::ChanNew);
-        handlers.insert("send".to_string(), RuntimeHandlerKind::Send);
-        handlers.insert("recv".to_string(), RuntimeHandlerKind::Recv);
-        handlers.insert("join".to_string(), RuntimeHandlerKind::Join);
-        handlers.insert("select".to_string(), RuntimeHandlerKind::Select);
-        handlers.insert("io".to_string(), RuntimeHandlerKind::Io);
-        RuntimeHandlerSet { handlers }
-    }
-
-    /// Get handler kind for an operation
-    pub fn get(&self, operation: &str) -> Option<&RuntimeHandlerKind> {
-        self.handlers.get(operation)
-    }
-}
-
-/// Types of runtime effect operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeHandlerKind {
-    Fork,
-    Yield,
-    ChanNew,
-    Send,
-    Recv,
-    Join,
-    Select,
-    Io,
+    /// Runtime effect scope - delimiter that captures runtime effects at fiber boundary.
+    /// RuntimeScope stays on stack after capture (persistent delimiter) and produces
+    /// RuntimeEffect values for the scheduler.
+    RuntimeScope,
 }
 
 /// Effects that require runtime/scheduler handling.
@@ -325,8 +255,6 @@ pub enum CollectKind {
     Tuple,
     Constructor { name: String },
     Record { type_name: String, field_names: Vec<String> },
-    /// Collecting arguments for a perform operation
-    PerformArgs { effect: String, operation: String },
 }
 
 // ============================================================================
@@ -1342,11 +1270,6 @@ impl Interpreter {
                 // At runtime, nothing to do (like ADT type declarations)
                 Ok(())
             }
-            Decl::EffectDecl { .. } => {
-                // Effect declarations are handled during type inference
-                // At runtime, nothing to do (handlers are processed separately)
-                Ok(())
-            }
         }
     }
 
@@ -1421,9 +1344,7 @@ impl Interpreter {
     pub fn eval_expr_with_io(&mut self, env: &Env, expr: &Expr) -> Result<Value, EvalError> {
         // Create initial state with RuntimeScope for effect handling
         let mut cont = Cont::new();
-        cont.push(Frame::RuntimeScope {
-            handlers: RuntimeHandlerSet::async_handlers(),
-        });
+        cont.push(Frame::RuntimeScope);
 
         let mut state = State::Eval {
             expr: Rc::new(expr.clone()),
@@ -1446,9 +1367,7 @@ impl Interpreter {
 
                             // Resume with the result
                             let mut new_cont = effect_cont;
-                            new_cont.push(Frame::RuntimeScope {
-                                handlers: RuntimeHandlerSet::async_handlers(),
-                            });
+                            new_cont.push(Frame::RuntimeScope);
                             state = State::Apply {
                                 value: resume_value,
                                 cont: new_cont,
@@ -1733,72 +1652,6 @@ impl Interpreter {
                 })
             }
 
-            // ========================================================================
-            // Algebraic Effects
-            // ========================================================================
-            ExprKind::Perform { effect, operation, args } => {
-                if args.is_empty() {
-                    // No arguments - perform immediately
-                    self.perform_operation(effect, operation, vec![], env, cont)
-                } else {
-                    // Need to evaluate arguments first
-                    // Use Collect to gather all args, then perform
-                    let mut remaining = args.clone();
-                    let first = remaining.remove(0);
-                    cont.push(Frame::Collect {
-                        kind: CollectKind::PerformArgs {
-                            effect: effect.clone(),
-                            operation: operation.clone(),
-                        },
-                        remaining,
-                        acc: vec![],
-                        env: env.clone(),
-                    });
-                    StepResult::Continue(State::Eval {
-                        expr: Rc::new(first),
-                        env,
-                        cont,
-                    })
-                }
-            }
-
-            ExprKind::Handle { body, return_clause, handlers } => {
-                // Determine the effect name from handlers (all should be same effect)
-                // For now, use the first handler's operation to look up the effect
-                let effect_name = if !handlers.is_empty() {
-                    // We'll match on operation names; effect name comes from usage
-                    // For simplicity, store empty - matching is by operation name
-                    String::new()
-                } else {
-                    String::new()
-                };
-
-                // Convert AST handlers to runtime handlers
-                let runtime_handlers: Vec<RuntimeHandler> = handlers.iter().map(|h| {
-                    RuntimeHandler {
-                        operation: h.operation.clone(),
-                        params: h.params.clone(),
-                        continuation: h.continuation.clone(),
-                        body: Rc::new((*h.body).clone()),
-                    }
-                }).collect();
-
-                // Push handler scope and evaluate body
-                cont.push(Frame::HandleScope {
-                    effect_name,
-                    handlers: runtime_handlers,
-                    return_pattern: return_clause.pattern.clone(),
-                    return_body: Rc::new((*return_clause.body).clone()),
-                    env: env.clone(),
-                });
-
-                StepResult::Continue(State::Eval {
-                    expr: body.clone(),
-                    env,
-                    cont,
-                })
-            }
-
             ExprKind::Select { arms } => {
                 if arms.is_empty() {
                     return StepResult::Error(EvalError::RuntimeError("empty select".into()));
@@ -1917,10 +1770,6 @@ impl Interpreter {
                     type_name,
                     fields: im::HashMap::new(),
                 },
-                CollectKind::PerformArgs { effect, operation } => {
-                    // No arguments - perform operation with empty args
-                    return self.perform_operation(&effect, &operation, vec![], env, cont);
-                }
             };
             StepResult::Continue(State::Apply { value, cont })
         } else {
@@ -1938,120 +1787,6 @@ impl Interpreter {
                 env,
                 cont,
             })
-        }
-    }
-
-    /// Perform an effect operation - search for handler and dispatch
-    fn perform_operation(
-        &mut self,
-        effect: &str,
-        operation: &str,
-        args: Vec<Value>,
-        _env: Env,
-        mut cont: Cont,
-    ) -> StepResult {
-        // Search for a handler that handles this operation
-        let mut captured = Vec::new();
-
-        loop {
-            match cont.pop() {
-                None => {
-                    return StepResult::Error(EvalError::RuntimeError(format!(
-                        "Unhandled effect operation: {}.{}",
-                        effect, operation
-                    )));
-                }
-                Some(Frame::HandleScope { handlers, return_pattern, return_body, env, effect_name }) => {
-                    // Check if any handler matches this operation
-                    let handler_idx = handlers.iter().position(|h| h.operation == operation);
-
-                    if let Some(idx) = handler_idx {
-                        // Clone what we need from the handler before moving handlers
-                        let handler_params = handlers[idx].params.clone();
-                        let handler_continuation = handlers[idx].continuation.clone();
-                        let handler_body = handlers[idx].body.clone();
-
-                        // For deep handlers: include the HandleScope in the continuation
-                        // so that subsequent operations in the resumed computation are still handled
-                        captured.push(Frame::HandleScope {
-                            effect_name,
-                            handlers,
-                            return_pattern,
-                            return_body,
-                            env: env.clone(),
-                        });
-
-                        // Found a handler! Create continuation from captured frames
-                        // Reverse so outermost is first (for restore)
-                        captured.reverse();
-                        let continuation = Value::Continuation { frames: captured };
-
-                        // Create handler environment with bound parameters and continuation
-                        let handler_env = EnvInner::with_parent(&env);
-
-                        // Bind operation parameters
-                        for (param, arg_val) in handler_params.iter().zip(args.iter()) {
-                            if !self.try_bind_pattern(&handler_env, param, arg_val) {
-                                return StepResult::Error(EvalError::MatchFailed);
-                            }
-                        }
-
-                        // Bind continuation to k
-                        handler_env.borrow_mut().define(handler_continuation, continuation);
-
-                        // Handler body runs outside the handle scope
-                        // When it invokes k, the captured frames (including HandleScope) are restored
-                        return StepResult::Continue(State::Eval {
-                            expr: handler_body,
-                            env: handler_env,
-                            cont,
-                        });
-                    } else {
-                        // This handler doesn't handle this operation - keep searching
-                        // Preserve the original return_pattern and return_body so when the
-                        // continuation resumes, this handler still works correctly
-                        captured.push(Frame::HandleScope {
-                            effect_name,
-                            handlers,
-                            return_pattern,
-                            return_body,
-                            env,
-                        });
-                    }
-                }
-
-                // RuntimeScope handles Async effect operations for the scheduler
-                Some(Frame::RuntimeScope { handlers }) => {
-                    if effect == "Async" {
-                        // Use &kind pattern to copy the value (RuntimeHandlerKind is Copy)
-                        // This releases the borrow on handlers before we move it
-                        if let Some(&kind) = handlers.get(operation) {
-                            // Put RuntimeScope back (it's a persistent delimiter)
-                            cont.push(Frame::RuntimeScope { handlers });
-
-                            // Captured frames become the continuation
-                            captured.reverse();
-                            let effect_cont = Cont::from_frames(captured);
-
-                            // Build RuntimeEffect based on handler kind
-                            match self.build_runtime_effect(&kind, operation, args, effect_cont) {
-                                Ok(runtime_effect) => {
-                                    // Return RuntimeEffect to scheduler
-                                    return self.return_runtime_effect(runtime_effect, cont);
-                                }
-                                Err(e) => return StepResult::Error(e),
-                            }
-                        }
-                    }
-                    // This RuntimeScope doesn't handle this effect - keep searching
-                    captured.push(Frame::RuntimeScope { handlers });
-                }
-
-                Some(frame) => {
-                    // Keep capturing frames
-                    captured.push(frame);
-                }
-            }
         }
     }
 
@@ -2244,10 +1979,6 @@ impl Interpreter {
                             let result = Value::Record { type_name, fields };
                             StepResult::Continue(State::Apply { value: result, cont })
                         }
-                        CollectKind::PerformArgs { effect, operation } => {
-                            // All args collected, now perform the operation
-                            self.perform_operation(&effect, &operation, acc, env, cont)
-                        }
                     }
                 } else {
                     // More to collect
@@ -2293,21 +2024,6 @@ impl Interpreter {
                 }
             }
 
-            // === Algebraic effect frames ===
-            Some(Frame::HandleScope { return_pattern, return_body, env, .. }) => {
-                // Handler body completed normally (no effect performed)
-                // Execute the return clause with the final value
-                let return_env = EnvInner::with_parent(&env);
-                if !self.try_bind_pattern(&return_env, &return_pattern, &value) {
-                    return StepResult::Error(EvalError::MatchFailed);
-                }
-                StepResult::Continue(State::Eval {
-                    expr: return_body,
-                    env: return_env,
-                    cont,
-                })
-            }
-
             // === Concurrency frames ===
             Some(Frame::Spawn) => {
                 let pid = self.runtime.spawn(value);
@@ -2317,8 +2033,8 @@ impl Interpreter {
                 })
             }
 
-            // === Runtime effect scope (unified algebraic effects) ===
-            Some(Frame::RuntimeScope { handlers: _ }) => {
+            // === Runtime effect scope ===
+            Some(Frame::RuntimeScope) => {
                 // Check if this is a runtime effect propagating to scheduler
                 if let Value::RuntimeEffect(effect) = value {
                     // Already a runtime effect - propagate directly
@@ -3055,8 +2771,6 @@ impl Interpreter {
 
             Value::Continuation { frames } => {
                 // Splice captured frames back onto stack
-                // For algebraic effect continuations, the HandleScope is already included
-                // in the captured frames for deep handler semantics
                 // Frames are stored outermost-first, push in order so innermost ends up on top
                 for frame in frames.into_iter() {
                     cont.push(frame);
@@ -4247,9 +3961,9 @@ impl Interpreter {
                         "runtime effect without enclosing RuntimeScope".into(),
                     ));
                 }
-                Some(Frame::RuntimeScope { handlers }) => {
+                Some(Frame::RuntimeScope) => {
                     // Found delimiter - put it back (persistent delimiter)
-                    cont.push(Frame::RuntimeScope { handlers });
+                    cont.push(Frame::RuntimeScope);
                     break;
                 }
                 Some(frame) => {
@@ -4270,97 +3984,6 @@ impl Interpreter {
             value: Value::RuntimeEffect(effect),
             cont,
         })
-    }
-
-    /// Build a RuntimeEffect from a handler kind and arguments.
-    /// Called when perform Async.op hits a RuntimeScope.
-    fn build_runtime_effect(
-        &self,
-        kind: &RuntimeHandlerKind,
-        _operation: &str,
-        args: Vec<Value>,
-        cont: Cont,
-    ) -> Result<RuntimeEffect, EvalError> {
-        match kind {
-            RuntimeHandlerKind::Fork => {
-                if args.len() != 1 {
-                    return Err(EvalError::RuntimeError(format!(
-                        "Async.fork expects 1 argument, got {}", args.len()
-                    )));
-                }
-                Ok(RuntimeEffect::Fork {
-                    thunk: Box::new(args.into_iter().next().unwrap()),
-                    cont,
-                })
-            }
-            RuntimeHandlerKind::Yield => {
-                Ok(RuntimeEffect::Yield { cont })
-            }
-            RuntimeHandlerKind::ChanNew => {
-                Ok(RuntimeEffect::ChanNew { cont })
-            }
-            RuntimeHandlerKind::Send => {
-                if args.len() != 2 {
-                    return Err(EvalError::RuntimeError(format!(
-                        "Async.send expects 2 arguments, got {}", args.len()
-                    )));
-                }
-                let mut args = args.into_iter();
-                let channel = match args.next().unwrap() {
-                    Value::Channel(id) => id,
-                    other => return Err(EvalError::RuntimeError(format!(
-                        "Async.send expects Channel, got {}", other.type_name()
-                    ))),
-                };
-                let value = args.next().unwrap();
-                Ok(RuntimeEffect::Send {
-                    channel,
-                    value: Box::new(value),
-                    cont,
-                })
-            }
-            RuntimeHandlerKind::Recv => {
-                if args.len() != 1 {
-                    return Err(EvalError::RuntimeError(format!(
-                        "Async.recv expects 1 argument, got {}", args.len()
-                    )));
-                }
-                let channel = match args.into_iter().next().unwrap() {
-                    Value::Channel(id) => id,
-                    other => return Err(EvalError::RuntimeError(format!(
-                        "Async.recv expects Channel, got {}", other.type_name()
-                    ))),
-                };
-                Ok(RuntimeEffect::Recv { channel, cont })
-            }
-            RuntimeHandlerKind::Join => {
-                if args.len() != 1 {
-                    return Err(EvalError::RuntimeError(format!(
-                        "Async.join expects 1 argument, got {}", args.len()
-                    )));
-                }
-                let fiber_id = match args.into_iter().next().unwrap() {
-                    Value::Fiber(id) => id,
-                    other => return Err(EvalError::RuntimeError(format!(
-                        "Async.join expects Fiber, got {}", other.type_name()
-                    ))),
-                };
-                Ok(RuntimeEffect::Join { fiber_id, cont })
-            }
-            RuntimeHandlerKind::Select => {
-                // Select is complex - needs special handling
-                // For now, return an error; we'll implement this properly later
-                Err(EvalError::RuntimeError(
-                    "Async.select not yet implemented via perform".into()
-                ))
-            }
-            RuntimeHandlerKind::Io => {
-                // IO operations need special handling too
-                Err(EvalError::RuntimeError(
-                    "Async.io not yet implemented via perform".into()
-                ))
-            }
-        }
     }
 
     /// Try to bind a pattern, returning false if it doesn't match
@@ -4462,9 +4085,7 @@ impl Interpreter {
                             // Resume fiber with a value using fiber_cont
                             if let Some(mut fiber_cont) = self.runtime.take_fiber_cont(pid) {
                                 // Insert RuntimeScope at bottom for effect handling
-                                fiber_cont.insert_at_bottom(Frame::RuntimeScope {
-                                    handlers: RuntimeHandlerSet::async_handlers(),
-                                });
+                                fiber_cont.insert_at_bottom(Frame::RuntimeScope);
                                 let state = State::Apply {
                                     value,
                                     cont: fiber_cont,
@@ -4484,9 +4105,7 @@ impl Interpreter {
                                         // Build continuation with fiber_cont
                                         let mut cont = self.runtime.take_fiber_cont(pid).unwrap_or_default();
                                         // Insert RuntimeScope at bottom for effect handling
-                                        cont.insert_at_bottom(Frame::RuntimeScope {
-                                            handlers: RuntimeHandlerSet::async_handlers(),
-                                        });
+                                        cont.insert_at_bottom(Frame::RuntimeScope);
                                         let state = State::Eval {
                                             expr: arm.body,
                                             env: new_env,
@@ -4532,10 +4151,8 @@ impl Interpreter {
     fn run_process(&mut self, pid: Pid, thunk: Value) -> Result<(), EvalError> {
         // Build initial state: apply thunk to Unit
         let mut cont = Cont::new();
-        // Push RuntimeScope at the bottom for unified algebraic effects handling
-        cont.push(Frame::RuntimeScope {
-            handlers: RuntimeHandlerSet::async_handlers(),
-        });
+        // Push RuntimeScope at the bottom as the runtime-effect delimiter
+        cont.push(Frame::RuntimeScope);
         cont.push(Frame::AppArg { func: thunk });
         let state = State::Apply {
             value: Value::Unit,
@@ -5107,27 +4724,6 @@ let main () =
 
     use crate::infer::Inferencer;
     use crate::types::{InstanceInfo, TraitInfo, Type as InferType};
-
-    /// Helper to run a program with type inference, copying ClassEnv to interpreter
-    fn run_typed_program(input: &str) -> Result<Value, String> {
-        let tokens = Lexer::new(input).tokenize().map_err(|e| e.to_string())?;
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().map_err(|e| e.to_string())?;
-
-        // Run type inference to build ClassEnv
-        let mut inferencer = Inferencer::new();
-        let _env = inferencer
-            .infer_program(&program)
-            .map_err(|errors| {
-                errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
-            })?;
-
-        // Run the program with the class env
-        let mut interp = Interpreter::new();
-        // Copy the class_env from inference phase
-        // Note: We can't directly access class_env from inferencer, so we'll test via integration
-        interp.run(&program).map_err(|e| e.to_string())
-    }
 
     #[test]
     fn test_value_to_type() {

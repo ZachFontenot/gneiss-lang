@@ -78,7 +78,6 @@ Visibility is controlled by the module's export list, not per-declaration keywor
 ```ebnf
 decl        ::= let_decl
               | type_decl
-              | effect_decl
               | trait_decl
               | impl_decl
               | fixity_decl
@@ -115,36 +114,6 @@ constructor ::= UPPER_IDENT type_atom*
 record_type ::= '{' field_decl (',' field_decl)* ','? '}'
 
 field_decl  ::= IDENT ':' type_expr
-```
-
-### Effect Declarations
-
-```ebnf
-effect_decl ::= 'effect' UPPER_IDENT type_param* '=' effect_body 'end'
-
-effect_body ::= effect_op*
-
-effect_op   ::= '|' IDENT ':' type_expr
-```
-
-**Examples**:
-```gneiss
--- Simple effect
-effect Ask =
-    | ask : () -> Int
-end
-
--- Parameterized effect
-effect State s =
-    | get : () -> s
-    | put : s -> ()
-end
-
--- Effect with polymorphic operations
-effect Choice =
-    | choose : [a] -> a
-    | fail : () -> a
-end
 ```
 
 ### Trait Declarations
@@ -289,16 +258,7 @@ expr_atom   ::= literal
               | '[' (expr (',' expr)*)? ','? ']'    (* list *)
               | '{' expr 'with' record_update '}'   (* record update *)
               | '{' record_literal_fields '}'       (* record literal *)
-              | expr_perform
-              | expr_handle
               | 'spawn' expr_atom
-
-expr_perform ::= 'perform' qualified_name expr_atom*
-
-expr_handle ::= 'handle' expr 'with' handler_arm+ 'end'
-
-handler_arm ::= '|' 'return' IDENT '->' expr
-              | '|' IDENT pattern* IDENT '->' expr
 
 record_literal ::= '{' record_literal_fields '}'
 
@@ -452,7 +412,6 @@ if cond then (print "a"; 1) else (print "b"; 2)
 ```
 let rec and in fun match with if then else
 type trait impl for where val end
-effect handle perform return
 import export as
 spawn select
 true false not

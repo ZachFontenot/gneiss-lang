@@ -1,52 +1,14 @@
 # Gneiss Future Work Roadmap
 
-Strategic plan for evolving Gneiss toward a production-ready functional language with predictable performance, algebraic effects, and batteries-included stdlib.
+Strategic plan for evolving Gneiss toward a production-ready functional language with predictable performance and a batteries-included stdlib.
 
 *Created: 2025-12-27*
 
 ## Vision Summary
 
 - **Safety + Performance**: Haskell/OCaml/Rust-level abstractions with predictable, GC-free performance via Perceus
-- **Pure FP by default**: IO under algebraic effects, but ergonomic (implicit in REPL/run mode)
 - **Batteries included**: Node.js/Go-level stdlib completeness
 - **Koka-style compilation**: Perceus reference counting → C output
-
----
-
-## Phase 1: IO Under Effects (Foundation)
-
-**Goal**: Move from free side-effecting to IO-as-effect while maintaining ergonomics.
-
-**Beads Epic**: `gneiss-lang-ve4m`
-
-### 1.1 Type System Changes
-- **File**: `src/infer.rs` (lines 3199-3208)
-- Change `print` type signature from `Row::Empty` to `Row::Extend { effect: IO, ... }`
-- Add IO effect to function signature propagation
-- Same for `get_args`, debug output functions
-
-### 1.2 Runtime Changes
-- **File**: `src/eval.rs` (lines 3625-3628)
-- Change `print` from immediate execution to `BuiltinResult::Effect(EffectStub::Io)`
-- Add `IoOp::Print { value }` variant
-- Console I/O joins file/network I/O pathway through scheduler
-
-### 1.3 Implicit IO Environments
-- **REPL mode**: Wrap each input in implicit IO handler (like Haskell's GHCi)
-- **Run mode**: Wrap `main()` in implicit IO+Async handlers
-- **Library code**: Must declare IO effect in signatures
-- Result: Convenient scripting, type-safe libraries
-
-### 1.4 Debug Escape Hatch
-- Add `--debug` Cargo feature flag
-- When enabled: `debug_print` builtin works without effect tracking
-- Production builds: all IO tracked
-
-### Files to modify:
-- `src/infer.rs` - type signatures
-- `src/eval.rs` - runtime behavior
-- `src/main.rs` - implicit handlers for REPL/run
-- `stdlib/effect/io.gn` - ensure complete
 
 ---
 
@@ -92,7 +54,6 @@ enum ExecutionMode {
 ```
 
 ### 3.2 REPL Mode Behavior
-- Implicit IO handler wrapping each input
 - Accumulated TypeEnv and global Env across inputs
 - `:type`, `:load`, `:env` commands
 - History and line editing (rustyline)
@@ -100,7 +61,6 @@ enum ExecutionMode {
 
 ### 3.3 Script/Run Mode Behavior
 - `gneiss run <file>` or `gneiss <file>`
-- Implicit IO+Async handlers at top level
 - `main()` required (or last expression is result)
 - Module system fully active
 - Optimizations enabled
@@ -109,7 +69,6 @@ enum ExecutionMode {
 ### 3.4 Shared Infrastructure
 - Same interpreter core (`eval.rs`)
 - Same type checker (`infer.rs`)
-- Mode flag changes implicit handler behavior
 
 ### Files to modify:
 - `src/main.rs` - command parsing, mode dispatch
@@ -170,7 +129,6 @@ stdlib/
   net/        -- Http, Tcp, Url
   format/     -- Json, Yaml, Csv
   time/       -- DateTime, Duration
-  effect/     -- IO, State, Reader, Writer, etc.
 ```
 
 ---
@@ -192,7 +150,6 @@ stdlib/
 - Design typed intermediate representation
 - Explicit allocations and drops
 - Tail call annotations (from Phase 2)
-- Effect handlers → control flow
 
 ### 5.3 Perceus Transformation
 - Insert reference count operations
@@ -202,7 +159,6 @@ stdlib/
 ### 5.4 C Code Generation
 - Generate readable C code (like Koka does)
 - Runtime library: tagged unions, closures, RC primitives
-- Effect handler → setjmp/longjmp or explicit state machine
 
 ### 5.5 Build Integration
 - `gneiss compile <file>` → generates C
@@ -212,12 +168,11 @@ stdlib/
 
 ### Milestones:
 1. IR design and printer
-2. Simple expressions compile (no effects)
+2. Simple expressions compile
 3. Closures and allocations work
 4. Reference counting correct
 5. Reuse analysis optimization
-6. Effect handlers compile
-7. Full language support
+6. Full language support
 
 ---
 
@@ -282,14 +237,13 @@ tests/
 ### 7.3 Linter
 - Unused bindings
 - Shadowing warnings
-- Effect leakage detection
 - Style suggestions
 
 ### 7.4 Debugger
 - Breakpoints
 - Step evaluation
 - Inspect environments
-- Fiber/effect stack visualization
+- Fiber stack visualization
 
 ### Priority:
 These are deferred until core language work (Phases 1-5) is solid.
@@ -299,11 +253,10 @@ These are deferred until core language work (Phases 1-5) is solid.
 ## Implementation Priority
 
 ### Primary Track (sequential):
-1. **Phase 1: IO Under Effects** - Foundation for pure FP
-2. **Phase 2: TCO** - Needed for idiomatic FP, feeds into codegen
-3. **Phase 3: REPL/Script Split** - Builds on Phase 1
-4. **Phase 5: Perceus Codegen** - Major undertaking, after foundations solid
-5. **Phase 7: Tooling** - After language stable
+1. **Phase 2: TCO** - Needed for idiomatic FP, feeds into codegen
+2. **Phase 3: REPL/Script Split** - Mode separation
+3. **Phase 5: Perceus Codegen** - Major undertaking, after foundations solid
+4. **Phase 7: Tooling** - After language stable
 
 ### Parallel Tracks:
 - **Phase 4: Stdlib** - Expand incrementally alongside all phases
@@ -314,8 +267,8 @@ These are deferred until core language work (Phases 1-5) is solid.
 ## Dependency Graph
 
 ```
-Phase 1 (IO) ─┬─→ Phase 2 (TCO) ──→ Phase 5 (Perceus) ──→ Phase 7 (Tooling)
-              └─→ Phase 3 (REPL Split)
+Phase 2 (TCO) ──→ Phase 5 (Perceus) ──→ Phase 7 (Tooling)
+Phase 3 (REPL Split) ──→ (independent)
 
 Phase 4 (Stdlib) ──→ (parallel, no dependencies)
 Phase 6 (Test Audit) ──→ (parallel, no dependencies)

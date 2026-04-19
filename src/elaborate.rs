@@ -119,12 +119,7 @@ impl Inferencer {
                 Some(TDecl::LetRec { bindings: tbindings })
             }
 
-            Decl::Type {
-                name,
-                params,
-                constructors,
-                ..
-            } => Some(TDecl::Let {
+            Decl::Type { name, .. } => Some(TDecl::Let {
                 // Wrap type decl in a dummy let for now
                 // Type declarations pass through as TItem::TypeDecl in real use
                 pattern: TPattern {
@@ -136,18 +131,18 @@ impl Inferencer {
                 value: TExpr::new(TExprKind::Lit(Literal::Unit), Type::Unit, Span::default()),
             }),
 
-            Decl::Trait { name, type_param, methods, .. } => {
+            Decl::Trait { .. } => {
                 // Convert trait to TItem::TraitDecl
                 // For now, return None as these are handled specially
                 None
             }
 
-            Decl::Instance { trait_name, target_type, methods, .. } => {
+            Decl::Instance { .. } => {
                 // Instance declarations are handled specially
                 None
             }
 
-            _ => None, // Val, OperatorDef, Fixity, TypeAlias, Effect
+            _ => None, // Val, OperatorDef, Fixity, TypeAlias
         }
     }
 
@@ -388,53 +383,6 @@ impl Inferencer {
                 TExprKind::Select { arms: tarms }
             }
 
-            // Algebraic effects
-            ExprKind::Perform {
-                effect,
-                operation,
-                args,
-            } => TExprKind::Perform {
-                effect: effect.clone(),
-                operation: operation.clone(),
-                args: args.iter().map(|e| self.elaborate_expr(e, env)).collect(),
-            },
-
-            ExprKind::Handle {
-                body,
-                return_clause,
-                handlers,
-            } => {
-                let tbody = self.elaborate_expr(body, env);
-                let treturn = THandlerReturn {
-                    pattern: self.elaborate_pattern(&return_clause.pattern, &tbody.ty),
-                    body: Box::new(self.elaborate_expr(&return_clause.body, env)),
-                };
-                let thandlers = handlers
-                    .iter()
-                    .map(|h| {
-                        // Look up effect operation parameter types from EffectEnv
-                        let param_types = self.effect_operation_param_types(&h.operation, h.params.len());
-                        let tparams: Vec<_> = h
-                            .params
-                            .iter()
-                            .zip(param_types.iter())
-                            .map(|(p, pty)| self.elaborate_pattern(p, pty))
-                            .collect();
-                        THandlerArm {
-                            operation: h.operation.clone(),
-                            params: tparams,
-                            continuation: h.continuation.clone(),
-                            body: Box::new(self.elaborate_expr(&h.body, env)),
-                        }
-                    })
-                    .collect();
-                TExprKind::Handle {
-                    body: Rc::new(tbody),
-                    return_clause: treturn,
-                    handlers: thandlers,
-                }
-            }
-
             // Records
             ExprKind::Record { name, fields } => {
                 let tfields = fields
@@ -612,15 +560,4 @@ impl Inferencer {
         Type::Unit
     }
 
-    /// Get the parameter types for an effect operation.
-    /// Uses EffectEnv to look up the operation's parameter types.
-    fn effect_operation_param_types(&self, operation_name: &str, count: usize) -> Vec<Type> {
-        if let Some((_, op_info)) = self.effect_env.operations.get(operation_name) {
-            if op_info.param_types.len() == count {
-                return op_info.param_types.clone();
-            }
-        }
-        // Fallback to Unit placeholders if not found
-        vec![Type::Unit; count]
-    }
 }

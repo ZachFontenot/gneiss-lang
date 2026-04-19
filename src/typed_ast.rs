@@ -132,20 +132,6 @@ pub enum TExprKind {
     },
 
     // ========================================================================
-    // Algebraic Effects
-    // ========================================================================
-    Perform {
-        effect: Ident,
-        operation: Ident,
-        args: Vec<TExpr>,
-    },
-    Handle {
-        body: Rc<TExpr>,
-        return_clause: THandlerReturn,
-        handlers: Vec<THandlerArm>,
-    },
-
-    // ========================================================================
     // Records
     // ========================================================================
     Record {
@@ -226,20 +212,6 @@ pub struct TSelectArm {
 }
 
 #[derive(Debug, Clone)]
-pub struct THandlerReturn {
-    pub pattern: TPattern,
-    pub body: Box<TExpr>,
-}
-
-#[derive(Debug, Clone)]
-pub struct THandlerArm {
-    pub operation: Ident,
-    pub params: Vec<TPattern>,
-    pub continuation: Ident,
-    pub body: Box<TExpr>,
-}
-
-#[derive(Debug, Clone)]
 pub struct TRecBinding {
     pub name: Ident,
     /// The scheme for this recursive binding
@@ -280,11 +252,6 @@ pub enum TItem {
         trait_name: Ident,
         for_type: Type,
         methods: Vec<(Ident, TExpr)>,
-    },
-    /// Effect declarations
-    EffectDecl {
-        name: Ident,
-        operations: Vec<(Ident, Type)>,
     },
     /// Module declarations
     Module {
@@ -465,11 +432,6 @@ impl TItem {
                     texpr.collect_validation_issues(issues);
                 }
             }
-            TItem::EffectDecl { operations, .. } => {
-                for (_, ty) in operations {
-                    issues.extend(ty.validation_issues());
-                }
-            }
             TItem::Module { items, .. } => {
                 for item in items {
                     item.collect_validation_issues(issues);
@@ -588,22 +550,6 @@ impl TExpr {
                     arm.channel.collect_validation_issues(issues);
                     arm.pattern.collect_validation_issues(issues);
                     arm.body.collect_validation_issues(issues);
-                }
-            }
-            TExprKind::Perform { args, .. } => {
-                for a in args {
-                    a.collect_validation_issues(issues);
-                }
-            }
-            TExprKind::Handle { body, return_clause, handlers } => {
-                body.collect_validation_issues(issues);
-                return_clause.pattern.collect_validation_issues(issues);
-                return_clause.body.collect_validation_issues(issues);
-                for h in handlers {
-                    for p in &h.params {
-                        p.collect_validation_issues(issues);
-                    }
-                    h.body.collect_validation_issues(issues);
                 }
             }
             TExprKind::Record { fields, .. } => {

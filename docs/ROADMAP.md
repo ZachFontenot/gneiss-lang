@@ -16,14 +16,6 @@
 - **Select**: Multi-arm select over multiple channels
 - **Deadlock Detection**: Reports when all fibers are blocked
 
-### Algebraic Effects ✓
-- **Effect Declarations**: `effect State s = | get : () -> s | put : s -> () end`
-- **Perform Operations**: `perform Effect.op args` invokes effect operations
-- **Handlers**: `handle expr with | return x -> ... | op args k -> ... end`
-- **Multi-resume**: Captured continuations callable multiple times
-- **Effect Polymorphism**: Functions forward effects of their arguments
-- **Foundation for Fibers**: Effects underlie fiber operations internally
-
 ### Typeclasses ✓
 - **Trait Declarations**: `trait Show a = val show : a -> String end`
 - **Instance Declarations**: Basic and constrained instances
@@ -94,7 +86,6 @@ let main () =
 
 ### Type System Opportunities
 
-- **Static effect checking** - Currently runtime-checked; could track statically
 - **Resource types** - Ensure handles are closed (linear/affine)
 - **Validated strings** - URLs, HTML-escaped text
 - **Protocol state machines** - Type-safe HTTP parsing
@@ -247,7 +238,6 @@ let main () =
 - WebAssembly target for browser/edge deployment
 
 ### Advanced Type System
-- **Static effect checking** - Move from runtime to compile-time effect checking
 - **Resource types** - Linear/affine types for safe resource management
 - **Refinement types** - Dependent-ish types for tighter constraints
 - **Row polymorphism** - Extensible records without boilerplate
@@ -276,11 +266,10 @@ This would make Gneiss competitive for systems programming while keeping the pur
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Concurrency | Fibers + algebraic effects | Clean foundation, single mechanism |
+| Concurrency | Fibers + channels | Clean foundation, single mechanism |
 | Channels | Synchronous rendezvous | Simple semantics, forces explicit sync |
 | Type inference | Hindley-Milner | Well-understood, sufficient |
 | Typeclasses | Dictionary passing | Works with separate compilation |
-| Effects | Algebraic (Koka-style) | Composable, typed, underlies fibers |
 | Parser | Handwritten recursive descent | Control over error messages |
 | Scheduler | Single-threaded cooperative | Simple for v0.1, parallelism later |
 | Syntax | OCaml-inspired | Familiar to ML users |
@@ -289,12 +278,6 @@ This would make Gneiss competitive for systems programming while keeping the pur
 ---
 
 ## References
-
-**Algebraic Effects:**
-- Plotkin & Pretnar - "Handlers of Algebraic Effects"
-- Leijen - "Type Directed Compilation of Row-typed Algebraic Effects" (Koka)
-- Dolan et al - "Concurrent System Programming with Effect Handlers"
-- Hillerström & Lindley - "Liberating Effects with Rows and Handlers"
 
 **Type Systems:**
 - Pierce - "Types and Programming Languages"

@@ -11,11 +11,8 @@
 //! 3. Effect sequencing and ordering
 //! 4. Edge cases and error conditions
 
-use gneiss::eval::{EvalError, Value};
-use gneiss::test_support::{
-    assert_eval_int, assert_type, eval_expr, run_program, run_program_err, run_program_ok,
-    typecheck_expr, typecheck_program, FiberEffectTrace,
-};
+use gneiss::eval::EvalError;
+use gneiss::test_support::{run_program_err, run_program_ok, typecheck_program};
 
 // ============================================================================
 // Type Checking Tests - Verify types are correct before running

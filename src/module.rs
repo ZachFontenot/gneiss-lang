@@ -509,13 +509,6 @@ fn extract_module_info(program: &Program) -> (Vec<ImportSpec>, HashSet<String>) 
                         Decl::OperatorDef { op, .. } => {
                             exports.insert(op.clone());
                         }
-                        Decl::EffectDecl { name, operations, .. } => {
-                            exports.insert(name.clone());
-                            // Also export effect operations
-                            for op in operations {
-                                exports.insert(op.name.clone());
-                            }
-                        }
                         Decl::Fixity { .. } | Decl::Val { .. } | Decl::Instance { .. } => {}
                     }
                 }

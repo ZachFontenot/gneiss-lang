@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gneiss::ast::*;
 use gneiss::infer::Inferencer;
-use gneiss::types::{Row, *};
+use gneiss::types::*;
 use gneiss::{Interpreter, Lexer, Parser, Value};
 
 // ============================================================================
@@ -46,7 +46,6 @@ fn arb_ground_type(depth: usize) -> BoxedStrategy<Type> {
                     Type::Arrow {
                         arg: Rc::new(a),
                         ret: Rc::new(b),
-                        effects: Row::Empty,
                     }
                 }),
             1 => prop::collection::vec(arb_ground_type(depth - 1), 2..=3)
@@ -83,7 +82,6 @@ fn arb_type_with_vars(depth: usize) -> BoxedStrategy<Type> {
                     Type::Arrow {
                         arg: Rc::new(a),
                         ret: Rc::new(b),
-                        effects: Row::Empty,
                     }
                 }),
         ]
@@ -410,7 +408,6 @@ proptest! {
         let arrow = Type::Arrow {
             arg: Rc::new(var.clone()),
             ret: Rc::new(Type::Int),
-            effects: Row::Empty,
         };
         prop_assert!(arrow.occurs_syntactic(var_id),
             "Type variable t{} should occur in {} -> Int", var_id, var);

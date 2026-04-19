@@ -288,7 +288,6 @@ When implementing a new feature, tests MUST be written for each applicable layer
 | Type declarations | Required | Required | Required | N/A |
 | Typeclasses | Required | Required | Required | Required |
 | Channels | Required | Required | Required | Required |
-| Effects | Required | Required | Required | Required |
 | Records | Required | Required | Required | Required |
 
 **Do NOT skip layers.** A feature without rejection tests is incomplete.
@@ -505,8 +504,8 @@ fn polymorphic_function_preserves_trait_dispatch() {
    in a realistic context, not just the minimal reproduction
 2. **For polymorphic code** - Polymorphism + traits + type inference interact
    in subtle ways
-3. **For nested constructs** - Match inside let inside lambda inside handler
-4. **For the scheduler** - Multiple fibers + channels + effects together
+3. **For nested constructs** - Match inside let inside lambda
+4. **For the scheduler** - Multiple fibers + channels together
 
 ---
 
@@ -561,8 +560,7 @@ tests/
 ├── type_inference.rs    # Layer 3: Type inference tests
 ├── type_rejection.rs    # Layer 2: Type rejection tests
 ├── properties.rs        # Property-based type soundness
-├── fiber_effects.rs     # Layer 4: Effect sequence tests
-├── algebraic_effects.rs # Layer 4: Effect handler tests
+├── fiber_effects.rs     # Layer 4: Runtime effect sequence tests
 ├── error_snapshots.rs   # Error message format tests
 └── ...
 ```

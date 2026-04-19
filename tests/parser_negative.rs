@@ -4,17 +4,7 @@
 //! and produces appropriate error messages.
 
 use gneiss::lexer::Lexer;
-use gneiss::parser::{Parser, ParseError};
-
-/// Parse input and expect failure
-fn parse_fails(input: &str) -> ParseError {
-    let tokens = Lexer::new(input).tokenize().expect("lexer should succeed");
-    let result = Parser::new(tokens).parse_program();
-    match result {
-        Ok(_) => panic!("expected parse error for: {}", input),
-        Err(e) => e,
-    }
-}
+use gneiss::parser::Parser;
 
 /// Parse input and verify it fails
 fn should_fail(input: &str) {

@@ -277,6 +277,15 @@ let x = {} in double x
     ) {
         // Ensure type and constructor names are different to avoid conflicts
         prop_assume!(type_name != ctor_name);
+        // Avoid shadowing prelude constructor/type names
+        let reserved = ["Ok", "Err", "Some", "None", "Option", "Result",
+                        "Int", "Float", "Bool", "String", "Char", "Unit",
+                        "List", "IoError", "NotFound", "PermissionDenied",
+                        "ConnectionRefused", "ConnectionReset", "BrokenPipe",
+                        "TimedOut", "AddrInUse", "AddrNotAvailable",
+                        "InvalidInput", "IoOther"];
+        prop_assume!(!reserved.contains(&type_name.as_str()));
+        prop_assume!(!reserved.contains(&ctor_name.as_str()));
 
         let source = format!(r#"
 trait Display a =
