@@ -3288,6 +3288,9 @@ impl Inferencer {
 
                         // Bind the pattern to the environment
                         self.bind_pattern_scheme(&mut env, pattern, scheme)?;
+
+                        // Discharge any predicates that didn't get captured into the scheme.
+                        self.discharge_remaining_preds(&body.span)?;
                         Ok(())
                     })();
 
@@ -3398,7 +3401,9 @@ impl Inferencer {
                         };
 
                         self.level -= 1;
-                        Ok(self.generalize(&func_ty))
+                        let scheme = self.generalize(&func_ty);
+                        self.discharge_remaining_preds(&body.span)?;
+                        Ok(scheme)
                     })();
 
                     match result {
@@ -3513,7 +3518,7 @@ impl Inferencer {
                         // Generalize and return schemes.
                         // Value restriction: parameter-less bindings only generalize if the body
                         // is a syntactic value.
-                        Ok(bindings.iter().enumerate().map(|(i, binding)| {
+                        let schemes: Vec<(String, Scheme)> = bindings.iter().enumerate().map(|(i, binding)| {
                             let scheme = if binding.params.is_empty()
                                 && !Self::is_syntactic_value(&binding.body)
                             {
@@ -3528,7 +3533,12 @@ impl Inferencer {
                                 self.generalize(&preliminary_types[i])
                             };
                             (binding.name.node.clone(), scheme)
-                        }).collect())
+                        }).collect();
+
+                        // Discharge any predicates that didn't get captured into the schemes.
+                        let span = bindings.first().map(|b| b.body.span.clone()).unwrap_or_default();
+                        self.discharge_remaining_preds(&span)?;
+                        Ok(schemes)
                     })();
 
                     match result {
@@ -3587,6 +3597,32 @@ impl Inferencer {
     #[cfg(test)]
     pub fn get_wanted_preds(&self) -> &[Pred] {
         &self.wanted_preds
+    }
+
+    /// Discharge any predicates left in `wanted_preds` after a top-level binding.
+    /// Predicates with concrete types must resolve to an instance — if not, that's
+    /// a `NoInstance` error. Predicates whose type is still an unbound variable
+    /// at this point have no way to escape (no scheme captured them) and are
+    /// dropped silently for now.
+    fn discharge_remaining_preds(&mut self, span: &Span) -> Result<(), TypeError> {
+        let preds: Vec<Pred> = std::mem::take(&mut self.wanted_preds);
+        for pred in preds {
+            let resolved_ty = pred.ty.resolve(&self.type_uf);
+            if matches!(resolved_ty, Type::Var(_) | Type::Generic(_)) {
+                // Unresolved type variable — can't resolve, can't generalize.
+                // Drop it for now (could be reported as ambiguity in a future pass).
+                continue;
+            }
+            let concrete = Pred::new(pred.trait_name.clone(), resolved_ty.clone());
+            if self.class_env.resolve_all(std::slice::from_ref(&concrete)).is_err() {
+                return Err(TypeError::NoInstance {
+                    trait_name: pred.trait_name,
+                    ty: resolved_ty,
+                    span: Some(span.clone()),
+                });
+            }
+        }
+        Ok(())
     }
 }
 

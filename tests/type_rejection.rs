@@ -148,6 +148,55 @@ let f x =
 }
 
 // ============================================================================
+// Predicate Discharge (typeclass constraints at top level)
+// ============================================================================
+// Predicates collected during binding inference must be discharged before the
+// next binding starts; otherwise unsatisfiable constraints leak to runtime.
+// (gneiss-lang-yz3r)
+
+mod predicate_discharge {
+    use super::*;
+
+    #[test]
+    fn print_no_show_instance_for_function_rejected() {
+        let result = typecheck_program("let main () = print (fun x -> x)");
+        assert!(
+            result.is_err(),
+            "print of a function (no Show instance) must be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn show_constraint_propagates_to_call_site() {
+        // f has a deferred Show constraint; when called with a function value,
+        // the constraint becomes Show (a -> a) which has no instance.
+        let result = typecheck_program(
+            r#"
+let f x = print x
+let main () = f (fun x -> x)
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "Show constraint must be checked at the call site that picks the type: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn print_int_still_works() {
+        // Sanity: print of values that DO have a Show instance must still typecheck.
+        let result = typecheck_program("let main () = print 42");
+        assert!(
+            result.is_ok(),
+            "print of Int should typecheck: {:?}",
+            result
+        );
+    }
+}
+
+// ============================================================================
 // Type Mismatch Rejection
 // ============================================================================
 
