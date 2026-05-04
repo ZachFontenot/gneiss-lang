@@ -1077,19 +1077,31 @@ impl Inferencer {
     /// This prevents unsound polymorphism for effectful expressions like Channel.new.
     fn is_syntactic_value(expr: &Expr) -> bool {
         match &expr.node {
-            // Literals are values
             ExprKind::Lit(_) => true,
-            // Variables are values (they refer to already-computed values)
             ExprKind::Var(_) => true,
-            // Lambdas are values (they don't execute until applied)
             ExprKind::Lambda { .. } => true,
-            // Constructors with value arguments are values
             ExprKind::Constructor { args, .. } => args.iter().all(Self::is_syntactic_value),
-            // Tuples of values are values
             ExprKind::Tuple(exprs) => exprs.iter().all(Self::is_syntactic_value),
-            // Lists of values are values
             ExprKind::List(exprs) => exprs.iter().all(Self::is_syntactic_value),
-            // Everything else (applications, channel ops, etc.) is not a value
+            // The parser produces App-spines for constructor applications
+            // (e.g. `Some 5` is `App(Constructor("Some", []), 5)`). Those are
+            // pure data and safe to generalize.
+            ExprKind::App { .. } => Self::is_constructor_app(expr),
+            ExprKind::Record { fields, .. } => {
+                fields.iter().all(|(_, v)| Self::is_syntactic_value(v))
+            }
+            _ => false,
+        }
+    }
+
+    /// Walk an `App` spine and report whether the head is a `Constructor` and
+    /// every argument along the way is itself a syntactic value.
+    fn is_constructor_app(expr: &Expr) -> bool {
+        match &expr.node {
+            ExprKind::Constructor { .. } => true,
+            ExprKind::App { func, arg } => {
+                Self::is_syntactic_value(arg) && Self::is_constructor_app(func)
+            }
             _ => false,
         }
     }

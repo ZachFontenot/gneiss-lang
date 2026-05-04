@@ -6,7 +6,7 @@
 //! - Wildcard and variable patterns
 //! - Constructor patterns with multiple fields
 
-use gneiss::test_support::{run_program_ok, typecheck_expr};
+use gneiss::test_support::{run_program_ok, typecheck_expr, typecheck_program};
 
 // ============================================================================
 // Deep Pattern Nesting
@@ -301,6 +301,45 @@ fn cons_let_pattern_preserves_polymorphism() {
     assert!(
         result.is_ok(),
         "cons let-pattern should keep `h` polymorphic across uses: {:?}",
+        result
+    );
+}
+
+#[test]
+fn constructor_app_is_a_value() {
+    // gneiss-lang-kgpj — constructor application (parsed as App-of-Constructor)
+    // should pass the value restriction so its type can be generalized.
+    // Combined with gneiss-lang-xvc this lets a destructured payload stay
+    // polymorphic.
+    let program = r#"
+let main () =
+    let Some f = Some (fun x -> x) in
+    print (f 1);
+    print (f true)
+"#;
+    let result = typecheck_program(program);
+    assert!(
+        result.is_ok(),
+        "constructor application with a polymorphic payload should typecheck: {:?}",
+        result
+    );
+}
+
+#[test]
+fn record_literal_is_a_value() {
+    // gneiss-lang-kgpj — record literals with value-only fields should pass
+    // the value restriction.
+    let program = r#"
+type Box a = { contents : a }
+let main () =
+    let Box { contents = f } = Box { contents = fun x -> x } in
+    print (f 1);
+    print (f true)
+"#;
+    let result = typecheck_program(program);
+    assert!(
+        result.is_ok(),
+        "record literal with a polymorphic field should typecheck: {:?}",
         result
     );
 }
