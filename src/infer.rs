@@ -43,6 +43,193 @@ fn substitute_generics(ty: &Type, args: &[Type]) -> Type {
     }
 }
 
+/// Collect the set of `Generic(id)` variables that appear in `ty`.
+fn collect_generic_ids(ty: &Type) -> HashSet<TypeVarId> {
+    let mut set = HashSet::new();
+    collect_generic_ids_into(ty, &mut set);
+    set
+}
+
+fn collect_generic_ids_into(ty: &Type, set: &mut HashSet<TypeVarId>) {
+    match ty {
+        Type::Generic(id) => {
+            set.insert(*id);
+        }
+        Type::Arrow { arg, ret } => {
+            collect_generic_ids_into(arg, set);
+            collect_generic_ids_into(ret, set);
+        }
+        Type::Tuple(ts) => ts.iter().for_each(|t| collect_generic_ids_into(t, set)),
+        Type::Constructor { args, .. } => {
+            args.iter().for_each(|t| collect_generic_ids_into(t, set))
+        }
+        Type::Channel(t) | Type::Fiber(t) | Type::Dict(t) => collect_generic_ids_into(t, set),
+        _ => {}
+    }
+}
+
+/// Renumber the `Generic(id)` vars in `ty` according to `remap`. Vars not in
+/// `remap` are left unchanged (caller must ensure all referenced ids are present).
+fn renumber_generics(ty: &Type, remap: &HashMap<TypeVarId, TypeVarId>) -> Type {
+    match ty {
+        Type::Generic(id) => match remap.get(id) {
+            Some(new_id) => Type::Generic(*new_id),
+            None => Type::Generic(*id),
+        },
+        Type::Arrow { arg, ret } => Type::Arrow {
+            arg: Rc::new(renumber_generics(arg, remap)),
+            ret: Rc::new(renumber_generics(ret, remap)),
+        },
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| renumber_generics(t, remap)).collect()),
+        Type::Channel(t) => Type::Channel(Rc::new(renumber_generics(t, remap))),
+        Type::Fiber(t) => Type::Fiber(Rc::new(renumber_generics(t, remap))),
+        Type::Dict(t) => Type::Dict(Rc::new(renumber_generics(t, remap))),
+        Type::Constructor { name, args } => Type::Constructor {
+            name: name.clone(),
+            args: args.iter().map(|t| renumber_generics(t, remap)).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Build a sub-scheme for one pattern leaf. `slot_ty` is the type that the leaf
+/// receives from the parent scheme's body; `parent_preds` are the parent's
+/// predicates; `slot_used` is the set of parent-generic ids that appear in
+/// `slot_ty`. The returned scheme densely renumbers generics to 0..n and keeps
+/// the parent predicates whose generic vars are a subset of `slot_used`.
+fn build_sub_scheme(
+    slot_ty: &Type,
+    parent_preds: &[Pred],
+    slot_used: &HashSet<TypeVarId>,
+) -> Scheme {
+    let mut sorted: Vec<TypeVarId> = slot_used.iter().copied().collect();
+    sorted.sort_unstable();
+    let remap: HashMap<TypeVarId, TypeVarId> = sorted
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, new as TypeVarId))
+        .collect();
+
+    let new_ty = renumber_generics(slot_ty, &remap);
+    let new_preds: Vec<Pred> = parent_preds
+        .iter()
+        .filter(|p| collect_generic_ids(&p.ty).is_subset(slot_used))
+        .map(|p| Pred {
+            trait_name: p.trait_name.clone(),
+            ty: renumber_generics(&p.ty, &remap),
+        })
+        .collect();
+
+    Scheme {
+        num_generics: remap.len() as u32,
+        predicates: new_preds,
+        ty: new_ty,
+    }
+}
+
+/// Walk `pattern` against `body` and append (name, slot_type) for each leaf
+/// `Var`. Returns `false` if the structural shape doesn't align (caller falls
+/// back) or if a `Lit` is encountered (lit patterns need unification, handled
+/// by the monomorphic path).
+fn collect_aligned_leaves_inner(
+    pattern: &Pattern,
+    body: &Type,
+    type_uf: &UnionFind,
+    type_ctx: &TypeContext,
+    leaves: &mut Vec<(String, Type)>,
+) -> bool {
+    let body = body.resolve(type_uf);
+    match (&pattern.node, &body) {
+        (PatternKind::Wildcard, _) => true,
+        (PatternKind::Var(name), _) => {
+            leaves.push((name.clone(), body.clone()));
+            true
+        }
+        (PatternKind::Lit(_), _) => false,
+        (PatternKind::Tuple(pats), Type::Tuple(elems)) if pats.len() == elems.len() => pats
+            .iter()
+            .zip(elems.iter())
+            .all(|(p, t)| collect_aligned_leaves_inner(p, t, type_uf, type_ctx, leaves)),
+        (PatternKind::List(pats), Type::Constructor { name, args })
+            if name == "List" && args.len() == 1 =>
+        {
+            pats.iter()
+                .all(|p| collect_aligned_leaves_inner(p, &args[0], type_uf, type_ctx, leaves))
+        }
+        (PatternKind::Cons { head, tail }, Type::Constructor { name, args })
+            if name == "List" && args.len() == 1 =>
+        {
+            collect_aligned_leaves_inner(head, &args[0], type_uf, type_ctx, leaves)
+                && collect_aligned_leaves_inner(tail, &body, type_uf, type_ctx, leaves)
+        }
+        (
+            PatternKind::Constructor {
+                name: ctor_name,
+                args: pat_args,
+            },
+            Type::Constructor {
+                name: body_name,
+                args: body_args,
+            },
+        ) => {
+            let info = match type_ctx.get_constructor(ctor_name) {
+                Some(i) => i,
+                None => return false,
+            };
+            if info.type_name != *body_name
+                || pat_args.len() != info.field_types.len()
+                || info.type_params as usize != body_args.len()
+            {
+                return false;
+            }
+            pat_args
+                .iter()
+                .zip(info.field_types.iter())
+                .all(|(p, field_ty)| {
+                    let actual_ty = substitute_generics(field_ty, body_args);
+                    collect_aligned_leaves_inner(p, &actual_ty, type_uf, type_ctx, leaves)
+                })
+        }
+        (
+            PatternKind::Record {
+                name: rec_name,
+                fields,
+            },
+            Type::Constructor {
+                name: body_name,
+                args: body_args,
+            },
+        ) => {
+            let info = match type_ctx.get_record(rec_name) {
+                Some(i) => i,
+                None => return false,
+            };
+            if info.type_name != *body_name || info.type_params as usize != body_args.len() {
+                return false;
+            }
+            for (field_name, sub_pat_opt) in fields {
+                let field_ty = match info.field_types.get(field_name.as_str()) {
+                    Some(t) => t,
+                    None => return false,
+                };
+                let actual_ty = substitute_generics(field_ty, body_args);
+                match sub_pat_opt {
+                    Some(sub_pat) => {
+                        if !collect_aligned_leaves_inner(
+                            sub_pat, &actual_ty, type_uf, type_ctx, leaves,
+                        ) {
+                            return false;
+                        }
+                    }
+                    None => leaves.push((field_name.clone(), actual_ty)),
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Context for where a unification error occurred
 #[derive(Debug, Clone)]
 pub enum UnifyContext {
@@ -1990,23 +2177,67 @@ impl Inferencer {
         }
     }
 
-    /// Bind pattern variables with a pre-computed scheme (for let-polymorphism)
+    /// Bind pattern variables with a pre-computed scheme (for let-polymorphism).
+    ///
+    /// For a simple `Var` pattern the scheme binds directly. For complex patterns
+    /// (tuple, list, cons, constructor, record) we walk the pattern in parallel
+    /// with `scheme.ty` and build a per-leaf sub-scheme so each name keeps the
+    /// polymorphism of its slot. Falls back to the monomorphic `instantiate +
+    /// bind_pattern` path when the scheme structure can't be aligned with the
+    /// pattern, or when a predicate would span multiple leaves.
     fn bind_pattern_scheme(
         &mut self,
         env: &mut TypeEnv,
         pattern: &Pattern,
         scheme: Scheme,
     ) -> Result<(), TypeError> {
-        match &pattern.node {
-            PatternKind::Var(name) => {
-                env.insert(name.clone(), scheme);
-                Ok(())
+        if let PatternKind::Var(name) = &pattern.node {
+            env.insert(name.clone(), scheme);
+            return Ok(());
+        }
+
+        if let Some(leaves) = self.collect_aligned_leaves(pattern, &scheme.ty) {
+            let leaf_used: Vec<HashSet<TypeVarId>> = leaves
+                .iter()
+                .map(|(_, ty)| collect_generic_ids(ty))
+                .collect();
+            let preds_split_cleanly = scheme.predicates.iter().all(|pred| {
+                let pg = collect_generic_ids(&pred.ty);
+                pg.is_empty() || leaf_used.iter().any(|s| pg.is_subset(s))
+            });
+            if preds_split_cleanly {
+                for ((name, slot_ty), used) in leaves.into_iter().zip(leaf_used.iter()) {
+                    let sub = build_sub_scheme(&slot_ty, &scheme.predicates, used);
+                    env.insert(name, sub);
+                }
+                return Ok(());
             }
-            // For complex patterns in let bindings, we just use monomorphic types
-            _ => {
-                let ty = self.instantiate(&scheme);
-                self.bind_pattern(env, pattern, &ty)
-            }
+        }
+
+        let ty = self.instantiate(&scheme);
+        self.bind_pattern(env, pattern, &ty)
+    }
+
+    /// Walk `pattern` against `body` and collect (name, slot_type) for each leaf
+    /// `Var`. Returns `None` if the pattern shape doesn't structurally align with
+    /// the body (so the caller can fall back), or if the pattern contains a
+    /// `Lit` (which needs unification rather than binding).
+    fn collect_aligned_leaves(
+        &self,
+        pattern: &Pattern,
+        body: &Type,
+    ) -> Option<Vec<(String, Type)>> {
+        let mut leaves = Vec::new();
+        if collect_aligned_leaves_inner(
+            pattern,
+            body,
+            &self.type_uf,
+            &self.type_ctx,
+            &mut leaves,
+        ) {
+            Some(leaves)
+        } else {
+            None
         }
     }
 

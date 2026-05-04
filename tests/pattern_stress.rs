@@ -6,7 +6,7 @@
 //! - Wildcard and variable patterns
 //! - Constructor patterns with multiple fields
 
-use gneiss::test_support::run_program_ok;
+use gneiss::test_support::{run_program_ok, typecheck_expr};
 
 // ============================================================================
 // Deep Pattern Nesting
@@ -248,6 +248,61 @@ let main () =
     a + b + c
 "#;
     run_program_ok(program);
+}
+
+// ============================================================================
+// Polymorphism through let-pattern bindings (gneiss-lang-xvc)
+// ============================================================================
+
+#[test]
+fn simple_let_var_polymorphism_baseline() {
+    // gneiss-lang-xvc — sanity check: simple variable bindings preserve polymorphism.
+    // If this fails the pipeline is broken in some unrelated way.
+    let result = typecheck_expr("let f = fun x -> x in (f 1, f true)");
+    assert!(
+        result.is_ok(),
+        "simple `let f = ...` should preserve polymorphism: {:?}",
+        result
+    );
+}
+
+#[test]
+fn tuple_let_pattern_preserves_polymorphism() {
+    // gneiss-lang-xvc
+    let result = typecheck_expr(
+        "let (f, g) = (fun x -> x, fun y -> y) in (f 1, f true)",
+    );
+    assert!(
+        result.is_ok(),
+        "tuple let-pattern should keep `f` polymorphic across uses: {:?}",
+        result
+    );
+}
+
+#[test]
+fn tuple_let_pattern_both_components_polymorphic() {
+    // gneiss-lang-xvc
+    let result = typecheck_expr(
+        "let (f, g) = (fun x -> x, fun y -> y) in (f 1, f true, g \"a\", g 0)",
+    );
+    assert!(
+        result.is_ok(),
+        "both components of a tuple let-pattern should be polymorphic: {:?}",
+        result
+    );
+}
+
+#[test]
+fn cons_let_pattern_preserves_polymorphism() {
+    // gneiss-lang-xvc
+    let result = typecheck_expr(
+        "let (h :: _) = [fun x -> x] in (h 1, h true)",
+    );
+    assert!(
+        result.is_ok(),
+        "cons let-pattern should keep `h` polymorphic across uses: {:?}",
+        result
+    );
 }
 
 // ============================================================================
