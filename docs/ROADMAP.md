@@ -1,26 +1,51 @@
 # Gneiss Development Roadmap
 
+*Updated 2026-06-10 — baseline reset after scrapping algebraic effects and the C backend.*
+
+## Where We Are
+
+The tree-walking CPS interpreter is the language. Commit `a6f33a4` removed
+algebraic effects, user-facing delimited continuations, and the C codegen
+pipeline after both failed to stabilize. The commits that followed hardened
+what remains: value restriction enforcement, per-binding predicate discharge,
+constructor pattern well-formedness, and Maranget exhaustiveness checking.
+The full test suite (~600 tests) is green. This is the baseline we grow from.
+
+**Strategy: harden the floor, then grow.** New semantics (effects, native
+compilation, mutable state) only return as fresh designs on top of a stable,
+well-tested core — see "Deliberately Not Doing" below and the "Don't propose"
+section of CLAUDE.md.
+
+---
+
 ## Completed Work
 
 ### Core Language ✓
 - Hindley-Milner type inference with let-polymorphism
 - ADTs (algebraic data types) with pattern matching
 - Local recursive functions (`let f x = ... f ... in body`)
-- Value restriction for sound polymorphism
+- Value restriction for sound polymorphism (incl. constructor/record values)
+- Pattern-match exhaustiveness checking (Maranget usefulness algorithm)
+- Typed AST elaboration with resolved types and dictionary parameters
 
 ### Fiber-Based Concurrency ✓
 - **Fiber Effects**: All blocking operations produce `FiberEffect` values
+  (internal scheduler mechanism — unrelated to the scrapped user-facing effects)
 - **Unified Scheduler**: Handles Fork, Join, Yield, Send, Recv, Select uniformly
 - **Fiber API**: `Fiber.spawn`, `Fiber.join`, `Fiber.yield`
 - **Synchronous Channels**: Rendezvous semantics with typed communication
 - **Select**: Multi-arm select over multiple channels
 - **Deadlock Detection**: Reports when all fibers are blocked
+- **Tail Calls**: The CPS interpreter is inherently tail-call optimized;
+  verified by `tests/tail_call_optimization.rs` (5M-iteration loops in
+  constant space)
 
 ### Typeclasses ✓
 - **Trait Declarations**: `trait Show a = val show : a -> String end`
 - **Instance Declarations**: Basic and constrained instances
 - **Dictionary Passing**: Runtime method dispatch
 - **Instance Resolution**: Constraint propagation and overlap detection
+- **Predicate Discharge**: Checked after each top-level binding
 
 ### Module System ✓
 - **Module Declarations**: `module List`
@@ -34,231 +59,87 @@
 - **Record Literals**: `Person { name = "Alice", age = 30 }`
 - **Field Access**: `person.name`, `person.age`
 - **Record Update**: `{ person with age = 31 }`
-- **Structural Typing**: Records unify based on field types
 
 ### I/O and Async ✓
 - **File Operations**: `file_open`, `file_read_line`, `file_read_all`, `file_write`, `file_close`
 - **TCP Sockets**: `tcp_connect`, `tcp_listen`, `tcp_accept`, `tcp_send`, `tcp_recv`, `tcp_close`
 - **Bytes Type**: Binary data type for protocol parsing
-- **IoError Type**: Error handling for I/O operations
-- **Async Integration**: Non-blocking I/O with mio event loop
-- **Handle Registry**: Safe resource management across Rust/Gneiss boundary
+- **Async Integration**: Non-blocking I/O with mio event loop + blocking pool
+- **Handle Registry**: Resource management across the Rust/Gneiss boundary
 
-### Standard Library (Partial) ✓
-- **List Operations**: `List.map`, `List.filter`, `List.fold_left`, `List.length`, `List.concat`, etc.
-- **String Operations**: `String.split`, `String.concat`, `string_to_chars`, `chars_to_string`, etc.
-- **Option/Result**: Basic pattern matching support
-
----
-
-## Dogfooding Goal: Web Server
-
-**Target:** Build a simple but functional web server in Gneiss.
-
-This drives language development by identifying what's actually needed for real programs.
-
-```gneiss
--- Target API
-let handler request =
-    match request.path with
-    | "/" -> Response.html 200 "<h1>Hello</h1>"
-    | "/api/users" -> Response.json 200 (User.all () |> Json.encode)
-    | _ -> Response.text 404 "Not found"
-
-let main () =
-    Server.listen 8080 handler
-```
-
-### Required Features (Priority Order)
-
-| Priority | Feature | Status |
-|----------|---------|--------|
-| P1 | Module System | ✓ Complete |
-| P1 | Record Types | ✓ Complete |
-| P1 | Standard Library | Partial - need Map/Dict |
-| P2 | I/O Primitives | ✓ Complete |
-| P2 | Bytes Type | ✓ Complete |
-| P2 | Async I/O | ✓ Complete |
-| P3 | Map/Dict Type | **Next** - key-value storage for headers, routing |
-| P3 | JSON | Needed for API responses |
-| P3 | HTTP Parsing | Request/response parsing over TCP |
-| P4 | String Interpolation | Nice-to-have for response generation |
-
-### Type System Opportunities
-
-- **Resource types** - Ensure handles are closed (linear/affine)
-- **Validated strings** - URLs, HTML-escaped text
-- **Protocol state machines** - Type-safe HTTP parsing
+### Web Server Dogfooding ✓
+The original dogfooding goal — a functional web server in Gneiss — was reached
+(bd epic `gneiss-lang-aeb`): `examples/hello_server.gn`, `routing_server.gn`,
+`json_api.gn`, `rest_api.gn`, backed by `stdlib/{http,json,router,server,
+request,response,html}.gn`. It surfaced the resource/concurrency questions
+that now drive the next design phase.
 
 ---
 
-## Next Up: Map/Dict Type
+## Near Term: Harden the Baseline
 
-**Goal:** Key-value data structure for headers, routing tables, caches.
+Make "baseline" mean a defended core, not a snapshot that happened to be green.
 
-```gneiss
--- Create and use maps
-let headers = Map.empty ()
-    |> Map.insert "Content-Type" "text/html"
-    |> Map.insert "X-Request-Id" "abc123"
+1. **Fix prelude type shadowing** (`gneiss-lang-1up6`) — user `type`
+   declarations can silently replace prelude types and break prelude
+   instances. Likely fix: forbid redefining an in-scope type name.
+2. **Fix record field access in mutual recursion** (`gneiss-lang-51e`) —
+   needs deferred `HasField` constraints instead of erroring on unresolved
+   type variables. Root-cause analysis is in the issue.
+3. **Examples smoke test** — run every `examples/*.gn` in CI so examples and
+   prelude can't silently rot.
+4. **Property tests** already filed: exhaustiveness (`3ik`), generalization
+   levels (`0e9`), channel type safety (`g5a`), unification idempotence (`4ya`).
+5. **Runtime error spans** (`vhf`) — EvalError should point at source.
 
-let content_type = Map.get "Content-Type" headers  -- Some "text/html"
-
--- Use in HTTP handling
-type Request = {
-    method : String,
-    path : String,
-    headers : Map String String,
-    body : String
-}
-```
-
-### Implementation Options
-1. **Hash Map** - O(1) average, needs hash function
-2. **Tree Map** - O(log n), needs Ord typeclass
-3. **Association List** - Simple, O(n) lookup
-
-### Tasks
-- [ ] Decide on implementation (tree map for now?)
-- [ ] Add Map type to type system
-- [ ] Implement core operations: empty, insert, get, remove, contains
-- [ ] Add iteration: keys, values, entries, fold
-- [ ] Consider Ord typeclass for tree map ordering
+Rejection tests (`tests/type_rejection.rs`) remain the canonical soundness
+canaries; every fix above lands with them. See `docs/TESTING.md`.
 
 ---
 
-## Then: JSON Support
+## Next Design Conversation: Concurrency & Resources
 
-**Goal:** Parse and serialize JSON for API data interchange.
+Tracked as epic `gneiss-lang-0ahm`. **No design is committed yet.** The open
+questions, in rough order of pain:
 
-```gneiss
--- Parse JSON
-let data = Json.parse "{\"name\": \"Alice\", \"age\": 30}"
-
--- Access fields
-match data with
-| JsonObject obj -> Map.get "name" obj
-| _ -> None
-
--- Serialize
-let response = Json.object [
-    ("status", Json.string "ok"),
-    ("count", Json.int 42)
-]
-print (Json.encode response)  -- {"status":"ok","count":42}
-```
-
-### Tasks
-- [ ] Define Json ADT (JsonNull, JsonBool, JsonInt, JsonFloat, JsonString, JsonArray, JsonObject)
-- [ ] Implement JSON parser
-- [ ] Implement JSON encoder
-- [ ] Consider typeclass-based encoding (ToJson, FromJson)
+1. **Resource lifecycle** — file/socket handles can leak; no `with_resource`
+   or close-on-scope-exit story. Related: linear/affine resource types (`s5k`).
+2. **Fiber lifetime structure** — Go-style (main controls everything) vs
+   Erlang-style (independent processes). Research notes in `b2n`.
+3. **Channel backpressure** — pure rendezvous channels are brittle under
+   load; consider optional bounded buffers.
+4. **HTTP server drops connections at 200+ concurrent** (`wwk`) — partly a
+   symptom of 1 and 3; scheduler itself was ruled out.
 
 ---
 
-## Then: HTTP Protocol
+## Ongoing Tracks
 
-**Goal:** Parse HTTP requests and generate responses over TCP.
-
-```gneiss
--- Low-level: parse raw HTTP
-let parse_request raw_bytes =
-    let lines = String.split "\r\n" raw_bytes in
-    let request_line = List.head lines in
-    -- Parse "GET /path HTTP/1.1"
-    ...
-
--- High-level: server abstraction
-let handler request =
-    Response.html 200 "<h1>Hello</h1>"
-
-let main () =
-    Server.listen 8080 handler
-```
-
-### Tasks
-- [ ] HTTP request parser (method, path, headers, body)
-- [ ] HTTP response builder
-- [ ] Content-Type handling
-- [ ] Chunked transfer encoding (optional)
-- [ ] High-level Server.listen abstraction
+- **REPL/script mode split** (epic `46s6`) and REPL usability (epic `zex`):
+  rustyline-style editing, history, multi-line input, `:load`, `:env`.
+- **Stdlib expansion** (epic `nrnw`): Map/Set/Queue, string ops, path/process,
+  time. Expand incrementally as real programs demand.
+- **Developer tooling** (epic `6ynh`): LSP, formatter, linter — deferred until
+  the core is stable.
 
 ---
 
-## Remaining Standard Library Work
+## Deliberately Not Doing
 
-### Core Data Structures
-- Map/Dict (priority - see above)
-- Set (can build on Map)
+Scrapped in `a6f33a4` (2026-04); none return without a fresh design document
+against a frozen, well-tested semantics:
 
-### Bytes Operations
-- Slicing and indexing
-- Parsing combinators for binary protocols
-- Conversion to/from String (UTF-8)
+- **Algebraic effects** (`effect`/`perform`/`handle`, effect rows, handler stacks)
+- **User-facing shift/reset** and delimited continuations
+- **C code generation** (mono → ANF → CPS → closure-conv → flat IR → C);
+  the Perceus epic `gsvz` is closed as deferred indefinitely
+- **Mutable references** (`ref`, `!r`, `r := v`) — motivation was effect
+  handler state threading; closed with the effects scrap (`zh5`)
+- **Row polymorphism**
 
-### Additional String Operations
-- `String.trim`, `String.replace`
-- `String.starts_with`, `String.ends_with`
-- Format/interpolation (P4)
-
----
-
-## Performance (When Needed)
-
-### Bytecode Compiler
-- Design instruction set
-- Compile AST → bytecode
-- Stack-based VM
-
-### Tail Call Optimization
-- Detect tail position
-- Critical for recursive fiber loops
-
-### Scheduler Improvements
-- Work-stealing (if multi-threaded)
-- Fiber priorities
-- Fairness guarantees
-
----
-
-## Long-Term Goals
-
-### REPL Improvements
-- History and line editing (rustyline or similar)
-- Multi-line input mode
-- `:load` command to load .gn files
-- `:type` for expression inspection
-- `:env` to show current bindings
-- Hot reloading of modules
-
-### Full Compiler
-- Move from tree-walking interpreter to compiled output
-- Bytecode VM as intermediate step
-- Native compilation via Cranelift or LLVM
-- WebAssembly target for browser/edge deployment
-
-### Advanced Type System
-- **Resource types** - Linear/affine types for safe resource management
-- **Refinement types** - Dependent-ish types for tighter constraints
-- **Row polymorphism** - Extensible records without boilerplate
-
-### Perceus Reference Counting (Long Shot)
-Implement the Perceus algorithm for functional-but-in-place (FBIP) semantics:
-- Precise reference counting with reuse analysis
-- In-place mutation of uniquely-owned data
-- No GC pauses, predictable performance
-- Enables functional style with imperative efficiency
-
-This would make Gneiss competitive for systems programming while keeping the pure functional model.
-
----
-
-## Compilation Targets
-
-| Target | Pros | Cons |
-|--------|------|------|
-| Native (Cranelift) | Best performance, full control | Must build GC/RC, scheduler |
-| WebAssembly | Browser deployment, growing ecosystem | Concurrency model challenges |
+If/when native compilation is revisited, the prerequisite is exactly what the
+near-term work produces: stable semantics pinned by property and rejection
+tests.
 
 ---
 
@@ -274,6 +155,8 @@ This would make Gneiss competitive for systems programming while keeping the pur
 | Scheduler | Single-threaded cooperative | Simple for v0.1, parallelism later |
 | Syntax | OCaml-inspired | Familiar to ML users |
 | Development | Web server dogfooding | Drives real feature needs |
+| Effects & C backend | Scrapped (a6f33a4, 2026-04) | Semantics never stabilized; interpreter-first instead |
+| Baseline reset | Merged to main (2026-06) | Harden the floor before growing the language |
 
 ---
 
@@ -282,7 +165,6 @@ This would make Gneiss competitive for systems programming while keeping the pur
 **Type Systems:**
 - Pierce - "Types and Programming Languages"
 - "Typing Haskell in Haskell" - typeclass implementation
-- Leijen - "Extensible Records with Scoped Labels"
 
 **Implementation:**
 - Nystrom - "Crafting Interpreters"

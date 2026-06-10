@@ -94,7 +94,7 @@ These were intentionally scrapped (commit a6f33a4) and won't come back without a
 - Algebraic effects (`effect`/`perform`/`handle`/`return` keywords, `Row`, `EffectEnv`, handler stacks)
 - Shift/reset and delimited continuations (user-facing)
 - C code generation (the mono → ANF → CPS → closure-conv → flat IR → C pipeline)
-- Mutable references (`ref`, `!r`, `r := v`) — never implemented; tracked in bd as `gneiss-lang-zh5` but the direction is unclear
+- Mutable references (`ref`, `!r`, `r := v`) — never implemented; bd issue `gneiss-lang-zh5` closed with the effects scrap since its motivation was handler state threading
 - Row polymorphism
 
 ## Testing
