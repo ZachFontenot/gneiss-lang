@@ -43,3 +43,6 @@ tmp/
 
 # Issue tracking notes (tracked in beads, not markdown)
 issues/
+
+# Claude Code agent worktrees
+.claude/worktrees/
